@@ -1,5 +1,24 @@
 {
+  "name": "sc-erp",
+  "version": "1.0.0",
+  "description": "바른컴퍼니 재고운영 시스템",
+  "main": "barunson-database-reference/user/serve_inv2.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node barunson-database-reference/user/serve_inv2.js",
+    "check-db": "node check_db.js",
+    "create-doc": "node create_plan_doc.js"
+  },
   "dependencies": {
-    "docx": "^9.6.1"
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.8.0",
+    "docx": "^9.6.1",
+    "googleapis": "^171.4.0",
+    "jsonwebtoken": "^9.0.3",
+    "mssql": "^12.2.0",
+    "nodemailer": "^8.0.2",
+    "puppeteer": "^24.40.0",
+    "puppeteer-core": "^24.40.0",
+    "xlsx": "^0.18.5"
   }
 }
