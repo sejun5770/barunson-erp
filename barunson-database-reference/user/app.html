@@ -1344,6 +1344,7 @@ var _megaData = {
       {icon:'💰',bg:'#fff7ed',fg:'#c2410c',name:'후공정 단가',desc:'단가 관리',page:'post-process'},
       {icon:'🔍',bg:'#fef2f2',fg:'#ef4444',name:'불량관리',desc:'접수 + 대응',page:'defects',badgeId:'qmDefects'},
       {icon:'📊',bg:'#eff6ff',fg:'#2563eb',name:'대시보드',desc:'현황 집계 + 통계',page:'analytics'},
+      {icon:'📄',bg:'#ecfdf5',fg:'#047857',name:'보고서',desc:'단가 협상 + 분석 보고',page:'report'},
       {icon:'⚙',bg:'#f1f5f9',fg:'#64748b',name:'설정',desc:'시스템 설정',page:'settings'}
     ]
   }
@@ -4306,6 +4307,11 @@ function closeMegaMenu() {
   </div>
 </div>
 
+<!-- ========== REPORT (보고서) PAGE ========== -->
+<div class="page" id="page-report">
+  <div id="reportContent" style="max-width:900px;margin:0 auto"></div>
+</div>
+
 <!-- ========== CLOSING (마감현황) PAGE ========== -->
 <div class="page" id="page-closing">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
@@ -5466,6 +5472,7 @@ const pageTitles={
   'production-req':'생산요청',
   'production-stock':'생산재고',
   'closing':'마감현황',
+  'report':'보고서',
   'settings':'설정',
   'user-mgmt':'사용자관리'
 };
@@ -5491,7 +5498,7 @@ function showPage(page, opts){
     'production-req':'production','production-stock':'production','mrp':'production',
     'tasks':'work','notes':'work',
     'invoices':'mgmt','mat-purchase':'mgmt','vendors':'mgmt','product-mgmt':'mgmt',
-    'post-process':'mgmt','defects':'mgmt','settings':'mgmt','user-mgmt':'mgmt'
+    'post-process':'mgmt','defects':'mgmt','report':'mgmt','settings':'mgmt','user-mgmt':'mgmt'
   };
   var activeCat = pageCatMap[page] || '';
   document.querySelectorAll('.topbar-tab').forEach(function(t){
@@ -5537,6 +5544,7 @@ function showPage(page, opts){
   if(page==='user-mgmt') loadUserMgmt();
   if(page==='tasks') loadTasks();
   if(page==='production-stock') loadProductionStock();
+  if(page==='report') loadReport();
   if(page==='closing') {
     var cyr = document.getElementById('closingYear');
     var cmo = document.getElementById('closingMonth');
@@ -15290,6 +15298,176 @@ function renderClosingSubcontract(yr, mo) {
 }
 
 
+</script>
+
+<script>
+// ===== 보고서 (Report) =====
+async function loadReport() {
+  var c = document.getElementById('reportContent');
+  if (!c) return;
+  c.innerHTML = '<div style="text-align:center;padding:40px;color:#94a3b8">⏳ 보고서 데이터 로딩중...</div>';
+
+  try {
+    // 1) 원재료 5사 25년 매입 데이터 (_closingData에서)
+    var rawItems = window._closingData ? _closingData.rawMaterial.items : [];
+
+    // 2) 한솔PNS 킨니 단가 데이터 (API)
+    var kinniRes = await fetch('/api/report-vendor-price?vendor_code=2015259&keyword=' + encodeURIComponent('킨니')).then(function(r){return r.json();}).catch(function(){return null;});
+    var kinniItems = (kinniRes && (kinniRes.data || kinniRes).items) || [];
+
+    var html = '';
+
+    // === 보고서 헤더 ===
+    html += '<div style="border-bottom:3px solid #1e293b;padding-bottom:16px;margin-bottom:24px">';
+    html += '<div style="font-size:11px;color:#64748b;margin-bottom:4px">보고서 | ' + new Date().toLocaleDateString('ko-KR') + '</div>';
+    html += '<h1 style="font-size:24px;font-weight:800;color:#f1f5f9;margin:0 0 8px">대한통상 단가 협상의 건</h1>';
+    html += '<div style="font-size:13px;color:#94a3b8">원재료(용지) 매입 현황 분석 및 킨니 용지 단가 비교</div>';
+    html += '</div>';
+
+    // === 1. 원재료 5사 25년 월별 매입현황 ===
+    html += '<h2 style="font-size:17px;font-weight:700;color:#f1f5f9;margin:24px 0 12px;border-left:4px solid #3b82f6;padding-left:12px">1. 원재료 업체별 2025년 매입현황</h2>';
+    html += '<div style="font-size:12px;color:#94a3b8;margin-bottom:8px">단위: 원(₩) | XERP 발주서(PO) 기준</div>';
+
+    // 테이블
+    html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap">';
+    html += '<thead><tr style="border-bottom:2px solid #475569">';
+    html += '<th style="padding:6px 8px;text-align:left;color:#e2e8f0;font-weight:700">거래처</th>';
+    var months = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
+    for (var m = 0; m < 12; m++) html += '<th style="padding:6px 4px;text-align:right;color:#e2e8f0;font-weight:600">' + months[m] + '</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#fbbf24;font-weight:700;border-left:2px solid #475569">누계</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#fbbf24;font-weight:700">비율</th>';
+    html += '</tr></thead><tbody>';
+
+    var grandTotal = 0;
+    var vendorTotals = [];
+    rawItems.forEach(function(v) {
+      var row25 = v.row2025 || new Array(12).fill(0);
+      var total = row25.reduce(function(a,b){return a+b;}, 0);
+      grandTotal += total;
+      vendorTotals.push({ name: v.name, total: total, row: row25 });
+    });
+
+    vendorTotals.forEach(function(v) {
+      var pct = grandTotal > 0 ? (v.total / grandTotal * 100).toFixed(1) : '0';
+      html += '<tr style="border-bottom:1px solid #334155">';
+      html += '<td style="padding:5px 8px;color:#f1f5f9;font-weight:600">' + v.name + '</td>';
+      for (var m = 0; m < 12; m++) {
+        html += '<td style="padding:5px 4px;text-align:right;color:#e2e8f0">' + (v.row[m] ? '₩' + v.row[m].toLocaleString() : '-') + '</td>';
+      }
+      html += '<td style="padding:5px 8px;text-align:right;color:#f1f5f9;font-weight:700;border-left:2px solid #475569">₩' + v.total.toLocaleString() + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#fbbf24;font-weight:700">' + pct + '%</td>';
+      html += '</tr>';
+    });
+
+    // 합계
+    html += '<tr style="border-top:2px solid #475569;font-weight:700">';
+    html += '<td style="padding:6px 8px;color:#f1f5f9">합계</td>';
+    var monthlyGrand = new Array(12).fill(0);
+    vendorTotals.forEach(function(v) { for (var m = 0; m < 12; m++) monthlyGrand[m] += v.row[m]; });
+    for (var m = 0; m < 12; m++) html += '<td style="padding:6px 4px;text-align:right;color:#f1f5f9">' + (monthlyGrand[m] ? '₩' + monthlyGrand[m].toLocaleString() : '-') + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#fbbf24;border-left:2px solid #475569">₩' + grandTotal.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#fbbf24">100%</td>';
+    html += '</tr></tbody></table></div>';
+
+    // 비율 요약 바
+    html += '<div style="display:flex;gap:8px;margin:12px 0 24px;flex-wrap:wrap">';
+    var colors = ['#3b82f6','#ef4444','#f59e0b','#10b981','#8b5cf6'];
+    vendorTotals.forEach(function(v, idx) {
+      var pct = grandTotal > 0 ? (v.total / grandTotal * 100).toFixed(1) : '0';
+      html += '<div style="flex:1;min-width:120px;text-align:center;padding:10px;border-radius:8px;border:1px solid #334155">';
+      html += '<div style="font-size:11px;color:#94a3b8">' + v.name + '</div>';
+      html += '<div style="font-size:20px;font-weight:800;color:' + colors[idx % 5] + '">' + pct + '%</div>';
+      html += '<div style="font-size:11px;color:#64748b">₩' + (v.total / 100000000).toFixed(1) + '억</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+
+    // === 2. 대한통상 단가 협상 — 킨니 용지 단가 비교 ===
+    html += '<h2 style="font-size:17px;font-weight:700;color:#f1f5f9;margin:24px 0 12px;border-left:4px solid #ef4444;padding-left:12px">2. 킨니 용지 단가 비교 (2025년 vs 2026년)</h2>';
+    html += '<div style="font-size:12px;color:#94a3b8;margin-bottom:4px">현재 한솔PNS에서 구매중인 킨니 용지의 단가 변동 분석</div>';
+    html += '<div style="font-size:12px;color:#64748b;margin-bottom:12px">대한통상으로 공급처 변경 시 단가 협상 기초 자료</div>';
+
+    // 킨니 단가 테이블
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+    html += '<thead><tr style="border-bottom:2px solid #475569">';
+    html += '<th style="padding:6px 8px;text-align:left;color:#e2e8f0">품목코드</th>';
+    html += '<th style="padding:6px 8px;text-align:left;color:#e2e8f0">품목명</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#e2e8f0">25년 수량</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#e2e8f0">25년 금액</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#3b82f6;font-weight:700">25년 단가</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#e2e8f0">26년 수량</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#ef4444;font-weight:700">26년 단가</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#e2e8f0">변동률</th>';
+    html += '</tr></thead><tbody>';
+
+    var totalKinni25Amt = 0, totalKinni25Qty = 0, totalKinni26Amt = 0, totalKinni26Qty = 0;
+    kinniItems.forEach(function(it) {
+      var y25 = it.years['2025'] || {};
+      var y26 = it.years['2026'] || {};
+      var p25 = y25.avg_price || 0;
+      var p26 = y26.avg_price || 0;
+      var q25 = y25.total_qty || 0;
+      var q26 = y26.total_qty || 0;
+      var a25 = y25.total_amt || 0;
+      var a26 = y26.total_amt || 0;
+      if (a25 === 0 && a26 === 0) return; // 실적 없으면 스킵
+
+      totalKinni25Amt += a25; totalKinni25Qty += q25;
+      totalKinni26Amt += a26; totalKinni26Qty += q26;
+
+      var diffPct = (p25 && p26) ? ((p26 - p25) / p25 * 100).toFixed(1) : '-';
+      var diffColor = diffPct === '-' ? '#64748b' : (parseFloat(diffPct) > 0 ? '#ef4444' : '#4ade80');
+      var diffStr = diffPct === '-' ? '-' : (parseFloat(diffPct) > 0 ? '+' : '') + diffPct + '%';
+
+      html += '<tr style="border-bottom:1px solid #334155">';
+      html += '<td style="padding:5px 8px;color:#f1f5f9;font-weight:600">' + it.code + '</td>';
+      html += '<td style="padding:5px 8px;color:#cbd5e1">' + (it.name || it.spec || '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#e2e8f0">' + (q25 ? q25.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#e2e8f0">' + (a25 ? '₩' + a25.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#3b82f6;font-weight:700">' + (p25 ? '₩' + p25.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#e2e8f0">' + (q26 ? q26.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#ef4444;font-weight:700">' + (p26 ? '₩' + p26.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:' + diffColor + ';font-weight:700">' + diffStr + '</td>';
+      html += '</tr>';
+    });
+
+    // 킨니 합계
+    var avgP25 = totalKinni25Qty > 0 ? Math.round(totalKinni25Amt / totalKinni25Qty) : 0;
+    var avgP26 = totalKinni26Qty > 0 ? Math.round(totalKinni26Amt / totalKinni26Qty) : 0;
+    var avgDiff = (avgP25 && avgP26) ? ((avgP26 - avgP25) / avgP25 * 100).toFixed(1) : '-';
+    html += '<tr style="border-top:2px solid #475569;font-weight:700">';
+    html += '<td style="padding:6px 8px;color:#f1f5f9" colspan="2">킨니 합계</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#f1f5f9">' + totalKinni25Qty.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#f1f5f9">₩' + totalKinni25Amt.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#3b82f6">₩' + avgP25.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#f1f5f9">' + totalKinni26Qty.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#ef4444">₩' + avgP26.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:' + (avgDiff !== '-' && parseFloat(avgDiff) > 0 ? '#ef4444' : '#4ade80') + '">' + (avgDiff === '-' ? '-' : (parseFloat(avgDiff) > 0 ? '+' : '') + avgDiff + '%') + '</td>';
+    html += '</tr></tbody></table>';
+
+    // 핵심 요약
+    html += '<div style="margin-top:20px;padding:16px;border:1px solid #334155;border-radius:8px">';
+    html += '<h3 style="font-size:14px;font-weight:700;color:#f1f5f9;margin:0 0 8px">핵심 요약</h3>';
+    html += '<ul style="margin:0;padding:0 0 0 20px;font-size:13px;color:#cbd5e1;line-height:2">';
+    html += '<li>킨니 용지 2025년 총 매입액: <b style="color:#f1f5f9">₩' + totalKinni25Amt.toLocaleString() + '</b> (' + totalKinni25Qty.toLocaleString() + ' 연)</li>';
+    html += '<li>25년 평균 단가: <b style="color:#3b82f6">₩' + avgP25.toLocaleString() + '</b>/연 → 26년 평균: <b style="color:#ef4444">₩' + avgP26.toLocaleString() + '</b>/연';
+    if (avgDiff !== '-') html += ' (<span style="color:' + (parseFloat(avgDiff) > 0 ? '#ef4444' : '#4ade80') + '">' + (parseFloat(avgDiff) > 0 ? '+' : '') + avgDiff + '%</span>)';
+    html += '</li>';
+
+    // 원재료 내 킨니 비율
+    var hansolTotal25 = 0;
+    rawItems.forEach(function(v) { if(v.name === '한솔PNS') hansolTotal25 = (v.row2025||[]).reduce(function(a,b){return a+b;},0); });
+    var kinniPctOfHansol = hansolTotal25 > 0 ? (totalKinni25Amt / hansolTotal25 * 100).toFixed(1) : '0';
+    var kinniPctOfTotal = grandTotal > 0 ? (totalKinni25Amt / grandTotal * 100).toFixed(1) : '0';
+    html += '<li>킨니가 한솔PNS 매입의 <b style="color:#fbbf24">' + kinniPctOfHansol + '%</b>, 전체 원재료의 <b style="color:#fbbf24">' + kinniPctOfTotal + '%</b> 차지</li>';
+    html += '<li>대한통상 협상 시 <b style="color:#f1f5f9">25년 한솔 단가 대비 동등 이하</b> 확보가 목표</li>';
+    html += '</ul></div>';
+
+    c.innerHTML = html;
+  } catch(e) {
+    c.innerHTML = '<div style="text-align:center;padding:40px;color:#ef4444">오류: ' + e.message + '</div>';
+  }
+}
 </script>
 </body>
 </html>

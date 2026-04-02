@@ -5371,6 +5371,100 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // GET /api/report-vendor-price?vendor_code=2100013&keyword=킨니 — 거래처 품목별 단가 이력 (보고서용)
+  if (pathname === '/api/report-vendor-price' && method === 'GET') {
+    if (!await ensureXerpPool()) { fail(res, 503, 'XERP 미연결'); return; }
+    try {
+      const vendorCode = parsed.searchParams.get('vendor_code') || '';
+      const keyword = parsed.searchParams.get('keyword') || '';
+
+      // product_info.json에서 키워드 매칭 원자재코드 추출
+      const pi = getProductInfo();
+      const matchCodes = new Set();
+      if (pi && keyword) {
+        for (const [, info] of Object.entries(pi)) {
+          const matName = (info['원재료용지명'] || info['원재료명'] || '').trim();
+          const matCode = (info['원자재코드'] || '').trim();
+          if (matCode && matName.includes(keyword)) matchCodes.add(matCode);
+        }
+      }
+
+      const req = xerpPool.request();
+      req.input('vendorCode', sql.NChar(16), vendorCode);
+
+      // 2024~2026 전체 발주 내역 (단가 포함)
+      const result = await req.query(`
+        SELECT RTRIM(i.ItemCode) AS item_code,
+               MAX(RTRIM(i.ItemSpec)) AS item_spec,
+               LEFT(h.OrderDate,4) AS yr,
+               SUBSTRING(h.OrderDate,5,2) AS mo,
+               SUM(i.OrderAmnt) AS amt,
+               SUM(i.OrderQty) AS qty
+        FROM poOrderHeader h WITH (NOLOCK)
+        JOIN poOrderItem i WITH (NOLOCK) ON h.SiteCode=i.SiteCode AND h.OrderNo=i.OrderNo
+        WHERE h.SiteCode = 'BK10'
+          AND h.CsCode = @vendorCode
+          AND h.OrderDate >= '20240101' AND h.OrderDate <= '20261231'
+        GROUP BY RTRIM(i.ItemCode), LEFT(h.OrderDate,4), SUBSTRING(h.OrderDate,5,2)
+        ORDER BY RTRIM(i.ItemCode), LEFT(h.OrderDate,4), SUBSTRING(h.OrderDate,5,2)
+      `);
+
+      // 품목명 매핑
+      const nameMap = {};
+      if (pi) {
+        for (const [, info] of Object.entries(pi)) {
+          const mc = (info['원자재코드'] || '').trim();
+          const mn = (info['원재료용지명'] || info['원재료명'] || '').trim();
+          if (mc && mn && !nameMap[mc]) nameMap[mc] = mn;
+        }
+      }
+
+      // 품목별 집계
+      const items = {};
+      for (const r of result.recordset) {
+        const code = (r.item_code || '').trim();
+        const yr = (r.yr || '').trim();
+        const mo = parseInt(r.mo) - 1;
+        if (!items[code]) items[code] = { code, name: nameMap[code] || '', spec: (r.item_spec || '').trim(), years: {} };
+        if (!items[code].years[yr]) items[code].years[yr] = { monthly_amt: new Array(12).fill(0), monthly_qty: new Array(12).fill(0) };
+        items[code].years[yr].monthly_amt[mo] += Math.round(r.amt || 0);
+        items[code].years[yr].monthly_qty[mo] += Math.round(r.qty || 0);
+      }
+
+      // 키워드 필터링
+      let filtered = Object.values(items);
+      if (keyword && matchCodes.size > 0) {
+        filtered = filtered.filter(it => matchCodes.has(it.code) || it.name.includes(keyword) || it.spec.includes(keyword));
+      }
+
+      // 단가 계산 (월별 금액/수량)
+      const rows = filtered.map(it => {
+        const result = { code: it.code, name: it.name, spec: it.spec, years: {} };
+        for (const [yr, data] of Object.entries(it.years)) {
+          const totalAmt = data.monthly_amt.reduce((a,b) => a+b, 0);
+          const totalQty = data.monthly_qty.reduce((a,b) => a+b, 0);
+          const avgPrice = totalQty > 0 ? Math.round(totalAmt / totalQty) : 0;
+          // 월별 단가
+          const monthlyPrice = data.monthly_amt.map((a, i) => {
+            const q = data.monthly_qty[i];
+            return q > 0 ? Math.round(a / q) : 0;
+          });
+          result.years[yr] = { monthly_amt: data.monthly_amt, monthly_qty: data.monthly_qty, monthly_price: monthlyPrice, total_amt: totalAmt, total_qty: totalQty, avg_price: avgPrice };
+        }
+        return result;
+      });
+
+      // 금액순 정렬 (25년 기준)
+      rows.sort((a, b) => ((b.years['2025'] || {}).total_amt || 0) - ((a.years['2025'] || {}).total_amt || 0));
+
+      ok(res, { vendor_code: vendorCode, keyword, match_codes: [...matchCodes], items: rows });
+    } catch (e) {
+      console.error('report-vendor-price 오류:', e.message);
+      fail(res, 500, e.message);
+    }
+    return;
+  }
+
   // GET /api/closing-vendor-items?vendor_code=2015259&year=2026&month=2 — 거래처별 품목 상세
   if (pathname === '/api/closing-vendor-items' && method === 'GET') {
     if (!await ensureXerpPool()) { fail(res, 503, 'XERP 미연결'); return; }
