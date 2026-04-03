@@ -1432,6 +1432,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS note_comments (
 )`);
 db.exec("CREATE INDEX IF NOT EXISTS idx_nc_note ON note_comments(note_id)");
 
+db.exec(`CREATE TABLE IF NOT EXISTS reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  subtitle TEXT DEFAULT '',
+  report_type TEXT DEFAULT 'general',
+  content TEXT DEFAULT '{}',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+)`);
+
 // ── 워크플로우 템플릿 (하드코딩, DB 필요 없음) ──
 const TASK_TEMPLATES = {
   'cn-order': {
@@ -5371,7 +5381,114 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // GET /api/report-vendor-price?vendor_code=2100013&keyword=킨니 — 거래처 품목별 단가 이력 (보고서용)
+  // GET /api/report-receiving?year=2025 — 수불부 원재료 거래처별 품목 매입
+  // mode=columns: 테이블 컬럼 확인용
+  if (pathname === '/api/report-receiving' && method === 'GET') {
+    if (!await ensureXerpPool()) { fail(res, 503, 'XERP 미연결'); return; }
+    try {
+      const year = parsed.searchParams.get('year') || '2025';
+      const mode = parsed.searchParams.get('mode') || '';
+      const req = xerpPool.request();
+
+      // 컬럼 탐색 모드
+      if (mode === 'columns') {
+        const tables = ['mmInoutHeader','mmInoutItem','lgInoutHeader','lgInoutItem','lgMoveHeader','lgMoveItem'];
+        const cols = {};
+        for (const t of tables) {
+          try {
+            const r = await xerpPool.request().query(`SELECT TOP 0 * FROM ${t} WITH (NOLOCK)`);
+            cols[t] = Object.keys(r.recordset.columns);
+          } catch(e) { cols[t] = 'NOT_FOUND: ' + e.message.substring(0,60); }
+        }
+        ok(res, cols);
+        return;
+      }
+
+      // from/to 지원: ?from=202501&to=202602 형태 (기본: year 전체)
+      const fromParam = parsed.searchParams.get('from') || (year + '01');
+      const toParam = parsed.searchParams.get('to') || (year + '12');
+      const fromDate = fromParam + '01';
+      const toDate = toParam + '31';
+
+      req.input('fromDate', sql.NChar(16), fromDate);
+      req.input('toDate', sql.NChar(16), toDate);
+
+      // 발주 기반: poOrderHeader + poOrderItem — 거래처별 원재료 품목 매입 (년-월별)
+      const result = await req.query(`
+        SELECT RTRIM(h.CsCode) AS vendor_code,
+               RTRIM(i.ItemCode) AS item_code,
+               MAX(RTRIM(i.ItemSpec)) AS item_spec,
+               LEFT(h.OrderDate,6) AS ym,
+               SUM(i.OrderQty) AS qty,
+               SUM(i.OrderAmnt) AS amt
+        FROM poOrderHeader h WITH (NOLOCK)
+        JOIN poOrderItem i WITH (NOLOCK)
+          ON h.SiteCode=i.SiteCode AND h.OrderNo=i.OrderNo
+        WHERE h.SiteCode='BK10'
+          AND h.OrderDate >= @fromDate AND h.OrderDate <= @toDate
+          AND RTRIM(h.CsCode) IN ('2015259','2100005','2100013','2100006','2013391')
+        GROUP BY RTRIM(h.CsCode), RTRIM(i.ItemCode), LEFT(h.OrderDate,6)
+        ORDER BY RTRIM(h.CsCode), RTRIM(i.ItemCode), LEFT(h.OrderDate,6)
+      `);
+
+      // 월 컬럼 목록 생성 (from~to)
+      const monthCols = [];
+      let cur = fromParam;
+      while (cur <= toParam) {
+        monthCols.push(cur);
+        let y = parseInt(cur.substring(0,4)), m = parseInt(cur.substring(4,6));
+        m++; if (m > 12) { m = 1; y++; }
+        cur = String(y) + String(m).padStart(2,'0');
+      }
+
+      // 품목명 보충 (product_info.json)
+      const pi = getProductInfo();
+      const nameMap = {};
+      if (pi) {
+        for (const [, info] of Object.entries(pi)) {
+          const mc = (info['원자재코드'] || '').trim();
+          const mn = (info['원재료용지명'] || info['원재료명'] || '').trim();
+          if (mc && mn && !nameMap[mc]) nameMap[mc] = mn;
+        }
+      }
+
+      // 거래처별 > 품목별 집계 (년-월 키 기반)
+      const vendors = {};
+      for (const r of result.recordset) {
+        const vc = (r.vendor_code || '').trim();
+        const ic = (r.item_code || '').trim();
+        const ym = (r.ym || '').trim();
+        if (!vendors[vc]) vendors[vc] = { code: vc, items: {} };
+        if (!vendors[vc].items[ic]) {
+          const spec = (r.item_spec || '').trim();
+          const monthlyAmt = {};
+          monthCols.forEach(m => { monthlyAmt[m] = 0; });
+          vendors[vc].items[ic] = { code: ic, name: nameMap[ic] || spec || ic, monthly_amt: monthlyAmt };
+        }
+        if (vendors[vc].items[ic].monthly_amt[ym] !== undefined) {
+          vendors[vc].items[ic].monthly_amt[ym] += Math.round(r.amt || 0);
+        }
+      }
+
+      const out = {};
+      for (const [vc, vd] of Object.entries(vendors)) {
+        const itemList = Object.values(vd.items).map(it => {
+          const totalAmt = Object.values(it.monthly_amt).reduce((a,b) => a+b, 0);
+          return { ...it, total_amt: totalAmt };
+        });
+        itemList.sort((a,b) => b.total_amt - a.total_amt);
+        out[vc] = { code: vc, total_amt: itemList.reduce((s,i) => s + i.total_amt, 0), items: itemList };
+      }
+
+      ok(res, { from: fromParam, to: toParam, months: monthCols, record_count: result.recordset.length, vendors: out });
+    } catch (e) {
+      console.error('report-receiving 오류:', e.message);
+      fail(res, 500, e.message);
+    }
+    return;
+  }
+
+  // GET /api/report-vendor-price?vendor_code=2015259&keyword=킨니 — 거래처 품목별 단가 이력 (보고서용)
   if (pathname === '/api/report-vendor-price' && method === 'GET') {
     if (!await ensureXerpPool()) { fail(res, 503, 'XERP 미연결'); return; }
     try {
@@ -5465,7 +5582,59 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // GET /api/closing-vendor-items?vendor_code=2015259&year=2026&month=2 — 거래처별 품목 상세
+  // ── 보고서 CRUD API ──
+  // GET /api/reports — 보고서 목록
+  if (pathname === '/api/reports' && method === 'GET') {
+    const rows = db.prepare(`SELECT id, title, subtitle, report_type, created_at, updated_at FROM reports ORDER BY created_at DESC`).all();
+    ok(res, rows);
+    return;
+  }
+
+  // GET /api/reports/:id — 보고서 상세
+  if (pathname.match(/^\/api\/reports\/\d+$/) && method === 'GET') {
+    const id = parseInt(pathname.split('/').pop());
+    const row = db.prepare('SELECT * FROM reports WHERE id=?').get(id);
+    if (!row) { fail(res, 404, '보고서를 찾을 수 없습니다'); return; }
+    ok(res, row);
+    return;
+  }
+
+  // POST /api/reports — 보고서 저장
+  if (pathname === '/api/reports' && method === 'POST') {
+    const body = await readJSON(req);
+    const { title, subtitle, report_type, content } = body;
+    if (!title) { fail(res, 400, '제목 필수'); return; }
+    const result = db.prepare(`INSERT INTO reports (title, subtitle, report_type, content) VALUES (?,?,?,?)`).run(
+      title, subtitle || '', report_type || 'general', typeof content === 'string' ? content : JSON.stringify(content || {})
+    );
+    ok(res, { id: result.lastInsertRowid });
+    return;
+  }
+
+  // PUT /api/reports/:id — 보고서 수정
+  if (pathname.match(/^\/api\/reports\/\d+$/) && method === 'PUT') {
+    const id = parseInt(pathname.split('/').pop());
+    const body = await readJSON(req);
+    const existing = db.prepare('SELECT * FROM reports WHERE id=?').get(id);
+    if (!existing) { fail(res, 404, '보고서를 찾을 수 없습니다'); return; }
+    const title = body.title !== undefined ? body.title : existing.title;
+    const subtitle = body.subtitle !== undefined ? body.subtitle : existing.subtitle;
+    const report_type = body.report_type !== undefined ? body.report_type : existing.report_type;
+    const content = body.content !== undefined ? (typeof body.content === 'string' ? body.content : JSON.stringify(body.content)) : existing.content;
+    db.prepare(`UPDATE reports SET title=?, subtitle=?, report_type=?, content=?, updated_at=datetime('now','localtime') WHERE id=?`).run(title, subtitle, report_type, content, id);
+    ok(res, { id, updated: true });
+    return;
+  }
+
+  // DELETE /api/reports/:id — 보고서 삭제
+  if (pathname.match(/^\/api\/reports\/\d+$/) && method === 'DELETE') {
+    const id = parseInt(pathname.split('/').pop());
+    db.prepare('DELETE FROM reports WHERE id=?').run(id);
+    ok(res, { deleted: id });
+    return;
+  }
+
+  // GET /api/closing-vendor-items?vendor_code=2013391&year=2026&month=2 — 거래처별 품목 상세 (한솔PNS 예시)
   if (pathname === '/api/closing-vendor-items' && method === 'GET') {
     if (!await ensureXerpPool()) { fail(res, 503, 'XERP 미연결'); return; }
     try {

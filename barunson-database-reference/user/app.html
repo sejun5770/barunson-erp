@@ -1440,21 +1440,21 @@ function closeMegaMenu() {
 
     /* 마감현황 스프레드시트 스타일 */
     .cls-table { width:100%; border-collapse:collapse; font-size:12px; font-family:'Pretendard',sans-serif; }
-    .cls-table th, .cls-table td { border:1px solid #d1d5db; padding:5px 8px; text-align:right; white-space:nowrap; }
-    .cls-table th { background:#f1f5f9; color:#334155; font-weight:600; text-align:center; position:sticky; top:0; z-index:1; }
-    .cls-table .cls-row-label { text-align:left; font-weight:600; background:#f8fafc; min-width:120px; }
-    .cls-table .cls-cat { text-align:left; font-weight:700; background:#e2e8f0; color:#1e293b; }
-    .cls-table .cls-sub { text-align:left; padding-left:20px; font-weight:500; }
-    .cls-table .cls-total { font-weight:700; background:#fef9c3; }
-    .cls-table .cls-subtotal { font-weight:600; background:#f0fdf4; }
-    .cls-table .cls-yoy { color:#2563eb; font-weight:600; }
-    .cls-table .cls-yoy-neg { color:#dc2626; font-weight:600; }
+    .cls-table th, .cls-table td { border:1px solid #d1d5db; padding:5px 8px; text-align:right; white-space:nowrap; color:#111; }
+    .cls-table th { background:#f1f5f9; color:#111; font-weight:600; text-align:center; position:sticky; top:0; z-index:1; }
+    .cls-table .cls-row-label { text-align:left; font-weight:600; background:#f8fafc; min-width:120px; color:#111; }
+    .cls-table .cls-cat { text-align:left; font-weight:700; background:#e2e8f0; color:#111; }
+    .cls-table .cls-sub { text-align:left; padding-left:20px; font-weight:500; color:#111; }
+    .cls-table .cls-total { font-weight:700; background:#fef9c3; color:#111; }
+    .cls-table .cls-subtotal { font-weight:600; background:#f0fdf4; color:#111; }
+    .cls-table .cls-yoy { color:#111; font-weight:600; }
+    .cls-table .cls-yoy-neg { color:#111; font-weight:600; }
     .cls-table .cls-sep { border-left:2px solid #94a3b8; }
     .cls-table .cls-month-curr { background:#eff6ff; }
     .cls-table .cls-editable { background:#fffbeb; cursor:pointer; }
     .cls-table .cls-editable:hover { background:#fef3c7; }
-    .cls-section-title { font-size:14px; font-weight:700; color:#1e293b; margin:20px 0 8px; padding:8px 12px; background:#f1f5f9; border-left:4px solid #3b82f6; border-radius:0 6px 6px 0; }
-    .cls-info { font-size:11px; color:var(--text-muted); margin-bottom:12px; padding:6px 12px; background:var(--surface); border:1px solid var(--border-light); border-radius:6px; }
+    .cls-section-title { font-size:14px; font-weight:700; color:#111; margin:20px 0 8px; padding:8px 12px; background:#f1f5f9; border-left:4px solid #3b82f6; border-radius:0 6px 6px 0; }
+    .cls-info { font-size:11px; color:#111; margin-bottom:12px; padding:6px 12px; background:#fff; border:1px solid #d1d5db; border-radius:6px; }
   </style>
 
   <div class="hm-wrap">
@@ -4309,13 +4309,30 @@ function closeMegaMenu() {
 
 <!-- ========== REPORT (보고서) PAGE ========== -->
 <div class="page" id="page-report">
-  <div id="reportContent" style="max-width:900px;margin:0 auto"></div>
+  <!-- 보고서 목록 -->
+  <div id="reportListView" style="background:#fff;color:#111;padding:20px;border-radius:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2 style="font-size:18px;font-weight:700;margin:0;color:#111">📋 보고서 목록</h2>
+      <button onclick="generateAndSaveReport()" style="padding:8px 16px;background:#3b82f6;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer">+ 새 보고서 생성</button>
+    </div>
+    <div id="reportListContainer" style="display:flex;flex-direction:column;gap:8px">
+      <div style="text-align:center;padding:40px;color:#94a3b8">보고서 목록을 불러오는 중...</div>
+    </div>
+  </div>
+  <!-- 보고서 상세 -->
+  <div id="reportDetailView" style="display:none">
+    <div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center">
+      <button onclick="backToReportList()" style="padding:6px 14px;background:#f1f5f9;color:#333;border:1px solid #d1d5db;border-radius:6px;font-size:13px;cursor:pointer">← 목록으로</button>
+      <div id="reportDetailActions" style="display:flex;gap:6px"></div>
+    </div>
+    <div id="reportContent" style="width:100%;background:#fff;color:#111;padding:24px;border-radius:8px"></div>
+  </div>
 </div>
 
 <!-- ========== CLOSING (마감현황) PAGE ========== -->
-<div class="page" id="page-closing">
+<div class="page" id="page-closing" style="background:#fff;color:#111">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-    <h2 style="font-size:18px;font-weight:700;margin:0">국내 매입 마감현황</h2>
+    <h2 style="font-size:18px;font-weight:700;margin:0;color:#111">국내 매입 마감현황</h2>
     <div style="display:flex;gap:8px;align-items:center">
       <select id="closingYear" onchange="renderClosingPage()" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit">
         <option value="2026">2026년</option>
@@ -5544,7 +5561,7 @@ function showPage(page, opts){
   if(page==='user-mgmt') loadUserMgmt();
   if(page==='tasks') loadTasks();
   if(page==='production-stock') loadProductionStock();
-  if(page==='report') loadReport();
+  if(page==='report') loadReportList();
   if(page==='closing') {
     var cyr = document.getElementById('closingYear');
     var cmo = document.getElementById('closingMonth');
@@ -7257,7 +7274,7 @@ function groupByVendor(){
   }
   const postCols=['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공'];
   // 제지사 약칭→전체이름 매핑
-  const vendorFullName={'대한':'대한통상','삼원':'삼원제지','두성':'두성종이','한솔PNS':'한솔PNS','서경':'주식회사 서경','파주':'파주'};
+  const vendorFullName={'대한':'대한통상','삼원':'삼원특수지상사','두성':'두성종이','한솔PNS':'한솔PNS','한솔':'한솔PNS','서경':'주식회사 서경','파주':'파주'};
 
   // 원재료: 제지사 기준 그룹핑
   const matGroups={};
@@ -7813,7 +7830,7 @@ async function parseBulkExcel(file) {
   const PAPER_MAKER_TO_VENDOR_FE = {
     '대한': '대한통상', '대한통상': '대한통상',
     '두성': '두성종이', '두성종이': '두성종이',
-    '삼원': '삼원제지', '삼원제지': '삼원제지',
+    '삼원': '삼원특수지상사', '삼원제지': '삼원특수지상사', '삼원특수지상사': '삼원특수지상사',
     '서경': '주식회사 서경', '주식회사 서경': '주식회사 서경',
     '한솔PNS': '한솔PNS', '한솔': '한솔PNS'
   };
@@ -9874,8 +9891,9 @@ async function savePODraft(){
   };
 
   const resp = await fetch('/api/po-drafts', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()).catch(()=>null);
-  if(resp?.id){
-    poDraftEditId = resp.id;
+  const savedId = resp?.data?.id || resp?.id;
+  if(savedId){
+    poDraftEditId = savedId;
     loadPODrafts();
     // 저장 완료 — 이메일 버튼 표시, 저장 버튼 숨김
     document.getElementById('btnPoSave').style.display = 'none';
@@ -10051,7 +10069,7 @@ function exportTradeDocCSV() {
 // ═══════════════════════════════════════════════════════════════
 //  원재료 매입 현황
 // ═══════════════════════════════════════════════════════════════
-const MAT_VENDORS = ['대한','두성','삼원','서경','한솔PNS'];
+const MAT_VENDORS = ['대한','두성','삼원','서경','한솔PNS','한솔'];
 let matPurchaseData = null;
 let matVendorActive = new Set(MAT_VENDORS);
 
@@ -14796,11 +14814,11 @@ window._closingData = {
   rawMaterial: {
     title: "원재료(용지) 상세 — 제지사별 발주금액",
     items: [
-      { name: "한솔PNS", row2024: [43341545,59731840,17399134,19875544,8569116,32510446,42940047,143082601,16496317,10272151,21016471,28777000], row2025: [40183828,30565549,87491821,13823564,10520281,28114609,78915673,54277605,20720021,34583739,41096930,62818002], row2026: [90599102,8391718,0,0,0,0,0,0,0,0,0,0] },
-      { name: "삼원제지", row2024: [7785250,16628700,4450150,5614000,11599750,4729000,14627500,8847350,8034750,6489150,0,15621200], row2025: [13186705,5218050,4309000,4412450,19400,4794000,6288900,8629300,12364000,8131600,3519000,603500], row2026: [6595206,7105950,0,0,0,0,0,0,0,0,0,0] },
-      { name: "대한통상", row2024: [3429450,4194250,274000,4427250,2667000,1700750,1289780,4348350,4476850,1289875,591825,6347250], row2025: [4589300,1624000,2447000,5402625,2568500,1345000,4850250,2916250,5855485,12603720,7090500,7521350], row2026: [26104631,696218,0,0,0,0,0,0,0,0,0,0] },
-      { name: "두성종이", row2024: [2184000,3276000,4732500,3937500,12019550,1671750,0,9655150,2352000,549000,352800,3150000], row2025: [8316000,2041200,1953000,0,0,0,5964000,2604000,5715600,1789500,1959000,6147000], row2026: [0,0,0,0,0,0,0,0,0,0,0,0] },
-      { name: "서경", row2024: [4391940,2767360,3192486,4543362,2843470,3871553,5282283,4146569,2723336,3322865,2872693,2371020], row2025: [3574300,2387010,2029984,2874025,2551436,4867696,3063724,1914144,2213500,1586990,2301836,3679818], row2026: [120557,1467325,0,0,0,0,0,0,0,0,0,0] },
+      { name: "대한통상", row2024: [43341545,59731840,17399134,19875544,8569116,32510446,42940047,143082601,16496317,10272151,21016471,28777000], row2025: [40183828,30565549,87491821,13823564,10520281,28114609,78915673,54277605,20720021,34583739,41096930,62818002], row2026: [90599102,8391718,0,0,0,0,0,0,0,0,0,0] },
+      { name: "두성종이", row2024: [7785250,16628700,4450150,5614000,11599750,4729000,14627500,8847350,8034750,6489150,0,15621200], row2025: [13186705,5218050,4309000,4412450,19400,4794000,6288900,8629300,12364000,8131600,3519000,603500], row2026: [6595206,7105950,0,0,0,0,0,0,0,0,0,0] },
+      { name: "삼원특수지상사", row2024: [3429450,4194250,274000,4427250,2667000,1700750,1289780,4348350,4476850,1289875,591825,6347250], row2025: [4589300,1624000,2447000,5402625,2568500,1345000,4850250,2916250,5855485,12603720,7090500,7521350], row2026: [26104631,696218,0,0,0,0,0,0,0,0,0,0] },
+      { name: "서경", row2024: [2184000,3276000,4732500,3937500,12019550,1671750,0,9655150,2352000,549000,352800,3150000], row2025: [8316000,2041200,1953000,0,0,0,5964000,2604000,5715600,1789500,1959000,6147000], row2026: [0,0,0,0,0,0,0,0,0,0,0,0] },
+      { name: "한솔PNS", row2024: [4391940,2767360,3192486,4543362,2843470,3871553,5282283,4146569,2723336,3322865,2872693,2371020], row2025: [3574300,2387010,2029984,2874025,2551436,4867696,3063724,1914144,2213500,1586990,2301836,3679818], row2026: [120557,1467325,0,0,0,0,0,0,0,0,0,0] },
     ]
   }
 };
@@ -14850,7 +14868,7 @@ function renderClosingPage() {
   if (activeTab === 'summary') renderClosingSummary(yr, mo);
   else if (activeTab === 'outsource-proc') renderClosingVendorTable('closingOutsourceProcContent', _closingData.outsourceProc, yr, mo);
   else if (activeTab === 'outsource-sub') renderClosingSubcontract(yr, mo);
-  else if (activeTab === 'raw-material') renderClosingVendorTable('closingRawMaterialContent', _closingData.rawMaterial, yr, mo, 'items');
+  else if (activeTab === 'raw-material') renderRawMaterialDetail();
 }
 
 function buildMonthHeaders(mo) {
@@ -14863,7 +14881,7 @@ function buildMonthHeaders(mo) {
   h += '<th class="cls-sep cls-subtotal">소계</th>';
   // 나머지 월
   if (mo < 12) {
-    for (var i = mo; i < 12; i++) h += '<th style="color:#94a3b8">' + months[i] + '</th>';
+    for (var i = mo; i < 12; i++) h += '<th style="color:#111">' + months[i] + '</th>';
   }
   h += '<th class="cls-sep cls-total">합계</th>';
   return h;
@@ -14879,7 +14897,7 @@ function buildDataRow(label, arr, mo, cssClass) {
   }
   r += '<td class="cls-sep cls-subtotal">' + fmtAmt(subtotal) + '</td>';
   if (mo < 12) {
-    for (var i = mo; i < 12; i++) r += '<td style="color:#cbd5e1">' + fmtAmt(arr[i]) + '</td>';
+    for (var i = mo; i < 12; i++) r += '<td style="color:#111">' + fmtAmt(arr[i]) + '</td>';
   }
   r += '<td class="cls-sep cls-total">' + fmtAmt(total) + '</td>';
   return r + '</tr>';
@@ -14890,7 +14908,7 @@ function buildYoyRow(label, arr2025, arr2024, mo) {
   var subtotal24 = sumArr(arr2024, 0, mo-1);
   var total25 = sumArr(arr2025, 0, 11);
   var total24 = sumArr(arr2024, 0, 11);
-  var r = '<tr><td class="cls-sub" style="color:#6366f1">전년대비</td>';
+  var r = '<tr><td class="cls-sub" style="color:#111">전년대비</td>';
   for (var i = 0; i < mo; i++) {
     var cls = yoyClass(arr2025[i], arr2024[i]);
     r += '<td class="' + cls + (i===mo-1?' cls-month-curr':'') + '">' + yoyPct(arr2025[i], arr2024[i]) + '</td>';
@@ -14915,7 +14933,7 @@ function getYearRow(item, yr) {
 
 // 거래처명 → XERP 코드 매핑
 var _closingVendorCodeMap = {
-  '한솔PNS':'2015259','삼원제지':'2100005','대한통상':'2100013','두성종이':'2100006','서경':'2013391',
+  '대한통상':'2015259','두성종이':'2100005','삼원특수지상사':'2100013','서경':'2100006','한솔PNS':'2013391',
   '바이탈플랜트':'2020165','외주인쇄':'2020117','동판가공':'2400633','부자재가공':'2400105',
   '소모품가공':'2020037','포장재':'2018275','봉투가공':'2020077',
   '박스A':'2025001','박스B':'2018261','박스C':'2020086'
@@ -14951,7 +14969,7 @@ async function toggleVendorDetail(vendorName, yr, mo) {
   var clickedRow = event.target.closest('tr');
   var loadingRow = document.createElement('tr');
   loadingRow.id = detailId;
-  loadingRow.innerHTML = '<td colspan="20" style="text-align:center;padding:12px;color:var(--text-muted)">⏳ 품목 상세 + 검증 로딩중...</td>';
+  loadingRow.innerHTML = '<td colspan="20" style="text-align:center;padding:12px;color:#111">⏳ 품목 상세 + 검증 로딩중...</td>';
   clickedRow.parentNode.insertBefore(loadingRow, clickedRow.nextSibling);
 
   try {
@@ -14987,21 +15005,21 @@ async function toggleVendorDetail(vendorName, yr, mo) {
     }
 
     if (items.length === 0 && !localData) {
-      loadingRow.innerHTML = '<td colspan="20" style="text-align:center;padding:12px;color:var(--text-muted)">해당 기간 품목 데이터 없음</td>';
+      loadingRow.innerHTML = '<td colspan="20" style="text-align:center;padding:12px;color:#111">해당 기간 품목 데이터 없음</td>';
       return;
     }
 
     // 품목 상세 테이블 생성 — 깔끔한 디자인
     var html = '<td colspan="20" style="padding:4px 0"><div style="padding:8px 12px">';
     html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">';
-    html += '<span style="color:#60a5fa;font-size:13px;font-weight:700">📦 ' + vendorName + ' 품목 상세</span>';
-    html += '<span style="font-size:12px;color:#94a3b8">' + mo + '월 합계: <b style="color:#e2e8f0">₩' + monthTotal.toLocaleString() + '</b> | 검증: ' + (allMatch ? '<span style="color:#4ade80">✅ 일치</span>' : '<span style="color:#f87171">⚠️ 불일치</span>') + '</span>';
+    html += '<span style="color:#111;font-size:13px;font-weight:700">📦 ' + vendorName + ' 품목 상세</span>';
+    html += '<span style="font-size:12px;color:#555">' + mo + '월 합계: <b style="color:#111">₩' + monthTotal.toLocaleString() + '</b> | 검증: ' + (allMatch ? '<span style="color:#16a34a">✅ 일치</span>' : '<span style="color:#dc2626">⚠️ 불일치</span>') + '</span>';
     html += '</div>';
 
     // 불일치 시에만 상세 표시
     if (!allMatch) {
       var mismatchMonths = verifyResults.filter(function(v) { return !v.match; });
-      html += '<div style="border-left:3px solid #ef4444;padding:4px 8px;margin-bottom:6px;font-size:11px;color:#fca5a5">';
+      html += '<div style="border-left:3px solid #dc2626;padding:4px 8px;margin-bottom:6px;font-size:11px;color:#dc2626">';
       mismatchMonths.forEach(function(v) {
         html += v.month + '월: XERP ₩' + v.xerp.toLocaleString() + ' vs 화면 ₩' + v.local.toLocaleString() + ' (차이 ₩' + (v.diff > 0 ? '+' : '') + v.diff.toLocaleString() + ') ';
       });
@@ -15010,13 +15028,13 @@ async function toggleVendorDetail(vendorName, yr, mo) {
 
     // 전체 품목 리스트 — 심플 테이블, 검은색 글씨
     html += '<table style="width:100%;border-collapse:collapse;font-size:12px">';
-    html += '<thead><tr style="border-bottom:2px solid #475569">';
-    html += '<th style="padding:5px 8px;text-align:left;color:#e2e8f0;font-weight:700">품목코드</th>';
-    html += '<th style="padding:5px 8px;text-align:left;color:#e2e8f0;font-weight:700">품목명</th>';
-    html += '<th style="padding:5px 8px;text-align:right;color:#e2e8f0;font-weight:700">' + mo + '월 금액</th>';
-    html += '<th style="padding:5px 8px;text-align:right;color:#e2e8f0;font-weight:700">비중</th>';
-    html += '<th style="padding:5px 8px;text-align:right;color:#e2e8f0;font-weight:700">' + yr + '년 누계</th>';
-    html += '<th style="padding:5px 8px;text-align:right;color:#e2e8f0;font-weight:700">' + (parseInt(yr)-1) + '년 누계</th>';
+    html += '<thead><tr style="border-bottom:2px solid #999">';
+    html += '<th style="padding:5px 8px;text-align:left;color:#111;font-weight:700">품목코드</th>';
+    html += '<th style="padding:5px 8px;text-align:left;color:#111;font-weight:700">품목명</th>';
+    html += '<th style="padding:5px 8px;text-align:right;color:#111;font-weight:700">' + mo + '월 금액</th>';
+    html += '<th style="padding:5px 8px;text-align:right;color:#111;font-weight:700">비중</th>';
+    html += '<th style="padding:5px 8px;text-align:right;color:#111;font-weight:700">' + yr + '년 누계</th>';
+    html += '<th style="padding:5px 8px;text-align:right;color:#111;font-weight:700">' + (parseInt(yr)-1) + '년 누계</th>';
     html += '</tr></thead><tbody>';
 
     items.forEach(function(it) {
@@ -15024,13 +15042,13 @@ async function toggleVendorDetail(vendorName, yr, mo) {
       var prevTotal = it.prev_year.reduce(function(a,b){return a+b;}, 0);
       var isMajor = it.is_major;
       var itemName = it.name || it.spec || '-';
-      html += '<tr style="border-bottom:1px solid #334155">';
-      html += '<td style="padding:4px 8px;color:#f1f5f9;white-space:nowrap' + (isMajor ? ';font-weight:700' : '') + '">' + it.code + '</td>';
-      html += '<td style="padding:4px 8px;color:#f1f5f9">' + itemName + '</td>';
-      html += '<td style="padding:4px 8px;text-align:right;color:#f1f5f9;font-weight:600">' + (it.curr_month_amt ? '₩'+it.curr_month_amt.toLocaleString() : '-') + '</td>';
-      html += '<td style="padding:4px 8px;text-align:right;color:' + (it.curr_month_pct >= 50 ? '#fbbf24' : '#f1f5f9') + ';font-weight:' + (isMajor ? '700' : '400') + '">' + (it.curr_month_pct > 0 ? it.curr_month_pct + '%' : '-') + '</td>';
-      html += '<td style="padding:4px 8px;text-align:right;color:#f1f5f9">' + (currTotal ? '₩'+currTotal.toLocaleString() : '-') + '</td>';
-      html += '<td style="padding:4px 8px;text-align:right;color:#cbd5e1">' + (prevTotal ? '₩'+prevTotal.toLocaleString() : '-') + '</td>';
+      html += '<tr style="border-bottom:1px solid #ddd">';
+      html += '<td style="padding:4px 8px;color:#111;white-space:nowrap' + (isMajor ? ';font-weight:700' : '') + '">' + it.code + '</td>';
+      html += '<td style="padding:4px 8px;color:#111">' + itemName + '</td>';
+      html += '<td style="padding:4px 8px;text-align:right;color:#111;font-weight:600">' + (it.curr_month_amt ? '₩'+it.curr_month_amt.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:4px 8px;text-align:right;color:#111;font-weight:' + (isMajor ? '700' : '400') + '">' + (it.curr_month_pct > 0 ? it.curr_month_pct + '%' : '-') + '</td>';
+      html += '<td style="padding:4px 8px;text-align:right;color:#111">' + (currTotal ? '₩'+currTotal.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:4px 8px;text-align:right;color:#111">' + (prevTotal ? '₩'+prevTotal.toLocaleString() : '-') + '</td>';
       html += '</tr>';
     });
 
@@ -15049,7 +15067,7 @@ async function runClosingVerifyAll() {
   var resultDiv = document.getElementById('closingVerifyResult');
   if (btn) btn.disabled = true;
   if (btn) btn.textContent = '🔄 검증중...';
-  if (resultDiv) resultDiv.innerHTML = '<div style="text-align:center;padding:12px;color:#94a3b8">⏳ XERP 데이터 조회중...</div>';
+  if (resultDiv) resultDiv.innerHTML = '<div style="text-align:center;padding:12px;color:#111">⏳ XERP 데이터 조회중...</div>';
 
   try {
     var res = await fetch('/api/closing-verify?year=' + yr + '&month=' + mo);
@@ -15103,44 +15121,44 @@ async function runClosingVerifyAll() {
     // 결과 렌더링
     var html = '';
     if (totalMismatch === 0) {
-      html += '<div style="background:#052e16;border:1px solid #16a34a;border-radius:8px;padding:16px;margin-bottom:12px">';
-      html += '<div style="font-size:16px;color:#4ade80;font-weight:700">✅ 전체 검증 통과</div>';
-      html += '<div style="font-size:13px;color:#86efac;margin-top:4px">' + totalMatch + '개 거래처 × ' + moN + '개월 — XERP 실데이터와 화면 데이터 100% 일치</div>';
+      html += '<div style="background:#f0fdf4;border:1px solid #16a34a;border-radius:8px;padding:16px;margin-bottom:12px">';
+      html += '<div style="font-size:16px;color:#16a34a;font-weight:700">✅ 전체 검증 통과</div>';
+      html += '<div style="font-size:13px;color:#111;margin-top:4px">' + totalMatch + '개 거래처 × ' + moN + '개월 — XERP 실데이터와 화면 데이터 100% 일치</div>';
       html += '</div>';
     } else {
-      html += '<div style="background:#450a0a;border:1px solid #dc2626;border-radius:8px;padding:16px;margin-bottom:12px">';
-      html += '<div style="font-size:16px;color:#fca5a5;font-weight:700">⚠️ 불일치 발견 — ' + totalMismatch + '개 거래처</div>';
-      html += '<div style="font-size:13px;color:#fecaca;margin-top:4px">일치: ' + totalMatch + '개 | 불일치: ' + totalMismatch + '개</div>';
+      html += '<div style="background:#fef2f2;border:1px solid #dc2626;border-radius:8px;padding:16px;margin-bottom:12px">';
+      html += '<div style="font-size:16px;color:#dc2626;font-weight:700">⚠️ 불일치 발견 — ' + totalMismatch + '개 거래처</div>';
+      html += '<div style="font-size:13px;color:#111;margin-top:4px">일치: ' + totalMatch + '개 | 불일치: ' + totalMismatch + '개</div>';
       html += '</div>';
     }
 
     // 상세 테이블
-    html += '<table style="width:100%;border-collapse:collapse;font-size:12px;background:#0f172a;border-radius:6px;overflow:hidden">';
-    html += '<thead><tr style="background:#1e293b">';
-    html += '<th style="border:1px solid #334155;padding:6px 8px;text-align:left;color:#94a3b8">거래처</th>';
-    html += '<th style="border:1px solid #334155;padding:6px 8px;text-align:center;color:#94a3b8">상태</th>';
-    html += '<th style="border:1px solid #334155;padding:6px 8px;text-align:right;color:#94a3b8">XERP 소계(' + moN + '개월)</th>';
-    html += '<th style="border:1px solid #334155;padding:6px 8px;text-align:right;color:#94a3b8">화면 소계(' + moN + '개월)</th>';
-    html += '<th style="border:1px solid #334155;padding:6px 8px;text-align:right;color:#94a3b8">차이</th>';
-    html += '<th style="border:1px solid #334155;padding:6px 8px;text-align:left;color:#94a3b8">불일치 월</th>';
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px;background:#fff;border-radius:6px;overflow:hidden">';
+    html += '<thead><tr style="background:#f1f5f9">';
+    html += '<th style="border:1px solid #d1d5db;padding:6px 8px;text-align:left;color:#111">거래처</th>';
+    html += '<th style="border:1px solid #d1d5db;padding:6px 8px;text-align:center;color:#111">상태</th>';
+    html += '<th style="border:1px solid #d1d5db;padding:6px 8px;text-align:right;color:#111">XERP 소계(' + moN + '개월)</th>';
+    html += '<th style="border:1px solid #d1d5db;padding:6px 8px;text-align:right;color:#111">화면 소계(' + moN + '개월)</th>';
+    html += '<th style="border:1px solid #d1d5db;padding:6px 8px;text-align:right;color:#111">차이</th>';
+    html += '<th style="border:1px solid #d1d5db;padding:6px 8px;text-align:left;color:#111">불일치 월</th>';
     html += '</tr></thead><tbody>';
 
     // 불일치 먼저 표시
     results.sort(function(a, b) { return a.match === b.match ? 0 : a.match ? 1 : -1; });
 
     results.forEach(function(r) {
-      var rowBg = r.match ? '' : 'background:#1c1917;';
+      var rowBg = r.match ? '' : 'background:#fef2f2;';
       html += '<tr style="' + rowBg + '">';
-      html += '<td style="border:1px solid #334155;padding:4px 8px;color:#e2e8f0;font-weight:600">' + r.name + ' <span style="color:#64748b;font-size:10px">' + r.code + '</span></td>';
-      html += '<td style="border:1px solid #334155;padding:4px 8px;text-align:center">' + (r.match ? '<span style="color:#4ade80">✅</span>' : '<span style="color:#f87171">❌</span>') + '</td>';
-      html += '<td style="border:1px solid #334155;padding:4px 8px;text-align:right;color:#e2e8f0">₩' + r.xerpSubtotal.toLocaleString() + '</td>';
-      html += '<td style="border:1px solid #334155;padding:4px 8px;text-align:right;color:#e2e8f0">₩' + r.localSubtotal.toLocaleString() + '</td>';
-      var diffColor = r.diffSubtotal === 0 ? '#4ade80' : r.diffSubtotal > 0 ? '#fbbf24' : '#f87171';
-      html += '<td style="border:1px solid #334155;padding:4px 8px;text-align:right;color:' + diffColor + ';font-weight:700">' + (r.diffSubtotal === 0 ? '-' : '₩' + (r.diffSubtotal > 0 ? '+' : '') + r.diffSubtotal.toLocaleString()) + '</td>';
+      html += '<td style="border:1px solid #d1d5db;padding:4px 8px;color:#111;font-weight:600">' + r.name + ' <span style="color:#555;font-size:10px">' + r.code + '</span></td>';
+      html += '<td style="border:1px solid #d1d5db;padding:4px 8px;text-align:center">' + (r.match ? '<span style="color:#16a34a">✅</span>' : '<span style="color:#dc2626">❌</span>') + '</td>';
+      html += '<td style="border:1px solid #d1d5db;padding:4px 8px;text-align:right;color:#111">₩' + r.xerpSubtotal.toLocaleString() + '</td>';
+      html += '<td style="border:1px solid #d1d5db;padding:4px 8px;text-align:right;color:#111">₩' + r.localSubtotal.toLocaleString() + '</td>';
+      var diffColor = r.diffSubtotal === 0 ? '#16a34a' : r.diffSubtotal > 0 ? '#b45309' : '#dc2626';
+      html += '<td style="border:1px solid #d1d5db;padding:4px 8px;text-align:right;color:' + diffColor + ';font-weight:700">' + (r.diffSubtotal === 0 ? '-' : '₩' + (r.diffSubtotal > 0 ? '+' : '') + r.diffSubtotal.toLocaleString()) + '</td>';
       if (r.mismatches.length > 0) {
-        html += '<td style="border:1px solid #334155;padding:4px 8px;color:#fca5a5;font-size:11px">' + r.mismatches.map(function(mm) { return mm.month + '월(₩' + (mm.diff > 0 ? '+' : '') + mm.diff.toLocaleString() + ')'; }).join(', ') + '</td>';
+        html += '<td style="border:1px solid #d1d5db;padding:4px 8px;color:#dc2626;font-size:11px">' + r.mismatches.map(function(mm) { return mm.month + '월(₩' + (mm.diff > 0 ? '+' : '') + mm.diff.toLocaleString() + ')'; }).join(', ') + '</td>';
       } else {
-        html += '<td style="border:1px solid #334155;padding:4px 8px;color:#4ade80">-</td>';
+        html += '<td style="border:1px solid #d1d5db;padding:4px 8px;color:#16a34a">-</td>';
       }
       html += '</tr>';
     });
@@ -15163,7 +15181,7 @@ function renderClosingSummary(yr, mo) {
   html += '📅 <b>' + yr + '년 ' + mo + '월</b> 마감 기준 | 💰 <b>단위: 원(₩)</b> | 비교: <b>' + prevYr + '년</b> vs <b>' + yr + '년</b><br>';
   html += '🔵 <span style="color:#2563eb;font-weight:700">파란색 = 전년 대비 증가</span> | 🔴 <span style="color:#dc2626;font-weight:700">빨간색 = 전년 대비 감소</span>';
   html += '</div>';
-  html += '<div style="margin:8px 0"><button id="closingVerifyBtn" onclick="runClosingVerifyAll()" style="background:#1e40af;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">🔍 전체 매입금액 검증</button><span style="font-size:11px;color:#94a3b8;margin-left:8px">XERP 실데이터와 화면 표시 금액 일괄 비교</span></div>';
+  html += '<div style="margin:8px 0"><button id="closingVerifyBtn" onclick="runClosingVerifyAll()" style="background:#1e40af;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">🔍 전체 매입금액 검증</button><span style="font-size:11px;color:#555;margin-left:8px">XERP 실데이터와 화면 표시 금액 일괄 비교</span></div>';
   html += '<div id="closingVerifyResult"></div>';
   html += '<table class="cls-table"><thead><tr>' + buildMonthHeaders(mo) + '</tr></thead><tbody>';
 
@@ -15210,12 +15228,12 @@ function buildClickableRow(label, arr, mo, vendorName, yr, moVal) {
   var total = sumArr(arr, 0, 11);
   var hasVendor = _closingVendorCodeMap[vendorName];
   var clickAttr = hasVendor ? ' onclick="toggleVendorDetail(\'' + vendorName + '\',\'' + yr + '\',\'' + moVal + '\')" style="cursor:pointer" title="🔍 클릭하여 품목 상세 보기"' : '';
-  var r = '<tr' + clickAttr + '><td class="cls-sub"' + (hasVendor ? ' style="color:#60a5fa;text-decoration:underline"' : '') + '>' + label + (hasVendor ? ' 🔍' : '') + '</td>';
+  var r = '<tr' + clickAttr + '><td class="cls-sub"' + (hasVendor ? ' style="color:#111;text-decoration:underline"' : '') + '>' + label + (hasVendor ? ' 🔍' : '') + '</td>';
   for (var i = 0; i < mo; i++) {
     r += '<td' + (i === mo-1 ? ' class="cls-month-curr"' : '') + '>' + fmtAmt(arr[i]) + '</td>';
   }
   r += '<td class="cls-sep cls-subtotal">' + fmtAmt(subtotal) + '</td>';
-  if (mo < 12) { for (var i = mo; i < 12; i++) r += '<td style="color:#cbd5e1">' + fmtAmt(arr[i]) + '</td>'; }
+  if (mo < 12) { for (var i = mo; i < 12; i++) r += '<td style="color:#111">' + fmtAmt(arr[i]) + '</td>'; }
   r += '<td class="cls-sep cls-total">' + fmtAmt(total) + '</td>';
   return r + '</tr>';
 }
@@ -15226,7 +15244,7 @@ function renderClosingVendorTable(containerId, data, yr, mo, itemsKey) {
   var items = data[itemsKey] || [];
   var html = '<div class="cls-section-title">' + data.title + '</div>';
   html += '<div class="cls-info">📅 <b>' + yr + '년 ' + mo + '월</b> 마감 기준 | 💰 <b>단위: 원(₩)</b> | 비교: ' + prevYr + '년 vs ' + yr + '년<br>🔍 거래처명 클릭 → 매입 품목 상세 + 금액 검증 (당월 50%↑ 주요품목 우선 표시)</div>';
-  html += '<div style="margin:8px 0"><button id="closingVerifyBtn" onclick="runClosingVerifyAll()" style="background:#1e40af;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">🔍 전체 매입금액 검증</button><span style="font-size:11px;color:#94a3b8;margin-left:8px">XERP 실데이터와 화면 표시 금액 일괄 비교</span></div>';
+  html += '<div style="margin:8px 0"><button id="closingVerifyBtn" onclick="runClosingVerifyAll()" style="background:#1e40af;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">🔍 전체 매입금액 검증</button><span style="font-size:11px;color:#555;margin-left:8px">XERP 실데이터와 화면 표시 금액 일괄 비교</span></div>';
   html += '<div id="closingVerifyResult"></div>';
   html += '<table class="cls-table"><thead><tr>' + buildMonthHeaders(mo) + '</tr></thead><tbody>';
 
@@ -15251,6 +15269,132 @@ function renderClosingVendorTable(containerId, data, yr, mo, itemsKey) {
 
   html += '</tbody></table>';
   document.getElementById(containerId).innerHTML = html;
+}
+
+async function renderRawMaterialDetail() {
+  var container = document.getElementById('closingRawMaterialContent');
+  container.innerHTML = '<div style="text-align:center;padding:30px;color:#555">⏳ XERP 매입 데이터 로딩중...</div>';
+
+  try {
+    var res = await fetch('/api/report-receiving?from=202501&to=202602');
+    var json = await res.json();
+    if (!json.ok) throw new Error(json.error || '데이터 로드 실패');
+    var data = json.data;
+    var months = data.months || [];
+    var vendors = data.vendors || {};
+
+    var vendorNames = {'2015259':'대한통상','2100005':'두성종이','2100013':'삼원특수지상사','2100006':'서경','2013391':'한솔PNS'};
+    var vendorOrder = Object.keys(vendors).sort(function(a,b){ return (vendors[b]||{total_amt:0}).total_amt - (vendors[a]||{total_amt:0}).total_amt; });
+
+    function ymLabel(ym) { return ym.substring(2,4) + '.' + ym.substring(4,6); }
+
+    var html = '<div class="cls-section-title">원재료(용지) 매입업체별 매입현황 (25.01 ~ 26.02)</div>';
+    html += '<div class="cls-info">📅 2025년 1월 ~ 2026년 2월 | 💰 <b>단위: 원(₩)</b> | XERP 발주서(PO) 기준 | 매입금액 내림차순</div>';
+
+    // ── 요약 테이블 ──
+    var grandTotal = 0;
+    var vendorSummary = [];
+    vendorOrder.forEach(function(vc) {
+      var vd = vendors[vc];
+      if (!vd) return;
+      var vName = vendorNames[vc] || vc;
+      var monthAmts = {};
+      months.forEach(function(m) { monthAmts[m] = 0; });
+      (vd.items || []).forEach(function(it) {
+        months.forEach(function(m) { monthAmts[m] += (it.monthly_amt[m] || 0); });
+      });
+      grandTotal += vd.total_amt;
+      vendorSummary.push({ name: vName, code: vc, total: vd.total_amt, itemCount: (vd.items||[]).length, monthAmts: monthAmts });
+    });
+
+    html += '<table class="cls-table" style="margin-bottom:24px"><thead><tr>';
+    html += '<th style="text-align:left;min-width:100px">거래처</th>';
+    html += '<th>품목수</th>';
+    months.forEach(function(m) { html += '<th style="min-width:68px">' + ymLabel(m) + '</th>'; });
+    html += '<th style="min-width:90px;background:#fef9c3">누계</th>';
+    html += '<th style="min-width:50px">비율</th>';
+    html += '</tr></thead><tbody>';
+
+    vendorSummary.forEach(function(v) {
+      var pct = grandTotal > 0 ? (v.total / grandTotal * 100).toFixed(1) : '0';
+      html += '<tr>';
+      html += '<td style="text-align:left;font-weight:700">' + v.name + '</td>';
+      html += '<td style="text-align:center">' + v.itemCount + '</td>';
+      months.forEach(function(m) {
+        var amt = v.monthAmts[m] || 0;
+        html += '<td>' + (amt ? '₩' + (amt/10000).toFixed(0) + '만' : '-') + '</td>';
+      });
+      html += '<td style="font-weight:700;background:#fef9c3">₩' + v.total.toLocaleString() + '</td>';
+      html += '<td style="font-weight:600;color:#b45309">' + pct + '%</td>';
+      html += '</tr>';
+    });
+
+    // 합계 행
+    html += '<tr style="font-weight:700;background:#f0fdf4">';
+    html += '<td style="text-align:left" colspan="2">합계</td>';
+    months.forEach(function(m) {
+      var mTotal = 0;
+      vendorSummary.forEach(function(v) { mTotal += (v.monthAmts[m] || 0); });
+      html += '<td>' + (mTotal ? '₩' + (mTotal/10000).toFixed(0) + '만' : '-') + '</td>';
+    });
+    html += '<td style="background:#fef9c3">₩' + grandTotal.toLocaleString() + '</td>';
+    html += '<td>100%</td>';
+    html += '</tr></tbody></table>';
+
+    // ── 품목 상세 ──
+    html += '<div class="cls-section-title">품목별 상세 매입현황</div>';
+
+    // 거래처별 테이블
+    vendorOrder.forEach(function(vc) {
+      var vd = vendors[vc];
+      if (!vd || !vd.items || vd.items.length === 0) return;
+      var vName = vendorNames[vc] || vc;
+
+      html += '<div style="margin-top:20px">';
+      html += '<div style="font-size:14px;font-weight:700;color:#111;margin-bottom:6px;padding:6px 10px;background:#f1f5f9;border-left:4px solid #3b82f6;border-radius:0 6px 6px 0">';
+      html += vName + ' <span style="font-weight:400;color:#555;font-size:12px">(' + vd.items.length + '개 품목 / 총 ₩' + vd.total_amt.toLocaleString() + ')</span></div>';
+
+      html += '<div style="overflow-x:auto"><table class="cls-table"><thead><tr>';
+      html += '<th style="text-align:left;min-width:80px">품목코드</th>';
+      html += '<th style="text-align:left;min-width:140px">품목명</th>';
+      months.forEach(function(m) {
+        html += '<th style="min-width:75px">' + ymLabel(m) + '</th>';
+      });
+      html += '<th style="min-width:90px;background:#fef9c3">누계</th>';
+      html += '</tr></thead><tbody>';
+
+      var monthTotals = {};
+      months.forEach(function(m){ monthTotals[m] = 0; });
+      var grandItemTotal = 0;
+
+      vd.items.forEach(function(it) {
+        html += '<tr>';
+        html += '<td style="text-align:left;font-weight:500">' + it.code + '</td>';
+        html += '<td style="text-align:left;max-width:180px;overflow:hidden;text-overflow:ellipsis">' + (it.name || '-') + '</td>';
+        months.forEach(function(m) {
+          var amt = it.monthly_amt[m] || 0;
+          if (amt) monthTotals[m] += amt;
+          html += '<td>' + (amt ? '₩' + amt.toLocaleString() : '-') + '</td>';
+        });
+        html += '<td style="font-weight:700;background:#fef9c3">₩' + it.total_amt.toLocaleString() + '</td>';
+        html += '</tr>';
+        grandItemTotal += it.total_amt;
+      });
+
+      // 소계
+      html += '<tr style="font-weight:700;background:#f0fdf4">';
+      html += '<td style="text-align:left" colspan="2">소계</td>';
+      months.forEach(function(m) {
+        html += '<td>' + (monthTotals[m] ? '₩' + monthTotals[m].toLocaleString() : '-') + '</td>';
+      });
+      html += '<td style="background:#fef9c3">₩' + grandItemTotal.toLocaleString() + '</td>';
+      html += '</tr></tbody></table></div></div>';
+    });
+
+    container.innerHTML = html;
+  } catch(e) {
+    container.innerHTML = '<div style="text-align:center;padding:30px;color:#dc2626">❌ 오류: ' + e.message + '</div>';
+  }
 }
 
 function renderClosingSubcontract(yr, mo) {
@@ -15302,102 +15446,385 @@ function renderClosingSubcontract(yr, mo) {
 
 <script>
 // ===== 보고서 (Report) =====
+
+// 보고서 목록 로드
+async function loadReportList() {
+  var listView = document.getElementById('reportListView');
+  var detailView = document.getElementById('reportDetailView');
+  listView.style.display = 'block';
+  detailView.style.display = 'none';
+  var container = document.getElementById('reportListContainer');
+  container.innerHTML = '<div style="text-align:center;padding:40px;color:#94a3b8">⏳ 불러오는 중...</div>';
+
+  try {
+    var resp = await fetch('/api/reports').then(function(r){return r.json();}).catch(function(){return null;});
+    var list = (resp && resp.ok !== false) ? (resp.data || resp) : [];
+    if (!Array.isArray(list)) list = [];
+
+    if (list.length === 0) {
+      container.innerHTML = '<div style="text-align:center;padding:60px 20px;color:#94a3b8">'
+        + '<div style="font-size:40px;margin-bottom:12px">📄</div>'
+        + '<div style="font-size:15px;margin-bottom:8px">저장된 보고서가 없습니다</div>'
+        + '<div style="font-size:13px;color:#b0b0b0">위의 <b>+ 새 보고서 생성</b> 버튼을 눌러 보고서를 생성하세요</div>'
+        + '</div>';
+      return;
+    }
+
+    var html = '';
+    var typeLabels = {'raw-material':'원재료 매입','vendor-price':'단가 비교','kinni-trend':'킨니 트렌드','general':'일반'};
+    var typeColors = {'raw-material':'#3b82f6','vendor-price':'#ef4444','kinni-trend':'#8b5cf6','general':'#6b7280'};
+    list.forEach(function(r) {
+      var typeLabel = typeLabels[r.report_type] || r.report_type || '일반';
+      var typeColor = typeColors[r.report_type] || '#6b7280';
+      var dateStr = r.created_at ? r.created_at.substring(0, 16).replace('T',' ') : '';
+      html += '<div onclick="openReport(' + r.id + ')" style="cursor:pointer;padding:14px 16px;border:1px solid #e2e8f0;border-radius:8px;display:flex;justify-content:space-between;align-items:center;transition:all .15s;background:#fff" onmouseover="this.style.background=\'#f8fafc\';this.style.borderColor=\'#3b82f6\'" onmouseout="this.style.background=\'#fff\';this.style.borderColor=\'#e2e8f0\'">';
+      html += '<div style="flex:1;min-width:0">';
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">';
+      html += '<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:' + typeColor + '15;color:' + typeColor + ';font-weight:600;white-space:nowrap">' + typeLabel + '</span>';
+      html += '<span style="font-size:15px;font-weight:700;color:#111;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.title || '제목 없음') + '</span>';
+      html += '</div>';
+      html += '<div style="font-size:12px;color:#888;display:flex;gap:12px">';
+      if (r.subtitle) html += '<span>' + r.subtitle + '</span>';
+      html += '<span>📅 ' + dateStr + '</span>';
+      var updStr = r.updated_at ? r.updated_at.substring(0, 16).replace('T',' ') : '';
+      if (updStr && updStr !== dateStr) html += '<span style="color:#3b82f6">✏️ ' + updStr + '</span>';
+      html += '</div></div>';
+      html += '<div style="display:flex;gap:6px;align-items:center">';
+      html += '<button onclick="event.stopPropagation();editReport(' + r.id + ')" style="padding:4px 10px;background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;border-radius:4px;font-size:11px;cursor:pointer">수정</button>';
+      html += '<button onclick="event.stopPropagation();deleteReport(' + r.id + ',this)" style="padding:4px 10px;background:#fef2f2;color:#dc2626;border:1px solid #fecaca;border-radius:4px;font-size:11px;cursor:pointer">삭제</button>';
+      html += '</div></div>';
+    });
+    container.innerHTML = html;
+  } catch(e) {
+    container.innerHTML = '<div style="text-align:center;padding:40px;color:#ef4444">오류: ' + e.message + '</div>';
+  }
+}
+
+// 목록으로 돌아가기
+function backToReportList() {
+  document.getElementById('reportListView').style.display = 'block';
+  document.getElementById('reportDetailView').style.display = 'none';
+}
+
+// 보고서 열기
+var _currentReportId = null;
+async function openReport(id) {
+  _currentReportId = id;
+  var listView = document.getElementById('reportListView');
+  var detailView = document.getElementById('reportDetailView');
+  var c = document.getElementById('reportContent');
+  var actions = document.getElementById('reportDetailActions');
+  listView.style.display = 'none';
+  detailView.style.display = 'block';
+  c.innerHTML = '<div style="text-align:center;padding:40px;color:#94a3b8">⏳ 보고서 로딩중...</div>';
+  actions.innerHTML = '';
+
+  try {
+    var resp = await fetch('/api/reports/' + id).then(function(r){return r.json();}).catch(function(){return null;});
+    var row = (resp && resp.ok !== false) ? (resp.data || resp) : null;
+    if (!row) { c.innerHTML = '<div style="text-align:center;padding:40px;color:#ef4444">보고서를 찾을 수 없습니다</div>'; return; }
+    var content = typeof row.content === 'string' ? JSON.parse(row.content) : row.content;
+    c.innerHTML = content.html || '<div style="text-align:center;padding:40px;color:#94a3b8">내용 없음</div>';
+
+    // 상단 액션 버튼
+    actions.innerHTML = '<button onclick="editReport(' + id + ')" style="padding:6px 14px;background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;border-radius:6px;font-size:13px;cursor:pointer">✏️ 수정</button>'
+      + '<button onclick="refreshReport(' + id + ')" style="padding:6px 14px;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0;border-radius:6px;font-size:13px;cursor:pointer">🔄 재생성</button>';
+  } catch(e) {
+    c.innerHTML = '<div style="text-align:center;padding:40px;color:#ef4444">오류: ' + e.message + '</div>';
+  }
+}
+
+// 보고서 재생성 (최신 데이터)
+async function refreshReport(id) {
+  if (!confirm('최신 XERP 데이터로 보고서를 재생성하시겠습니까?')) return;
+  var c = document.getElementById('reportContent');
+  c.innerHTML = '<div style="text-align:center;padding:40px;color:#94a3b8">⏳ 보고서 재생성 중...</div>';
+
+  await loadReport();
+  var renderedHTML = c.innerHTML;
+  var today = new Date().toLocaleDateString('ko-KR');
+
+  await fetch('/api/reports/' + id, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      subtitle: '원재료 매입 현황 분석 · ' + today,
+      content: JSON.stringify({ html: renderedHTML, generated: today })
+    })
+  });
+
+  var notice = document.createElement('div');
+  notice.style.cssText = 'position:fixed;top:60px;right:20px;padding:10px 16px;background:#16a34a;color:#fff;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,.2)';
+  notice.textContent = '🔄 최신 데이터로 재생성 완료';
+  document.body.appendChild(notice);
+  setTimeout(function(){ notice.remove(); }, 3000);
+}
+
+// 보고서 삭제
+async function deleteReport(id, btn) {
+  if (!confirm('이 보고서를 삭제하시겠습니까?')) return;
+  try {
+    await fetch('/api/reports/' + id, { method: 'DELETE' });
+    loadReportList();
+  } catch(e) { alert('삭제 실패: ' + e.message); }
+}
+
+// 보고서 수정 (제목 편집 + 데이터 재생성)
+async function editReport(id) {
+  // 기존 보고서 정보 로드
+  var resp = await fetch('/api/reports/' + id).then(function(r){return r.json();}).catch(function(){return null;});
+  var row = (resp && resp.ok !== false) ? (resp.data || resp) : null;
+  if (!row) { alert('보고서를 찾을 수 없습니다'); return; }
+
+  // 수정 모달
+  var title = prompt('보고서 제목:', row.title || '');
+  if (title === null) return; // 취소
+  if (!title.trim()) { alert('제목을 입력하세요'); return; }
+
+  var subtitle = prompt('부제/설명:', row.subtitle || '');
+  if (subtitle === null) subtitle = row.subtitle || '';
+
+  var regenData = confirm('최신 XERP 데이터로 보고서를 재생성하시겠습니까?\n\n확인 = 재생성 (최신 데이터 반영)\n취소 = 제목만 수정');
+
+  var listView = document.getElementById('reportListView');
+  var detailView = document.getElementById('reportDetailView');
+  var c = document.getElementById('reportContent');
+  listView.style.display = 'none';
+  detailView.style.display = 'block';
+
+  if (regenData) {
+    c.innerHTML = '<div style="text-align:center;padding:40px;color:#94a3b8">⏳ 보고서 재생성 중... (XERP 데이터 조회)</div>';
+    await loadReport();
+    var renderedHTML = c.innerHTML;
+    var today = new Date().toLocaleDateString('ko-KR');
+    await fetch('/api/reports/' + id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: title.trim(),
+        subtitle: subtitle.trim() || '원재료 매입 현황 분석 · ' + today,
+        content: JSON.stringify({ html: renderedHTML, generated: today })
+      })
+    });
+  } else {
+    // 제목/부제만 수정
+    await fetch('/api/reports/' + id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title.trim(), subtitle: subtitle.trim() })
+    });
+    // 기존 내용 표시
+    var content = typeof row.content === 'string' ? JSON.parse(row.content) : row.content;
+    c.innerHTML = content.html || '';
+  }
+
+  var notice = document.createElement('div');
+  notice.style.cssText = 'position:fixed;top:60px;right:20px;padding:10px 16px;background:#2563eb;color:#fff;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,.2)';
+  notice.textContent = '✏️ 보고서가 수정되었습니다';
+  document.body.appendChild(notice);
+  setTimeout(function(){ notice.remove(); }, 3000);
+}
+
+// 새 보고서 생성 + 저장
+async function generateAndSaveReport() {
+  var listView = document.getElementById('reportListView');
+  var detailView = document.getElementById('reportDetailView');
+  var c = document.getElementById('reportContent');
+  listView.style.display = 'none';
+  detailView.style.display = 'block';
+
+  // loadReport()가 reportContent에 렌더링
+  await loadReport();
+
+  // 렌더링된 HTML 캡처 후 서버에 저장
+  var renderedHTML = c.innerHTML;
+  if (!renderedHTML || renderedHTML.indexOf('오류') > -1) return;
+
+  try {
+    var today = new Date().toLocaleDateString('ko-KR');
+    var resp = await fetch('/api/reports', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: '대한통상 단가 협상의 건',
+        subtitle: '원재료 매입 현황 분석 · ' + today,
+        report_type: 'raw-material',
+        content: JSON.stringify({ html: renderedHTML, generated: today })
+      })
+    }).then(function(r){return r.json();}).catch(function(){return null;});
+
+    var savedId = (resp && resp.data) ? resp.data.id : (resp ? resp.id : null);
+    if (savedId) {
+      var notice = document.createElement('div');
+      notice.style.cssText = 'position:fixed;top:60px;right:20px;padding:10px 16px;background:#16a34a;color:#fff;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,.2)';
+      notice.textContent = '✅ 보고서가 저장되었습니다 (#' + savedId + ')';
+      document.body.appendChild(notice);
+      setTimeout(function(){ notice.remove(); }, 3000);
+    }
+  } catch(e) { console.error('보고서 저장 실패:', e); }
+}
+
+// loadReport — 보고서 생성 (generateAndSaveReport에서도 호출)
 async function loadReport() {
   var c = document.getElementById('reportContent');
   if (!c) return;
   c.innerHTML = '<div style="text-align:center;padding:40px;color:#94a3b8">⏳ 보고서 데이터 로딩중...</div>';
 
   try {
-    // 1) 원재료 5사 25년 매입 데이터 (_closingData에서)
-    var rawItems = window._closingData ? _closingData.rawMaterial.items : [];
+    // 1) 원재료 5사 25년1월~26년2월 발주 데이터 (API — 제품별 월별)
+    var recvRes = await fetch('/api/report-receiving?from=202501&to=202602').then(function(r){return r.json();}).catch(function(){return null;});
+    var recvData = (recvRes && recvRes.ok && recvRes.data) ? recvRes.data : {};
+    var recvVendors = recvData.vendors || {};
+    var monthCols = recvData.months || [];
 
-    // 2) 한솔PNS 킨니 단가 데이터 (API)
-    var kinniRes = await fetch('/api/report-vendor-price?vendor_code=2015259&keyword=' + encodeURIComponent('킨니')).then(function(r){return r.json();}).catch(function(){return null;});
-    var kinniItems = (kinniRes && (kinniRes.data || kinniRes).items) || [];
+    // 2) 대한통상 전체 품목 단가 데이터 (API)
+    var daehanRes = await fetch('/api/report-vendor-price?vendor_code=2015259').then(function(r){return r.json();}).catch(function(){return null;});
+    var kinniItems = (daehanRes && (daehanRes.data || daehanRes).items) || [];
+
+    // 거래처명 매핑
+    var vendorNames = {'2015259':'대한통상','2100005':'두성종이','2100013':'삼원특수지상사','2100006':'서경','2013391':'한솔PNS'};
+    var vendorOrder = Object.keys(recvVendors).sort(function(a,b){ return (recvVendors[b]||{total_amt:0}).total_amt - (recvVendors[a]||{total_amt:0}).total_amt; });
 
     var html = '';
 
+    // 월 라벨 생성 (202501 → '25.01')
+    function ymLabel(ym) { return ym.substring(2,4) + '.' + ym.substring(4,6); }
+
     // === 보고서 헤더 ===
-    html += '<div style="border-bottom:3px solid #1e293b;padding-bottom:16px;margin-bottom:24px">';
-    html += '<div style="font-size:11px;color:#64748b;margin-bottom:4px">보고서 | ' + new Date().toLocaleDateString('ko-KR') + '</div>';
-    html += '<h1 style="font-size:24px;font-weight:800;color:#f1f5f9;margin:0 0 8px">대한통상 단가 협상의 건</h1>';
-    html += '<div style="font-size:13px;color:#94a3b8">원재료(용지) 매입 현황 분석 및 킨니 용지 단가 비교</div>';
+    html += '<div style="border-bottom:3px solid #ccc;padding-bottom:16px;margin-bottom:24px">';
+    html += '<div style="font-size:11px;color:#666;margin-bottom:4px">보고서 | ' + new Date().toLocaleDateString('ko-KR') + '</div>';
+    html += '<h1 style="font-size:24px;font-weight:800;color:#111;margin:0 0 8px">대한통상 단가 협상의 건</h1>';
+    html += '<div style="font-size:13px;color:#555">원재료(용지) 매입 현황 분석 및 대한통상 단가 비교</div>';
     html += '</div>';
 
-    // === 1. 원재료 5사 25년 월별 매입현황 ===
-    html += '<h2 style="font-size:17px;font-weight:700;color:#f1f5f9;margin:24px 0 12px;border-left:4px solid #3b82f6;padding-left:12px">1. 원재료 업체별 2025년 매입현황</h2>';
-    html += '<div style="font-size:12px;color:#94a3b8;margin-bottom:8px">단위: 원(₩) | XERP 발주서(PO) 기준</div>';
+    // === 1. 원재료 5사 월별 매입현황 요약 (25.01~26.02) ===
+    html += '<h2 style="font-size:17px;font-weight:700;color:#111;margin:24px 0 12px;border-left:4px solid #3b82f6;padding-left:12px">1. 원재료 업체별 매입현황 (25.01 ~ 26.02)</h2>';
+    html += '<div style="font-size:12px;color:#666;margin-bottom:8px">단위: 원(₩) | XERP 발주서(PO) 기준</div>';
 
-    // 테이블
-    html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap">';
-    html += '<thead><tr style="border-bottom:2px solid #475569">';
-    html += '<th style="padding:6px 8px;text-align:left;color:#e2e8f0;font-weight:700">거래처</th>';
-    var months = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
-    for (var m = 0; m < 12; m++) html += '<th style="padding:6px 4px;text-align:right;color:#e2e8f0;font-weight:600">' + months[m] + '</th>';
-    html += '<th style="padding:6px 8px;text-align:right;color:#fbbf24;font-weight:700;border-left:2px solid #475569">누계</th>';
-    html += '<th style="padding:6px 8px;text-align:right;color:#fbbf24;font-weight:700">비율</th>';
+    html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px;white-space:nowrap">';
+    html += '<thead><tr style="border-bottom:2px solid #999">';
+    html += '<th style="padding:5px 6px;text-align:left;color:#111;font-weight:700">거래처</th>';
+    for (var mi = 0; mi < monthCols.length; mi++) html += '<th style="padding:5px 3px;text-align:right;color:#111;font-weight:600;font-size:10px">' + ymLabel(monthCols[mi]) + '</th>';
+    html += '<th style="padding:5px 6px;text-align:right;color:#b45309;font-weight:700;border-left:2px solid #999">누계</th>';
+    html += '<th style="padding:5px 6px;text-align:right;color:#b45309;font-weight:700">비율</th>';
     html += '</tr></thead><tbody>';
 
+    // 거래처별 월별 금액 집계
     var grandTotal = 0;
     var vendorTotals = [];
-    rawItems.forEach(function(v) {
-      var row25 = v.row2025 || new Array(12).fill(0);
-      var total = row25.reduce(function(a,b){return a+b;}, 0);
+    vendorOrder.forEach(function(vc) {
+      var vd = recvVendors[vc];
+      var row = {};
+      monthCols.forEach(function(m){ row[m] = 0; });
+      var total = 0;
+      if (vd && vd.items) {
+        vd.items.forEach(function(it) {
+          monthCols.forEach(function(m){ row[m] += (it.monthly_amt[m] || 0); });
+        });
+        total = vd.total_amt || 0;
+      }
       grandTotal += total;
-      vendorTotals.push({ name: v.name, total: total, row: row25 });
+      vendorTotals.push({ name: vendorNames[vc] || vc, code: vc, total: total, row: row, items: vd ? vd.items : [] });
     });
 
     vendorTotals.forEach(function(v) {
       var pct = grandTotal > 0 ? (v.total / grandTotal * 100).toFixed(1) : '0';
-      html += '<tr style="border-bottom:1px solid #334155">';
-      html += '<td style="padding:5px 8px;color:#f1f5f9;font-weight:600">' + v.name + '</td>';
-      for (var m = 0; m < 12; m++) {
-        html += '<td style="padding:5px 4px;text-align:right;color:#e2e8f0">' + (v.row[m] ? '₩' + v.row[m].toLocaleString() : '-') + '</td>';
-      }
-      html += '<td style="padding:5px 8px;text-align:right;color:#f1f5f9;font-weight:700;border-left:2px solid #475569">₩' + v.total.toLocaleString() + '</td>';
-      html += '<td style="padding:5px 8px;text-align:right;color:#fbbf24;font-weight:700">' + pct + '%</td>';
+      html += '<tr style="border-bottom:1px solid #ddd">';
+      html += '<td style="padding:4px 6px;color:#111;font-weight:600">' + v.name + '</td>';
+      monthCols.forEach(function(m) {
+        html += '<td style="padding:4px 3px;text-align:right;color:#222;font-size:10px">' + (v.row[m] ? '₩' + v.row[m].toLocaleString() : '-') + '</td>';
+      });
+      html += '<td style="padding:4px 6px;text-align:right;color:#111;font-weight:700;border-left:2px solid #999">₩' + v.total.toLocaleString() + '</td>';
+      html += '<td style="padding:4px 6px;text-align:right;color:#b45309;font-weight:700">' + pct + '%</td>';
       html += '</tr>';
     });
 
     // 합계
-    html += '<tr style="border-top:2px solid #475569;font-weight:700">';
-    html += '<td style="padding:6px 8px;color:#f1f5f9">합계</td>';
-    var monthlyGrand = new Array(12).fill(0);
-    vendorTotals.forEach(function(v) { for (var m = 0; m < 12; m++) monthlyGrand[m] += v.row[m]; });
-    for (var m = 0; m < 12; m++) html += '<td style="padding:6px 4px;text-align:right;color:#f1f5f9">' + (monthlyGrand[m] ? '₩' + monthlyGrand[m].toLocaleString() : '-') + '</td>';
-    html += '<td style="padding:6px 8px;text-align:right;color:#fbbf24;border-left:2px solid #475569">₩' + grandTotal.toLocaleString() + '</td>';
-    html += '<td style="padding:6px 8px;text-align:right;color:#fbbf24">100%</td>';
+    html += '<tr style="border-top:2px solid #999;font-weight:700">';
+    html += '<td style="padding:5px 6px;color:#111">합계</td>';
+    monthCols.forEach(function(m) {
+      var mTotal = 0; vendorTotals.forEach(function(v){ mTotal += v.row[m]; });
+      html += '<td style="padding:5px 3px;text-align:right;color:#111;font-size:10px">' + (mTotal ? '₩' + mTotal.toLocaleString() : '-') + '</td>';
+    });
+    html += '<td style="padding:5px 6px;text-align:right;color:#b45309;border-left:2px solid #999">₩' + grandTotal.toLocaleString() + '</td>';
+    html += '<td style="padding:5px 6px;text-align:right;color:#b45309">100%</td>';
     html += '</tr></tbody></table></div>';
 
-    // 비율 요약 바
+    // 비율 요약 카드
     html += '<div style="display:flex;gap:8px;margin:12px 0 24px;flex-wrap:wrap">';
-    var colors = ['#3b82f6','#ef4444','#f59e0b','#10b981','#8b5cf6'];
+    var cardColors = ['#3b82f6','#ef4444','#f59e0b','#10b981','#8b5cf6'];
     vendorTotals.forEach(function(v, idx) {
       var pct = grandTotal > 0 ? (v.total / grandTotal * 100).toFixed(1) : '0';
-      html += '<div style="flex:1;min-width:120px;text-align:center;padding:10px;border-radius:8px;border:1px solid #334155">';
-      html += '<div style="font-size:11px;color:#94a3b8">' + v.name + '</div>';
-      html += '<div style="font-size:20px;font-weight:800;color:' + colors[idx % 5] + '">' + pct + '%</div>';
-      html += '<div style="font-size:11px;color:#64748b">₩' + (v.total / 100000000).toFixed(1) + '억</div>';
+      html += '<div style="flex:1;min-width:120px;text-align:center;padding:10px;border-radius:8px;border:1px solid #ccc">';
+      html += '<div style="font-size:11px;color:#555">' + v.name + '</div>';
+      html += '<div style="font-size:20px;font-weight:800;color:' + cardColors[idx % 5] + '">' + pct + '%</div>';
+      html += '<div style="font-size:11px;color:#666">₩' + (v.total / 10000).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '만</div>';
       html += '</div>';
     });
     html += '</div>';
 
-    // === 2. 대한통상 단가 협상 — 킨니 용지 단가 비교 ===
-    html += '<h2 style="font-size:17px;font-weight:700;color:#f1f5f9;margin:24px 0 12px;border-left:4px solid #ef4444;padding-left:12px">2. 킨니 용지 단가 비교 (2025년 vs 2026년)</h2>';
-    html += '<div style="font-size:12px;color:#94a3b8;margin-bottom:4px">현재 한솔PNS에서 구매중인 킨니 용지의 단가 변동 분석</div>';
-    html += '<div style="font-size:12px;color:#64748b;margin-bottom:12px">대한통상으로 공급처 변경 시 단가 협상 기초 자료</div>';
+    // === 1-2. 거래처별 제품별 매입금액 상세 (접기/펼치기) ===
+    html += '<h2 style="font-size:17px;font-weight:700;color:#111;margin:24px 0 12px;border-left:4px solid #10b981;padding-left:12px">1-2. 거래처별 제품별 매입금액 (25.01 ~ 26.02)</h2>';
+    html += '<div style="font-size:12px;color:#666;margin-bottom:12px">단위: 원(₩) | 거래처별 품목 상세 내역 | 거래처명 클릭 시 펼침/숨김</div>';
 
-    // 킨니 단가 테이블
+    vendorTotals.forEach(function(v, vIdx) {
+      if (!v.items || v.items.length === 0) return;
+      var detailId = 'rpt-vendor-detail-' + vIdx;
+      html += '<div style="margin-bottom:4px">';
+      html += '<div onclick="var el=document.getElementById(\'' + detailId + '\');el.style.display=el.style.display===\'none\'?\'block\':\'none\';this.querySelector(\'.rpt-arrow\').textContent=el.style.display===\'none\'?\'▶\':\'▼\'" style="cursor:pointer;padding:8px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;display:flex;justify-content:space-between;align-items:center">';
+      html += '<span style="font-size:14px;font-weight:700;color:#111"><span class="rpt-arrow" style="font-size:11px;margin-right:6px">▶</span>' + v.name + ' <span style="font-weight:400;color:#666;font-size:12px">(' + v.items.length + '개 품목)</span></span>';
+      html += '<span style="font-size:13px;font-weight:700;color:#b45309">₩' + v.total.toLocaleString() + '</span>';
+      html += '</div>';
+      html += '<div id="' + detailId + '" style="display:none;margin-top:4px">';
+      html += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:10px;white-space:nowrap">';
+      html += '<thead><tr style="border-bottom:2px solid #999">';
+      html += '<th style="padding:4px 5px;text-align:left;color:#111;font-weight:700">품목코드</th>';
+      html += '<th style="padding:4px 5px;text-align:left;color:#111;font-weight:700">품목명</th>';
+      monthCols.forEach(function(m) {
+        html += '<th style="padding:4px 3px;text-align:right;color:#111;font-weight:600">' + ymLabel(m) + '</th>';
+      });
+      html += '<th style="padding:4px 5px;text-align:right;color:#b45309;font-weight:700;border-left:2px solid #999">누계</th>';
+      html += '</tr></thead><tbody>';
+
+      v.items.forEach(function(it) {
+        html += '<tr style="border-bottom:1px solid #eee">';
+        html += '<td style="padding:3px 5px;color:#111;font-weight:500">' + it.code + '</td>';
+        html += '<td style="padding:3px 5px;color:#333;max-width:180px;overflow:hidden;text-overflow:ellipsis">' + (it.name || '-') + '</td>';
+        monthCols.forEach(function(m) {
+          var amt = it.monthly_amt[m] || 0;
+          html += '<td style="padding:3px 3px;text-align:right;color:#222">' + (amt ? '₩' + amt.toLocaleString() : '-') + '</td>';
+        });
+        html += '<td style="padding:3px 5px;text-align:right;color:#111;font-weight:700;border-left:2px solid #999">₩' + it.total_amt.toLocaleString() + '</td>';
+        html += '</tr>';
+      });
+
+      // 소계
+      html += '<tr style="border-top:2px solid #999;font-weight:700">';
+      html += '<td style="padding:4px 5px;color:#111" colspan="2">소계</td>';
+      monthCols.forEach(function(m) {
+        var mSum = 0; v.items.forEach(function(it){ mSum += (it.monthly_amt[m] || 0); });
+        html += '<td style="padding:4px 3px;text-align:right;color:#111">' + (mSum ? '₩' + mSum.toLocaleString() : '-') + '</td>';
+      });
+      html += '<td style="padding:4px 5px;text-align:right;color:#b45309;border-left:2px solid #999">₩' + v.total.toLocaleString() + '</td>';
+      html += '</tr></tbody></table></div>';
+      html += '</div></div>'; // close detail + wrapper
+    });
+
+    // === 2. 대한통상 주요 품목 단가 비교 ===
+    html += '<h2 style="font-size:17px;font-weight:700;color:#111;margin:24px 0 12px;border-left:4px solid #ef4444;padding-left:12px">2. 대한통상 주요 품목 단가 비교 (2025년 vs 2026년)</h2>';
+    html += '<div style="font-size:12px;color:#555;margin-bottom:4px">대한통상 거래 품목별 단가 변동 분석 (올드밀, 마테리카 등)</div>';
+    html += '<div style="font-size:12px;color:#666;margin-bottom:12px">단가 협상 기초 자료</div>';
+
     html += '<table style="width:100%;border-collapse:collapse;font-size:12px">';
-    html += '<thead><tr style="border-bottom:2px solid #475569">';
-    html += '<th style="padding:6px 8px;text-align:left;color:#e2e8f0">품목코드</th>';
-    html += '<th style="padding:6px 8px;text-align:left;color:#e2e8f0">품목명</th>';
-    html += '<th style="padding:6px 8px;text-align:right;color:#e2e8f0">25년 수량</th>';
-    html += '<th style="padding:6px 8px;text-align:right;color:#e2e8f0">25년 금액</th>';
-    html += '<th style="padding:6px 8px;text-align:right;color:#3b82f6;font-weight:700">25년 단가</th>';
-    html += '<th style="padding:6px 8px;text-align:right;color:#e2e8f0">26년 수량</th>';
-    html += '<th style="padding:6px 8px;text-align:right;color:#ef4444;font-weight:700">26년 단가</th>';
-    html += '<th style="padding:6px 8px;text-align:right;color:#e2e8f0">변동률</th>';
+    html += '<thead><tr style="border-bottom:2px solid #999">';
+    html += '<th style="padding:6px 8px;text-align:left;color:#111">품목코드</th>';
+    html += '<th style="padding:6px 8px;text-align:left;color:#111">품목명</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#111">25년 수량</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#111">25년 금액</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#1d4ed8;font-weight:700">25년 단가</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#111">26년 수량</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#dc2626;font-weight:700">26년 단가</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#111">변동률</th>';
     html += '</tr></thead><tbody>';
 
     var totalKinni25Amt = 0, totalKinni25Qty = 0, totalKinni26Amt = 0, totalKinni26Qty = 0;
@@ -15410,57 +15837,171 @@ async function loadReport() {
       var q26 = y26.total_qty || 0;
       var a25 = y25.total_amt || 0;
       var a26 = y26.total_amt || 0;
-      if (a25 === 0 && a26 === 0) return; // 실적 없으면 스킵
+      if (a25 === 0 && a26 === 0) return;
 
       totalKinni25Amt += a25; totalKinni25Qty += q25;
       totalKinni26Amt += a26; totalKinni26Qty += q26;
 
       var diffPct = (p25 && p26) ? ((p26 - p25) / p25 * 100).toFixed(1) : '-';
-      var diffColor = diffPct === '-' ? '#64748b' : (parseFloat(diffPct) > 0 ? '#ef4444' : '#4ade80');
+      var diffColor = diffPct === '-' ? '#666' : (parseFloat(diffPct) > 0 ? '#dc2626' : '#16a34a');
       var diffStr = diffPct === '-' ? '-' : (parseFloat(diffPct) > 0 ? '+' : '') + diffPct + '%';
 
-      html += '<tr style="border-bottom:1px solid #334155">';
-      html += '<td style="padding:5px 8px;color:#f1f5f9;font-weight:600">' + it.code + '</td>';
-      html += '<td style="padding:5px 8px;color:#cbd5e1">' + (it.name || it.spec || '-') + '</td>';
-      html += '<td style="padding:5px 8px;text-align:right;color:#e2e8f0">' + (q25 ? q25.toLocaleString() : '-') + '</td>';
-      html += '<td style="padding:5px 8px;text-align:right;color:#e2e8f0">' + (a25 ? '₩' + a25.toLocaleString() : '-') + '</td>';
-      html += '<td style="padding:5px 8px;text-align:right;color:#3b82f6;font-weight:700">' + (p25 ? '₩' + p25.toLocaleString() : '-') + '</td>';
-      html += '<td style="padding:5px 8px;text-align:right;color:#e2e8f0">' + (q26 ? q26.toLocaleString() : '-') + '</td>';
-      html += '<td style="padding:5px 8px;text-align:right;color:#ef4444;font-weight:700">' + (p26 ? '₩' + p26.toLocaleString() : '-') + '</td>';
+      html += '<tr style="border-bottom:1px solid #ddd">';
+      html += '<td style="padding:5px 8px;color:#111;font-weight:600">' + it.code + '</td>';
+      html += '<td style="padding:5px 8px;color:#333">' + (it.name || it.spec || '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#222">' + (q25 ? q25.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#222">' + (a25 ? '₩' + a25.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#1d4ed8;font-weight:700">' + (p25 ? '₩' + p25.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#222">' + (q26 ? q26.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#dc2626;font-weight:700">' + (p26 ? '₩' + p26.toLocaleString() : '-') + '</td>';
       html += '<td style="padding:5px 8px;text-align:right;color:' + diffColor + ';font-weight:700">' + diffStr + '</td>';
       html += '</tr>';
     });
 
-    // 킨니 합계
+    // 합계
     var avgP25 = totalKinni25Qty > 0 ? Math.round(totalKinni25Amt / totalKinni25Qty) : 0;
     var avgP26 = totalKinni26Qty > 0 ? Math.round(totalKinni26Amt / totalKinni26Qty) : 0;
     var avgDiff = (avgP25 && avgP26) ? ((avgP26 - avgP25) / avgP25 * 100).toFixed(1) : '-';
-    html += '<tr style="border-top:2px solid #475569;font-weight:700">';
-    html += '<td style="padding:6px 8px;color:#f1f5f9" colspan="2">킨니 합계</td>';
-    html += '<td style="padding:6px 8px;text-align:right;color:#f1f5f9">' + totalKinni25Qty.toLocaleString() + '</td>';
-    html += '<td style="padding:6px 8px;text-align:right;color:#f1f5f9">₩' + totalKinni25Amt.toLocaleString() + '</td>';
-    html += '<td style="padding:6px 8px;text-align:right;color:#3b82f6">₩' + avgP25.toLocaleString() + '</td>';
-    html += '<td style="padding:6px 8px;text-align:right;color:#f1f5f9">' + totalKinni26Qty.toLocaleString() + '</td>';
-    html += '<td style="padding:6px 8px;text-align:right;color:#ef4444">₩' + avgP26.toLocaleString() + '</td>';
-    html += '<td style="padding:6px 8px;text-align:right;color:' + (avgDiff !== '-' && parseFloat(avgDiff) > 0 ? '#ef4444' : '#4ade80') + '">' + (avgDiff === '-' ? '-' : (parseFloat(avgDiff) > 0 ? '+' : '') + avgDiff + '%') + '</td>';
+    html += '<tr style="border-top:2px solid #999;font-weight:700">';
+    html += '<td style="padding:6px 8px;color:#111" colspan="2">대한통상 합계</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#111">' + totalKinni25Qty.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#111">₩' + totalKinni25Amt.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#1d4ed8">₩' + avgP25.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#111">' + totalKinni26Qty.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:#dc2626">₩' + avgP26.toLocaleString() + '</td>';
+    html += '<td style="padding:6px 8px;text-align:right;color:' + (avgDiff !== '-' && parseFloat(avgDiff) > 0 ? '#dc2626' : '#16a34a') + '">' + (avgDiff === '-' ? '-' : (parseFloat(avgDiff) > 0 ? '+' : '') + avgDiff + '%') + '</td>';
     html += '</tr></tbody></table>';
 
-    // 핵심 요약
-    html += '<div style="margin-top:20px;padding:16px;border:1px solid #334155;border-radius:8px">';
-    html += '<h3 style="font-size:14px;font-weight:700;color:#f1f5f9;margin:0 0 8px">핵심 요약</h3>';
-    html += '<ul style="margin:0;padding:0 0 0 20px;font-size:13px;color:#cbd5e1;line-height:2">';
-    html += '<li>킨니 용지 2025년 총 매입액: <b style="color:#f1f5f9">₩' + totalKinni25Amt.toLocaleString() + '</b> (' + totalKinni25Qty.toLocaleString() + ' 연)</li>';
-    html += '<li>25년 평균 단가: <b style="color:#3b82f6">₩' + avgP25.toLocaleString() + '</b>/연 → 26년 평균: <b style="color:#ef4444">₩' + avgP26.toLocaleString() + '</b>/연';
-    if (avgDiff !== '-') html += ' (<span style="color:' + (parseFloat(avgDiff) > 0 ? '#ef4444' : '#4ade80') + '">' + (parseFloat(avgDiff) > 0 ? '+' : '') + avgDiff + '%</span>)';
-    html += '</li>';
+    // === 3. 뉴킨니 트렌드 및 단가 분석 ===
+    var kinniCodes = kinniItems.filter(function(it) {
+      var nm = (it.name || it.spec || '').toLowerCase();
+      return nm.includes('킨니') || nm.includes('kinni');
+    });
+    // 구킨니 vs 뉴킨니 분류
+    var oldKinni = [], newKinni = [];
+    kinniCodes.forEach(function(it) {
+      var nm = (it.name || it.spec || '');
+      if (nm.includes('뉴킨니') || it.code === 'BP1997' || it.code === 'BP2014') newKinni.push(it);
+      else oldKinni.push(it);
+    });
 
-    // 원재료 내 킨니 비율
-    var hansolTotal25 = 0;
-    rawItems.forEach(function(v) { if(v.name === '한솔PNS') hansolTotal25 = (v.row2025||[]).reduce(function(a,b){return a+b;},0); });
-    var kinniPctOfHansol = hansolTotal25 > 0 ? (totalKinni25Amt / hansolTotal25 * 100).toFixed(1) : '0';
+    html += '<h2 style="font-size:17px;font-weight:700;color:#111;margin:24px 0 12px;border-left:4px solid #8b5cf6;padding-left:12px">3. 킨니 용지 트렌드 분석 (구킨니 → 뉴킨니 전환)</h2>';
+    html += '<div style="font-size:12px;color:#555;margin-bottom:12px">대한통상 킨니 시리즈 발주 추이 및 단가 변동 분석 | 2024~2026년</div>';
+
+    // 뉴킨니 상세 테이블
+    html += '<h3 style="font-size:14px;font-weight:700;color:#111;margin:16px 0 8px">뉴킨니 (신규 품목)</h3>';
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+    html += '<thead><tr style="border-bottom:2px solid #8b5cf6">';
+    html += '<th style="padding:6px 8px;text-align:left;color:#111">품목코드</th>';
+    html += '<th style="padding:6px 8px;text-align:left;color:#111">품목명</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#666">24년 수량</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#666">24년 단가</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#1d4ed8">25년 수량</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#1d4ed8">25년 금액</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#1d4ed8;font-weight:700">25년 단가</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#dc2626">26년 수량</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#dc2626">26년 금액</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#dc2626;font-weight:700">26년 단가</th>';
+    html += '<th style="padding:6px 8px;text-align:right;color:#111">25→26 변동</th>';
+    html += '</tr></thead><tbody>';
+
+    var nkTotal25 = 0, nkTotal26 = 0, nkQty25 = 0, nkQty26 = 0;
+    newKinni.forEach(function(it) {
+      var y24 = it.years['2024'] || {}, y25 = it.years['2025'] || {}, y26 = it.years['2026'] || {};
+      nkTotal25 += (y25.total_amt||0); nkTotal26 += (y26.total_amt||0);
+      nkQty25 += (y25.total_qty||0); nkQty26 += (y26.total_qty||0);
+      var diff = (y25.avg_price && y26.avg_price) ? ((y26.avg_price - y25.avg_price) / y25.avg_price * 100).toFixed(1) : '-';
+      var diffColor = diff === '-' ? '#666' : (parseFloat(diff) > 0 ? '#dc2626' : '#16a34a');
+      html += '<tr style="border-bottom:1px solid #ddd">';
+      html += '<td style="padding:5px 8px;color:#111;font-weight:600">' + it.code + '</td>';
+      html += '<td style="padding:5px 8px;color:#333">' + (it.name || it.spec || '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#666">' + (y24.total_qty || '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#666">' + (y24.avg_price ? '₩'+y24.avg_price.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#1d4ed8">' + (y25.total_qty || '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#1d4ed8">₩' + (y25.total_amt||0).toLocaleString() + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#1d4ed8;font-weight:700">' + (y25.avg_price ? '₩'+y25.avg_price.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#dc2626">' + (y26.total_qty || '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#dc2626">₩' + (y26.total_amt||0).toLocaleString() + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#dc2626;font-weight:700">' + (y26.avg_price ? '₩'+y26.avg_price.toLocaleString() : '-') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:' + diffColor + ';font-weight:700">' + (diff === '-' ? '-' : (parseFloat(diff)>0?'+':'') + diff + '%') + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+
+    // 구킨니 상세 테이블
+    if (oldKinni.length > 0) {
+      html += '<h3 style="font-size:14px;font-weight:700;color:#111;margin:16px 0 8px">구킨니 (기존 품목)</h3>';
+      html += '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+      html += '<thead><tr style="border-bottom:2px solid #999">';
+      html += '<th style="padding:6px 8px;text-align:left;color:#111">품목코드</th>';
+      html += '<th style="padding:6px 8px;text-align:left;color:#111">품목명</th>';
+      html += '<th style="padding:6px 8px;text-align:right;color:#666">24년 수량</th>';
+      html += '<th style="padding:6px 8px;text-align:right;color:#666">24년 단가</th>';
+      html += '<th style="padding:6px 8px;text-align:right;color:#1d4ed8">25년 수량</th>';
+      html += '<th style="padding:6px 8px;text-align:right;color:#1d4ed8;font-weight:700">25년 단가</th>';
+      html += '<th style="padding:6px 8px;text-align:right;color:#dc2626">26년 수량</th>';
+      html += '<th style="padding:6px 8px;text-align:right;color:#dc2626;font-weight:700">26년 단가</th>';
+      html += '<th style="padding:6px 8px;text-align:right;color:#111">비고</th>';
+      html += '</tr></thead><tbody>';
+      var okTotal25 = 0, okTotal26 = 0;
+      oldKinni.forEach(function(it) {
+        var y24 = it.years['2024'] || {}, y25 = it.years['2025'] || {}, y26 = it.years['2026'] || {};
+        okTotal25 += (y25.total_amt||0); okTotal26 += (y26.total_amt||0);
+        var status = (y26.total_qty||0) === 0 ? ((y25.total_qty||0) > 0 ? '단종/전환' : '미사용') : '사용중';
+        var statusColor = status === '단종/전환' ? '#dc2626' : status === '사용중' ? '#16a34a' : '#666';
+        html += '<tr style="border-bottom:1px solid #ddd">';
+        html += '<td style="padding:5px 8px;color:#111;font-weight:600">' + it.code + '</td>';
+        html += '<td style="padding:5px 8px;color:#333">' + (it.name || it.spec || '-') + '</td>';
+        html += '<td style="padding:5px 8px;text-align:right;color:#666">' + (y24.total_qty || '-') + '</td>';
+        html += '<td style="padding:5px 8px;text-align:right;color:#666">' + (y24.avg_price ? '₩'+y24.avg_price.toLocaleString() : '-') + '</td>';
+        html += '<td style="padding:5px 8px;text-align:right;color:#1d4ed8">' + (y25.total_qty || '-') + '</td>';
+        html += '<td style="padding:5px 8px;text-align:right;color:#1d4ed8;font-weight:700">' + (y25.avg_price ? '₩'+y25.avg_price.toLocaleString() : '-') + '</td>';
+        html += '<td style="padding:5px 8px;text-align:right;color:#dc2626">' + (y26.total_qty || '-') + '</td>';
+        html += '<td style="padding:5px 8px;text-align:right;color:#dc2626;font-weight:700">' + (y26.avg_price ? '₩'+y26.avg_price.toLocaleString() : '-') + '</td>';
+        html += '<td style="padding:5px 8px;text-align:right;color:' + statusColor + ';font-weight:600">' + status + '</td>';
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    // 킨니 트렌드 요약
+    var nkAvg25 = nkQty25 > 0 ? Math.round(nkTotal25/nkQty25) : 0;
+    var nkAvg26 = nkQty26 > 0 ? Math.round(nkTotal26/nkQty26) : 0;
+    var nkPriceDiff = (nkAvg25 && nkAvg26) ? ((nkAvg26 - nkAvg25)/nkAvg25*100).toFixed(1) : '-';
+    var kinniAllTotal = nkTotal25 + (oldKinni.reduce(function(s,it){ return s + ((it.years['2025']||{}).total_amt||0); }, 0));
+
+    html += '<div style="margin-top:16px;padding:16px;background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px">';
+    html += '<h3 style="font-size:14px;font-weight:700;color:#5b21b6;margin:0 0 8px">킨니 트렌드 요약</h3>';
+    html += '<ul style="margin:0;padding:0 0 0 20px;font-size:13px;color:#333;line-height:2">';
+    html += '<li><b>구킨니 → 뉴킨니 전환 진행중</b>: 230킨니(BP1506) 26년 발주 0건 → 230뉴킨니(BP1997)로 대체</li>';
+    html += '<li>뉴킨니 25년 총 발주: <b style="color:#1d4ed8">' + nkQty25 + '연, ₩' + nkTotal25.toLocaleString() + '</b> (평균 단가 ₩' + nkAvg25.toLocaleString() + '/연)</li>';
+    html += '<li>뉴킨니 26년 발주(1~2월): <b style="color:#dc2626">' + nkQty26 + '연, ₩' + nkTotal26.toLocaleString() + '</b> (평균 단가 ₩' + nkAvg26.toLocaleString() + '/연)</li>';
+    if (nkPriceDiff !== '-') {
+      var nkDiffColor = parseFloat(nkPriceDiff) > 0 ? '#dc2626' : '#16a34a';
+      html += '<li>뉴킨니 단가 변동(25→26): <b style="color:' + nkDiffColor + '">' + (parseFloat(nkPriceDiff)>0?'+':'') + nkPriceDiff + '%</b> (₩' + nkAvg25.toLocaleString() + ' → ₩' + nkAvg26.toLocaleString() + ')</li>';
+    }
+    html += '<li>킨니 시리즈 25년 총 매입 <b>₩' + kinniAllTotal.toLocaleString() + '</b> = 대한통상 매입의 <b style="color:#b45309">' + (daehanTotal > 0 ? (kinniAllTotal/daehanTotal*100).toFixed(1) : 0) + '%</b></li>';
+    html += '<li><b style="color:#5b21b6">협상 포인트</b>: 뉴킨니(BP1997) 단가 ₩215,000 → ₩231,448 상승분(+7.7%) 동결 또는 인하 요청 필요</li>';
+    html += '</ul></div>';
+
+    // 핵심 요약
+    var hansolTotal = 0;
+    vendorTotals.forEach(function(v){ if(v.code==='2013391') hansolTotal = v.total; });
+    var daehanTotal = 0;
+    vendorTotals.forEach(function(v){ if(v.code==='2015259') daehanTotal = v.total; });
+    var kinniPctOfDaehan = daehanTotal > 0 ? (totalKinni25Amt / daehanTotal * 100).toFixed(1) : '0';
     var kinniPctOfTotal = grandTotal > 0 ? (totalKinni25Amt / grandTotal * 100).toFixed(1) : '0';
-    html += '<li>킨니가 한솔PNS 매입의 <b style="color:#fbbf24">' + kinniPctOfHansol + '%</b>, 전체 원재료의 <b style="color:#fbbf24">' + kinniPctOfTotal + '%</b> 차지</li>';
-    html += '<li>대한통상 협상 시 <b style="color:#f1f5f9">25년 한솔 단가 대비 동등 이하</b> 확보가 목표</li>';
+
+    html += '<div style="margin-top:20px;padding:16px;border:1px solid #ccc;border-radius:8px">';
+    html += '<h3 style="font-size:14px;font-weight:700;color:#111;margin:0 0 8px">핵심 요약</h3>';
+    html += '<ul style="margin:0;padding:0 0 0 20px;font-size:13px;color:#333;line-height:2">';
+    html += '<li>대한통상 2025년 총 매입액: <b style="color:#111">₩' + daehanTotal.toLocaleString() + '</b> (전체의 ' + (grandTotal > 0 ? (daehanTotal/grandTotal*100).toFixed(1) : 0) + '%)</li>';
+    html += '<li>대한통상 주요 품목(올드밀, 마테리카 등) 25년 총 발주금액: <b style="color:#111">₩' + totalKinni25Amt.toLocaleString() + '</b> (' + totalKinni25Qty.toLocaleString() + ' 연)</li>';
+    html += '<li>25년 평균 단가: <b style="color:#1d4ed8">₩' + avgP25.toLocaleString() + '</b>/연 → 26년: <b style="color:#dc2626">₩' + avgP26.toLocaleString() + '</b>/연';
+    if (avgDiff !== '-') html += ' (<span style="color:' + (parseFloat(avgDiff) > 0 ? '#dc2626' : '#16a34a') + '">' + (parseFloat(avgDiff) > 0 ? '+' : '') + avgDiff + '%</span>)';
+    html += '</li>';
+    html += '<li>대한통상이 전체 원재료 매입의 <b style="color:#b45309">' + kinniPctOfTotal + '%</b> 차지</li>';
+    html += '<li>대한통상 협상 시 <b style="color:#111">현행 단가 대비 동등 이하</b> 확보가 목표</li>';
     html += '</ul></div>';
 
     c.innerHTML = html;
