@@ -1346,7 +1346,8 @@ var _megaData = {
       {icon:'🔍',bg:'#fef2f2',fg:'#ef4444',name:'불량관리',desc:'접수 + 대응',page:'defects',badgeId:'qmDefects'},
       {icon:'📊',bg:'#eff6ff',fg:'#2563eb',name:'대시보드',desc:'현황 집계 + 통계',page:'analytics'},
       {icon:'📄',bg:'#ecfdf5',fg:'#047857',name:'보고서',desc:'단가 협상 + 분석 보고',page:'report'},
-      {icon:'⚙',bg:'#f1f5f9',fg:'#64748b',name:'설정',desc:'시스템 설정',page:'settings'}
+      {icon:'⚙',bg:'#f1f5f9',fg:'#64748b',name:'설정',desc:'시스템 설정',page:'settings'},
+      {icon:'👤',bg:'#fef3c7',fg:'#92400e',name:'사용자 관리',desc:'권한 + 계정 관리',page:'user-mgmt'}
     ]
   }
 };
@@ -1412,6 +1413,7 @@ function closeMegaMenu() {
   <h2 id="pageTitle">홈</h2>
   <div class="header-right" style="display:flex;align-items:center;gap:10px">
     <span id="erpSyncBadge" style="display:none;font-size:12px;padding:3px 10px;border-radius:12px;font-weight:500;white-space:nowrap"></span>
+    <button class="btn btn-sm" onclick="syncDDProducts()" id="ddSyncBtn" style="background:#e11d48;color:#fff;border-color:#e11d48">DD 동기화</button>
     <button class="btn btn-primary btn-sm" onclick="loadXerpInventory(true)" id="refreshBtn">ERP 동기화</button>
   </div>
 </div>
@@ -1620,6 +1622,10 @@ function closeMegaMenu() {
       <div class="hm-item" data-page="settings" onclick="showPage('settings')">
         <div class="hm-icon" style="background:#f1f5f9;color:#64748b">⚙</div>
         <div><div class="hm-name">설정</div><div class="hm-desc">시스템 설정</div></div>
+      </div>
+      <div class="hm-item" data-page="user-mgmt" onclick="showPage('user-mgmt')">
+        <div class="hm-icon" style="background:#fef3c7;color:#92400e">👤</div>
+        <div><div class="hm-name">사용자 관리</div><div class="hm-desc">권한 + 계정 관리</div></div>
       </div>
     </div>
   </div>
@@ -3065,7 +3071,10 @@ function closeMegaMenu() {
         <input type="text" id="pmSearch" placeholder="제품코드/품목명 검색" oninput="renderProductMgmt()" style="width:200px">
         <span id="pmCountBadge" style="font-size:12px;color:var(--text-muted)"></span>
       </div>
-      <button class="btn btn-sm" onclick="syncProductInfo()" style="background:#6366f1;color:#fff;border-color:#6366f1">product_info 동기화</button>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm" onclick="syncProductInfo()" style="background:#6366f1;color:#fff;border-color:#6366f1">ERP 동기화</button>
+        <button class="btn btn-sm" onclick="syncDDProducts()" style="background:#e11d48;color:#fff;border-color:#e11d48">DD 동기화</button>
+      </div>
       <button class="btn btn-primary btn-sm" onclick="showAddProductModal()">+ 품목 등록</button>
     </div>
   </div>
@@ -11477,6 +11486,29 @@ async function syncProductInfo() {
     loadProductMgmt();
   } catch (e) {
     alert('동기화 오류: ' + e.message);
+  }
+}
+
+async function syncDDProducts() {
+  try {
+    const resp = await fetch('/api/dd/sync-status');
+    const j = await resp.json();
+    if (!j.ok) { alert('DD 연결 실패: ' + (j.error || '서버 오류')); return; }
+    const d = j.data;
+    const msg = `DD(디얼디어) 품목 동기화:\n\n` +
+      `- DD 전체: ${d.totalDD}개\n` +
+      `- 로컬 DB(DD): ${d.totalDB}개\n` +
+      `- 양쪽 존재: ${d.inBoth}개 (업데이트)\n` +
+      `- DD에만 존재: ${d.onlyDD}개 (신규 추가)\n` +
+      `- DB에만 존재: ${d.onlyDB}개\n\n` +
+      `${d.totalDD}개 DD 품목을 동기화합니다. 진행하시겠습니까?`;
+    if (!confirm(msg)) return;
+    const syncResp = await fetch('/api/dd/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const result = (await syncResp.json()).data || {};
+    alert(`DD 동기화 완료!\n- 신규: ${result.inserted}개\n- 업데이트: ${result.updated}개\n- 전체: ${result.total}개`);
+    loadProductMgmt();
+  } catch (e) {
+    alert('DD 동기화 오류: ' + e.message);
   }
 }
 

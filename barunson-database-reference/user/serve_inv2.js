@@ -101,6 +101,43 @@ async function ensureXerpPool() {
   if (!ok) scheduleXerpReconnect();
 })();
 
+// ── DD (디얼디어) MySQL 연결 ─────────────────────────────────────────
+let ddPool = null;
+const ddConfig = {
+  host: envVars.DD_DB_SERVER || process.env.DD_DB_SERVER || '',
+  port: parseInt(envVars.DD_DB_PORT || process.env.DD_DB_PORT || '3306'),
+  user: envVars.DD_DB_USER || process.env.DD_DB_USER || '',
+  password: envVars.DD_DB_PASSWORD || process.env.DD_DB_PASSWORD || '',
+  database: 'wedding',
+  charset: 'utf8mb4',
+  waitForConnections: true,
+  connectionLimit: 3,
+  queueLimit: 0
+};
+
+async function ensureDdPool() {
+  if (ddPool) return ddPool;
+  if (!ddConfig.host) { console.warn('DD: DD_DB_SERVER 미설정'); return null; }
+  try {
+    const mysql = require('mysql2/promise');
+    ddPool = await mysql.createPool(ddConfig);
+    // 연결 테스트
+    const [rows] = await ddPool.query('SELECT 1');
+    console.log('DD(디얼디어) MySQL 연결 완료');
+    return ddPool;
+  } catch(e) {
+    console.warn('DD MySQL 연결 실패:', e.message);
+    ddPool = null;
+    return null;
+  }
+}
+
+// DD 초기 연결 시도
+(async function initDD() {
+  if (ddConfig.host) await ensureDdPool();
+  else console.log('ℹ DD_DB_SERVER 미설정 → DD 동기화 비활성');
+})();
+
 // ── Google Sheet 동기화 (Apps Script 웹앱 방식) ─────────────────────
 const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwwhOP9gtC-8l6BFSRRJFwv2UrnYCtXxvaD9_NBHcWTsKuGl3Hlk5qqdCxnla-gxHMa/exec';
 let gAccessToken = null;
@@ -6230,6 +6267,80 @@ async function handleRequest(req, res) {
     } catch (e) {
       fail(res, 500, 'sync 오류: ' + e.message);
     }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  DD (디얼디어) 품목 동기화
+  // ════════════════════════════════════════════════════════════════════
+
+  // GET /api/dd/sync-status — DD 품목 동기화 상태 확인
+  if (pathname === '/api/dd/sync-status' && method === 'GET') {
+    const pool = await ensureDdPool();
+    if (!pool) { fail(res, 503, 'DD 데이터베이스 미연결 (DD_DB_SERVER 설정 확인)'); return; }
+    try {
+      const [ddRows] = await pool.query("SELECT id, code, name, type, price, sale_price, is_display, printing_company FROM products WHERE deleted_at IS NULL");
+      const dbRows = db.prepare("SELECT product_code FROM products WHERE origin = 'DD'").all();
+      const ddCodes = new Set(ddRows.map(r => r.code));
+      const dbCodes = new Set(dbRows.map(r => r.product_code));
+      const inBoth = [...ddCodes].filter(c => dbCodes.has(c)).length;
+      const onlyDD = [...ddCodes].filter(c => !dbCodes.has(c)).length;
+      const onlyDB = [...dbCodes].filter(c => !ddCodes.has(c)).length;
+      ok(res, { totalDD: ddRows.length, totalDB: dbRows.length, inBoth, onlyDD, onlyDB, ddProducts: ddRows });
+    } catch(e) { fail(res, 500, 'DD 동기화 상태 조회 실패: ' + e.message); }
+    return;
+  }
+
+  // POST /api/dd/sync — DD 품목 동기화 실행
+  if (pathname === '/api/dd/sync' && method === 'POST') {
+    const pool = await ensureDdPool();
+    if (!pool) { fail(res, 503, 'DD 데이터베이스 미연결'); return; }
+    try {
+      const [ddRows] = await pool.query("SELECT id, code, name, type, price, sale_price, is_display, printing_company FROM products WHERE deleted_at IS NULL");
+      const upsert = db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, category, status, memo, updated_at)
+        VALUES (?, ?, 'DD', 'DD', ?, ?, ?, datetime('now','localtime'))
+        ON CONFLICT(product_code) DO UPDATE SET
+          product_name = excluded.product_name,
+          brand = 'DD',
+          origin = 'DD',
+          category = excluded.category,
+          status = excluded.status,
+          memo = excluded.memo,
+          updated_at = datetime('now','localtime')`);
+      let inserted = 0, updated = 0;
+      const tx = db.transaction(() => {
+        for (const r of ddRows) {
+          const code = r.code || '';
+          if (!code) continue;
+          const existing = db.prepare("SELECT id FROM products WHERE product_code = ?").get(code);
+          const status = r.is_display === 'Y' ? 'active' : 'inactive';
+          const memo = `DD#${r.id} | ${r.printing_company || ''} | ${r.price}→${r.sale_price}원`;
+          upsert.run(code, r.name || '', r.type || 'wcard', status, memo);
+          if (existing) updated++; else inserted++;
+        }
+      });
+      tx();
+      productInfoCache = null;
+      ok(res, { inserted, updated, total: ddRows.length });
+    } catch(e) { fail(res, 500, 'DD 동기화 실패: ' + e.message); }
+    return;
+  }
+
+  // GET /api/dd/sales — DD 오늘 판매현황
+  if (pathname === '/api/dd/sales' && method === 'GET') {
+    const pool = await ensureDdPool();
+    if (!pool) { fail(res, 503, 'DD 데이터베이스 미연결'); return; }
+    try {
+      const days = parseInt(parsed.searchParams.get('days')) || 1;
+      const startDate = new Date(); startDate.setDate(startDate.getDate() - days + 1);
+      const startStr = startDate.toISOString().slice(0, 10);
+      const [rows] = await pool.query(
+        `SELECT product_code, product_name, COUNT(*) as order_count, SUM(qty) as total_qty
+         FROM order_items WHERE created_at >= ? GROUP BY product_code, product_name ORDER BY total_qty DESC LIMIT 20`,
+        [startStr]
+      );
+      ok(res, rows);
+    } catch(e) { fail(res, 500, 'DD 판매 조회 실패: ' + e.message); }
     return;
   }
 
