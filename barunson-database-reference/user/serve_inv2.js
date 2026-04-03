@@ -8006,6 +8006,7 @@ async function handleRequest(req, res) {
 
   // POST /api/warehouses — 창고 등록
   if (pathname === '/api/warehouses' && method === 'POST') {
+    const body = await readJSON(req);
     const { code, name, location, description } = body;
     if (!code || !name) { fail(res, 400, '창고코드와 이름은 필수입니다'); return; }
     try {
@@ -8021,6 +8022,7 @@ async function handleRequest(req, res) {
   // PUT /api/warehouses/:id — 창고 수정
   const whPutMatch = pathname.match(/^\/api\/warehouses\/(\d+)$/);
   if (whPutMatch && method === 'PUT') {
+    const body = await readJSON(req);
     const whId = parseInt(whPutMatch[1]);
     const { name, location, description, status } = body;
     const fields = [];
@@ -8082,6 +8084,7 @@ async function handleRequest(req, res) {
 
   // POST /api/warehouses/inventory — 재고 입력/수정 (단건)
   if (pathname === '/api/warehouses/inventory' && method === 'POST') {
+    const body = await readJSON(req);
     const { warehouse_id, product_code, product_name, quantity } = body;
     if (!warehouse_id || !product_code) { fail(res, 400, '창고ID와 제품코드는 필수입니다'); return; }
     const qty = parseInt(quantity) || 0;
@@ -8097,6 +8100,7 @@ async function handleRequest(req, res) {
 
   // POST /api/warehouses/inventory/bulk — 대량 재고 입력 (XERP 동기화 등)
   if (pathname === '/api/warehouses/inventory/bulk' && method === 'POST') {
+    const body = await readJSON(req);
     const { warehouse_id, items } = body;
     if (!warehouse_id || !Array.isArray(items)) { fail(res, 400, '창고ID와 items 배열 필수'); return; }
     const upsert = db.prepare(`INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity)
@@ -8116,6 +8120,7 @@ async function handleRequest(req, res) {
 
   // POST /api/warehouses/transfer — 창고 간 재고 이동
   if (pathname === '/api/warehouses/transfer' && method === 'POST') {
+    const body = await readJSON(req);
     const { from_warehouse, to_warehouse, product_code, product_name, quantity, operator, memo } = body;
     if (!from_warehouse || !to_warehouse || !product_code || !quantity) {
       fail(res, 400, '출발창고, 도착창고, 제품코드, 수량은 필수입니다'); return;
@@ -8164,6 +8169,7 @@ async function handleRequest(req, res) {
 
   // POST /api/warehouses/adjust — 재고 조정
   if (pathname === '/api/warehouses/adjust' && method === 'POST') {
+    const body = await readJSON(req);
     const { warehouse_id, product_code, product_name, new_quantity, reason, operator } = body;
     if (!warehouse_id || !product_code || new_quantity === undefined) {
       fail(res, 400, '창고ID, 제품코드, 조정수량은 필수입니다'); return;
@@ -8204,9 +8210,17 @@ async function handleRequest(req, res) {
     try {
       const pool = await ensureXerpPool();
       const result = await pool.request().query(`
-        SELECT mi.mmCode AS product_code, mi.mmName AS product_name, mi.AvailQty AS quantity
-        FROM XERP.dbo.mmInventory mi WHERE mi.AvailQty > 0
+        SELECT RTRIM(ItemCode) AS product_code, SUM(OhQty) AS quantity
+        FROM mmInventory WITH (NOLOCK)
+        WHERE SiteCode = 'BK10' AND OhQty > 0
+        GROUP BY RTRIM(ItemCode)
       `);
+      // 로컬 products 테이블에서 품목명 매칭
+      const localProducts = {};
+      try {
+        const prods = db.prepare("SELECT product_code, product_name FROM products").all();
+        for (const p of prods) localProducts[p.product_code] = p.product_name;
+      } catch(e) {}
       const defaultWh = db.prepare("SELECT id FROM warehouses WHERE is_default=1 LIMIT 1").get();
       if (!defaultWh) { fail(res, 500, '기본 창고가 설정되지 않았습니다'); return; }
 
@@ -8215,7 +8229,7 @@ async function handleRequest(req, res) {
       const tx = db.transaction((rows) => {
         let cnt = 0;
         for (const r of rows) {
-          upsert.run(defaultWh.id, r.product_code, r.product_name || '', parseInt(r.quantity) || 0);
+          upsert.run(defaultWh.id, r.product_code, localProducts[r.product_code] || r.product_code, parseInt(r.quantity) || 0);
           cnt++;
         }
         return cnt;
