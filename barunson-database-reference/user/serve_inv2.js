@@ -8135,19 +8135,27 @@ async function handleRequest(req, res) {
       fail(res, 400, `출발 창고 재고 부족 (현재: ${fromInv ? fromInv.quantity : 0})`); return;
     }
 
+    // 창고명 조회
+    const fromWh = db.prepare("SELECT name FROM warehouses WHERE id=?").get(from_warehouse);
+    const toWh = db.prepare("SELECT name FROM warehouses WHERE id=?").get(to_warehouse);
+    const now = new Date().toISOString().slice(0, 10);
+    const autoMemo = memo || `${now} ${qty}개 ${fromWh ? fromWh.name : ''}→${toWh ? toWh.name : ''}`;
+
     const tx = db.transaction(() => {
-      // 출발 창고 차감
-      db.prepare("UPDATE warehouse_inventory SET quantity=quantity-?, updated_at=datetime('now','localtime') WHERE warehouse_id=? AND product_code=?").run(qty, from_warehouse, product_code);
-      // 도착 창고 추가
+      // 출발 창고 차감 + 메모 업데이트
+      const fromMemo = `${now} ${qty}개 출고→${toWh ? toWh.name : ''}`;
+      db.prepare("UPDATE warehouse_inventory SET quantity=quantity-?, memo=?, updated_at=datetime('now','localtime') WHERE warehouse_id=? AND product_code=?").run(qty, fromMemo, from_warehouse, product_code);
+      // 도착 창고 추가 + 메모 업데이트
+      const toMemo = `${now} ${qty}개 입고←${fromWh ? fromWh.name : ''}`;
       const toInv = db.prepare("SELECT * FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?").get(to_warehouse, product_code);
       if (toInv) {
-        db.prepare("UPDATE warehouse_inventory SET quantity=quantity+?, updated_at=datetime('now','localtime') WHERE warehouse_id=? AND product_code=?").run(qty, to_warehouse, product_code);
+        db.prepare("UPDATE warehouse_inventory SET quantity=quantity+?, memo=?, updated_at=datetime('now','localtime') WHERE warehouse_id=? AND product_code=?").run(qty, toMemo, to_warehouse, product_code);
       } else {
-        db.prepare("INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity) VALUES (?, ?, ?, ?)").run(to_warehouse, product_code, product_name || fromInv.product_name || '', qty);
+        db.prepare("INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity, memo) VALUES (?, ?, ?, ?, ?)").run(to_warehouse, product_code, product_name || fromInv.product_name || '', qty, toMemo);
       }
       // 이력 기록
       db.prepare("INSERT INTO warehouse_transfers (from_warehouse, to_warehouse, product_code, product_name, quantity, operator, memo) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(from_warehouse, to_warehouse, product_code, product_name || fromInv.product_name || '', qty, operator || '', memo || '');
+        .run(from_warehouse, to_warehouse, product_code, product_name || fromInv.product_name || '', qty, operator || '', autoMemo);
     });
     tx();
     ok(res, { message: `${qty}개 이동 완료` });
