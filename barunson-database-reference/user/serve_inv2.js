@@ -30,6 +30,8 @@ const COST_CACHE_TTL = 30 * 60 * 1000; // 30분
 let acctStatsCache = null, acctStatsCacheTime = 0;
 let trialBalanceCache = null, trialBalanceCacheTime = 0;
 const ACCT_CACHE_TTL = 30 * 60 * 1000; // 30분
+// ── 세금계산서 캐시 ──
+let taxInvoiceSummaryCache = null, taxInvoiceSummaryCacheTime = 0;
 const DEPT_GUBUN_LABELS = {'SB':'쇼핑몰B','BR':'바른손','ST':'스토어','SS':'쇼핑몰S','SA':'쇼핑몰A','OB':'기타B','DE':'기타'};
 const BRAND_LABELS = {'B':'바른손카드','S':'비핸즈','C':'더카드','X':'디얼디어','W':'W카드','N':'네이처','I':'이니스','H':'비핸즈프리미엄','F':'플라워','D':'디자인카드','P':'프리미어','M':'모바일','G':'글로벌','U':'유니세프','Y':'유니크','K':'BK','T':'프리미어더카드','A':'기타'};
 // .env를 여러 위치에서 탐색
@@ -1910,6 +1912,47 @@ function classifyAccount(code) {
   return { acc_type, acc_group, parent_code, depth, sort_order, acc_name: name };
 }
 
+// ── 작업지시 SQLite 테이블 ──
+db.exec(`CREATE TABLE IF NOT EXISTS work_orders (
+  wo_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  wo_number   TEXT UNIQUE NOT NULL,
+  request_id  INTEGER,
+  product_code TEXT,
+  product_name TEXT DEFAULT '',
+  brand       TEXT DEFAULT '',
+  ordered_qty INTEGER DEFAULT 0,
+  produced_qty INTEGER DEFAULT 0,
+  defect_qty  INTEGER DEFAULT 0,
+  status      TEXT DEFAULT 'planned',
+  priority    TEXT DEFAULT 'normal',
+  start_date  TEXT,
+  due_date    TEXT,
+  completed_date TEXT,
+  printer_vendor TEXT DEFAULT '',
+  post_vendor TEXT DEFAULT '',
+  paper_type  TEXT DEFAULT '',
+  notes       TEXT DEFAULT '',
+  cost_material REAL DEFAULT 0,
+  cost_labor   REAL DEFAULT 0,
+  cost_overhead REAL DEFAULT 0,
+  cost_total   REAL DEFAULT 0,
+  created_by  TEXT DEFAULT '',
+  created_at  TEXT DEFAULT (datetime('now','localtime')),
+  updated_at  TEXT DEFAULT (datetime('now','localtime'))
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS work_order_logs (
+  log_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  wo_id       INTEGER NOT NULL,
+  wo_number   TEXT,
+  action      TEXT,
+  from_status TEXT,
+  to_status   TEXT,
+  qty_change  INTEGER DEFAULT 0,
+  actor       TEXT DEFAULT '',
+  details     TEXT DEFAULT '',
+  created_at  TEXT DEFAULT (datetime('now','localtime'))
+)`);
+
 // JWT 시크릿 (서버 고유 — 최초 생성 후 파일 저장)
 const JWT_SECRET_PATH = path.join(DATA_DIR, '.jwt_secret');
 let JWT_SECRET;
@@ -2016,6 +2059,9 @@ const ALL_PAGES = [
   { id: 'trial-balance', name: '시산표', group: '회계' },
   { id: 'financial-statements', name: '재무제표', group: '회계' },
   { id: 'ar-ap', name: '채권/채무', group: '회계' },
+  { id: 'tax-invoice', name: '세금계산서', group: '회계' },
+  // 생산
+  { id: 'work-order', name: '작업지시', group: '생산' },
   // 기준정보
   { id: 'vendors', name: '거래처 관리', group: '기준정보' },
   { id: 'product-mgmt', name: '품목관리', group: '기준정보' },
@@ -2042,7 +2088,7 @@ const ROLE_PERMISSIONS = {
   purchase: ['dashboard', 'inventory', 'warehouse', 'shipments', 'auto-order', 'create-po', 'po-list', 'os-register',
     'delivery-schedule', 'receipts', 'invoices', 'notes', 'product-mgmt', 'bom', 'mrp', 'post-process', 'defects',
     'closing', 'report', 'po-mgmt', 'china-shipment', 'mat-purchase', 'tasks', 'meeting-log', 'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'cost-mgmt', 'board', 'audit-log', 'exec-dashboard', 'customer-orders', 'shipping',
-    'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap'],
+    'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'work-order'],
   production: ['dashboard', 'inventory', 'warehouse', 'shipments', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks'],
   viewer: ['dashboard', 'inventory', 'warehouse', 'shipments', 'po-list', 'notes', 'sales', 'sales-barun', 'sales-gift', 'cost-mgmt', 'board', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap'],
@@ -10771,6 +10817,211 @@ async function handleRequest(req, res) {
     db.prepare("UPDATE notices SET status = 'deleted', updated_at = datetime('now','localtime') WHERE id = ?").run(id);
     auditLog(decoded.userId, decoded.username, 'notice_delete', 'notices', id, '공지 삭제', clientIP);
     ok(res, { message: '공지 삭제 완료' }); return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  세금계산서 API (Tax Invoice)
+  // ════════════════════════════════════════════════════════════════════
+
+  // ── GET /api/tax-invoice/list ── 세금계산서 목록
+  if (pathname === '/api/tax-invoice/list' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const from = qs.get('from') || (() => { const d = new Date(); d.setMonth(d.getMonth()-1); return d.toISOString().slice(0,10).replace(/-/g,''); })();
+    const to = qs.get('to') || new Date().toISOString().slice(0,10).replace(/-/g,'');
+    const arAp = qs.get('type') || ''; // AR, AP, or '' for all
+    const search = qs.get('search') || '';
+    const offset = parseInt(qs.get('offset') || '0', 10);
+    const limit = Math.min(parseInt(qs.get('limit') || '100', 10), 500);
+    const sources = { xerp: 'unknown' };
+    let invoices = [], totalCount = 0;
+    try {
+      const pool = await ensureXerpPool();
+      sources.xerp = 'ok';
+      let whereExtra = '';
+      const cReq = pool.request().input('from', from).input('to', to);
+      const dReq = pool.request().input('from', from).input('to', to).input('offset', offset).input('limit', limit);
+      if (arAp) { whereExtra += ' AND h.ArApGubun = @arAp'; cReq.input('arAp', arAp); dReq.input('arAp', arAp); }
+      if (search) { whereExtra += " AND (h.InvoiceNo LIKE @search OR h.CsCode LIKE @search)"; cReq.input('search', '%'+search+'%'); dReq.input('search', '%'+search+'%'); }
+      const countR = await cReq.query(`SELECT COUNT(*) AS cnt FROM rpInvoiceHeader h WITH(NOLOCK) WHERE h.SiteCode='BK10' AND h.InvoiceDate >= @from AND h.InvoiceDate <= @to ${whereExtra}`);
+      totalCount = countR.recordset[0].cnt;
+      const dataR = await dReq.query(`
+        SELECT RTRIM(h.InvoiceNo) AS invoice_no, h.InvoiceDate, h.ArApGubun,
+               RTRIM(h.CsCode) AS cs_code, RTRIM(h.CsRegNo) AS cs_reg_no,
+               ISNULL(h.SupplyAmnt,0) AS supply_amt, ISNULL(h.VatAmnt,0) AS vat_amt,
+               h.TaxCode, RTRIM(h.DocNo) AS doc_no, h.EseroUp, h.RelCheck, h.BillCheck,
+               RTRIM(h.CsEmail) AS cs_email
+        FROM rpInvoiceHeader h WITH(NOLOCK)
+        WHERE h.SiteCode='BK10' AND h.InvoiceDate >= @from AND h.InvoiceDate <= @to ${whereExtra}
+        ORDER BY h.InvoiceDate DESC, h.InvoiceNo DESC
+        OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+      `);
+      invoices = dataR.recordset;
+    } catch (e) { sources.xerp = 'error: ' + e.message; }
+    const totals = {
+      count: totalCount,
+      supply: invoices.reduce((s,r) => s + (r.supply_amt||0), 0),
+      vat: invoices.reduce((s,r) => s + (r.vat_amt||0), 0),
+      electronic: invoices.filter(r => (r.EseroUp||'').trim() === 'Y').length,
+    };
+    ok(res, { invoices, totalCount, offset, limit, totals, sources }); return;
+  }
+
+  // ── GET /api/tax-invoice/detail/:invoiceNo ── 세금계산서 상세
+  if (pathname.match(/^\/api\/tax-invoice\/detail\/(.+)$/) && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    const invoiceNo = decodeURIComponent(pathname.match(/^\/api\/tax-invoice\/detail\/(.+)$/)[1]);
+    const sources = { xerp: 'unknown' };
+    let header = null, items = [];
+    try {
+      const pool = await ensureXerpPool();
+      sources.xerp = 'ok';
+      const hR = await pool.request().input('no', invoiceNo).query(`
+        SELECT RTRIM(h.InvoiceNo) AS invoice_no, h.InvoiceDate, h.ArApGubun,
+               RTRIM(h.CsCode) AS cs_code, RTRIM(h.CsRegNo) AS cs_reg_no,
+               RTRIM(h.OurRegNo) AS our_reg_no,
+               ISNULL(h.SupplyAmnt,0) AS supply_amt, ISNULL(h.VatAmnt,0) AS vat_amt,
+               h.TaxCode, RTRIM(h.DocNo) AS doc_no, h.EseroUp, h.RelCheck,
+               RTRIM(h.CsEmail) AS cs_email, RTRIM(h.CsMobile) AS cs_mobile
+        FROM rpInvoiceHeader h WITH(NOLOCK) WHERE h.SiteCode='BK10' AND RTRIM(h.InvoiceNo)=@no
+      `);
+      if (hR.recordset.length > 0) header = hR.recordset[0];
+      const iR = await pool.request().input('no', invoiceNo).query(`
+        SELECT i.InvoiceSerNo, i.ItemDate, RTRIM(i.ItemName) AS item_name,
+               ISNULL(i.ItemQty,0) AS qty, ISNULL(i.ItemPrice,0) AS price,
+               ISNULL(i.ItemAmnt,0) AS amt, ISNULL(i.ItemVatAmnt,0) AS vat
+        FROM rpInvoiceItem i WITH(NOLOCK)
+        WHERE i.SiteCode='BK10' AND RTRIM(i.InvoiceNo)=@no
+        ORDER BY i.InvoiceSerNo
+      `);
+      items = iR.recordset;
+    } catch (e) { sources.xerp = 'error: ' + e.message; }
+    ok(res, { header, items, sources }); return;
+  }
+
+  // ── GET /api/tax-invoice/summary ── 월별 세금계산서 집계
+  if (pathname === '/api/tax-invoice/summary' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const year = qs.get('year') || new Date().getFullYear().toString();
+    const sources = { xerp: 'unknown' };
+    let monthly = [];
+    try {
+      const pool = await ensureXerpPool();
+      sources.xerp = 'ok';
+      const r = await pool.request().input('yearStart', year+'0101').input('yearEnd', year+'1231').query(`
+        SELECT LEFT(h.InvoiceDate,6) AS ym, h.ArApGubun,
+               COUNT(*) AS cnt,
+               ISNULL(SUM(h.SupplyAmnt),0) AS supply,
+               ISNULL(SUM(h.VatAmnt),0) AS vat,
+               SUM(CASE WHEN RTRIM(h.EseroUp)='Y' THEN 1 ELSE 0 END) AS electronic
+        FROM rpInvoiceHeader h WITH(NOLOCK)
+        WHERE h.SiteCode='BK10' AND h.InvoiceDate >= @yearStart AND h.InvoiceDate <= @yearEnd
+        GROUP BY LEFT(h.InvoiceDate,6), h.ArApGubun
+        ORDER BY LEFT(h.InvoiceDate,6), h.ArApGubun
+      `);
+      monthly = r.recordset;
+    } catch (e) { sources.xerp = 'error: ' + e.message; }
+    ok(res, { year, monthly, sources }); return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  작업지시 API (Work Order)
+  // ════════════════════════════════════════════════════════════════════
+
+  // ── GET /api/work-orders ── 작업지시 목록
+  if (pathname === '/api/work-orders' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const status = qs.get('status') || '';
+    const search = qs.get('search') || '';
+    let where = '1=1';
+    if (status) where += " AND status = '" + status.replace(/'/g, '') + "'";
+    if (search) where += " AND (wo_number LIKE '%" + search.replace(/'/g, '') + "%' OR product_name LIKE '%" + search.replace(/'/g, '') + "%')";
+    const orders = db.prepare(`SELECT * FROM work_orders WHERE ${where} ORDER BY created_at DESC LIMIT 200`).all();
+    const summary = db.prepare(`SELECT status, COUNT(*) AS cnt FROM work_orders GROUP BY status`).all();
+    const statusMap = {};
+    summary.forEach(s => { statusMap[s.status] = s.cnt; });
+    ok(res, { orders, summary: statusMap, total: orders.length }); return;
+  }
+
+  // ── POST /api/work-orders ── 작업지시 생성
+  if (pathname === '/api/work-orders' && method === 'POST') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    const body = await parseBody(req);
+    const now = new Date();
+    const woNum = 'WO' + now.getFullYear().toString().slice(2) + String(now.getMonth()+1).padStart(2,'0') + String(now.getDate()).padStart(2,'0') + '-' + String(Math.floor(Math.random()*9999)).padStart(4,'0');
+    const stmt = db.prepare(`INSERT INTO work_orders (wo_number, request_id, product_code, product_name, brand, ordered_qty, status, priority, start_date, due_date, printer_vendor, post_vendor, paper_type, notes, created_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const result = stmt.run(woNum, body.request_id||null, body.product_code||'', body.product_name||'', body.brand||'', body.ordered_qty||0, 'planned', body.priority||'normal', body.start_date||now.toISOString().slice(0,10), body.due_date||'', body.printer_vendor||'', body.post_vendor||'', body.paper_type||'', body.notes||'', decoded.username||'');
+    db.prepare(`INSERT INTO work_order_logs (wo_id, wo_number, action, to_status, actor, details) VALUES (?,?,?,?,?,?)`).run(result.lastInsertRowid, woNum, 'created', 'planned', decoded.username||'', '작업지시 생성');
+    ok(res, { wo_id: result.lastInsertRowid, wo_number: woNum }); return;
+  }
+
+  // ── GET /api/work-orders/:id ── 작업지시 상세
+  if (pathname.match(/^\/api\/work-orders\/(\d+)$/) && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    const id = parseInt(pathname.match(/\/(\d+)$/)[1], 10);
+    const wo = db.prepare('SELECT * FROM work_orders WHERE wo_id = ?').get(id);
+    const logs = db.prepare('SELECT * FROM work_order_logs WHERE wo_id = ? ORDER BY created_at DESC').all(id);
+    if (!wo) { fail(res, 404, '작업지시 없음'); return; }
+    ok(res, { order: wo, logs }); return;
+  }
+
+  // ── PUT /api/work-orders/:id ── 작업지시 수정 (상태변경, 실적등록)
+  if (pathname.match(/^\/api\/work-orders\/(\d+)$/) && method === 'PUT') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    const id = parseInt(pathname.match(/\/(\d+)$/)[1], 10);
+    const body = await parseBody(req);
+    const wo = db.prepare('SELECT * FROM work_orders WHERE wo_id = ?').get(id);
+    if (!wo) { fail(res, 404, '작업지시 없음'); return; }
+    const oldStatus = wo.status;
+    const updates = [];
+    const params = [];
+    if (body.status) { updates.push('status=?'); params.push(body.status); }
+    if (body.produced_qty !== undefined) { updates.push('produced_qty=?'); params.push(body.produced_qty); }
+    if (body.defect_qty !== undefined) { updates.push('defect_qty=?'); params.push(body.defect_qty); }
+    if (body.cost_material !== undefined) { updates.push('cost_material=?'); params.push(body.cost_material); }
+    if (body.cost_labor !== undefined) { updates.push('cost_labor=?'); params.push(body.cost_labor); }
+    if (body.cost_overhead !== undefined) { updates.push('cost_overhead=?'); params.push(body.cost_overhead); }
+    if (body.notes !== undefined) { updates.push('notes=?'); params.push(body.notes); }
+    if (body.status === 'in_progress' && !wo.start_date) { updates.push("start_date=date('now','localtime')"); }
+    if (body.status === 'completed') { updates.push("completed_date=datetime('now','localtime')"); }
+    // 원가 합계
+    const cm = body.cost_material !== undefined ? body.cost_material : wo.cost_material;
+    const cl = body.cost_labor !== undefined ? body.cost_labor : wo.cost_labor;
+    const co = body.cost_overhead !== undefined ? body.cost_overhead : wo.cost_overhead;
+    updates.push('cost_total=?'); params.push((cm||0) + (cl||0) + (co||0));
+    updates.push("updated_at=datetime('now','localtime')");
+    params.push(id);
+    if (updates.length > 1) {
+      db.prepare(`UPDATE work_orders SET ${updates.join(',')} WHERE wo_id=?`).run(...params);
+    }
+    // 로그
+    let action = 'updated';
+    let details = '';
+    if (body.status && body.status !== oldStatus) { action = 'status_change'; details = oldStatus + ' → ' + body.status; }
+    else if (body.produced_qty !== undefined) { action = 'production_report'; details = '생산수량: ' + body.produced_qty + ', 불량: ' + (body.defect_qty||0); }
+    else if (body.cost_material !== undefined || body.cost_labor !== undefined) { action = 'cost_update'; details = '원가 업데이트'; }
+    db.prepare(`INSERT INTO work_order_logs (wo_id, wo_number, action, from_status, to_status, qty_change, actor, details) VALUES (?,?,?,?,?,?,?,?)`).run(id, wo.wo_number, action, oldStatus, body.status||oldStatus, body.produced_qty||0, decoded.username||'', details);
+    ok(res, { message: '업데이트 완료' }); return;
+  }
+
+  // ── GET /api/work-orders/stats ── 작업지시 통계
+  if (pathname === '/api/work-orders/stats' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    const statusSummary = db.prepare(`SELECT status, COUNT(*) AS cnt, SUM(ordered_qty) AS total_ordered, SUM(produced_qty) AS total_produced, SUM(defect_qty) AS total_defect, SUM(cost_total) AS total_cost FROM work_orders GROUP BY status`).all();
+    const monthlyOrders = db.prepare(`SELECT strftime('%Y-%m', created_at) AS ym, COUNT(*) AS cnt, SUM(ordered_qty) AS total_qty FROM work_orders GROUP BY strftime('%Y-%m', created_at) ORDER BY ym DESC LIMIT 12`).all();
+    const recentCompleted = db.prepare(`SELECT * FROM work_orders WHERE status='completed' ORDER BY completed_date DESC LIMIT 10`).all();
+    ok(res, { statusSummary, monthlyOrders, recentCompleted }); return;
   }
 
   // ════════════════════════════════════════════════════════════════════
