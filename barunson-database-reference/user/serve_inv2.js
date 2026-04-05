@@ -2174,7 +2174,6 @@ const ALL_PAGES = [
   // 생산
   { id: 'work-order', name: '작업지시', group: '생산' },
   { id: 'lot-tracking', name: '로트추적', group: '생산' },
-  { id: 'material-price', name: '원재료단가', group: '구매' },
   // 기준정보
   { id: 'vendors', name: '거래처 관리', group: '기준정보' },
   { id: 'product-mgmt', name: '품목관리', group: '기준정보' },
@@ -2201,7 +2200,7 @@ const ROLE_PERMISSIONS = {
   purchase: ['dashboard', 'inventory', 'warehouse', 'shipments', 'auto-order', 'create-po', 'po-list', 'os-register',
     'delivery-schedule', 'receipts', 'invoices', 'notes', 'product-mgmt', 'bom', 'mrp', 'post-process', 'defects',
     'closing', 'report', 'po-mgmt', 'china-shipment', 'mat-purchase', 'tasks', 'meeting-log', 'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'cost-mgmt', 'board', 'audit-log', 'exec-dashboard', 'customer-orders', 'shipping',
-    'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'work-order', 'lot-tracking', 'material-price'],
+    'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'work-order', 'lot-tracking'],
   production: ['dashboard', 'inventory', 'warehouse', 'shipments', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks'],
   viewer: ['dashboard', 'inventory', 'warehouse', 'shipments', 'po-list', 'notes', 'sales', 'sales-barun', 'sales-gift', 'cost-mgmt', 'board', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap'],
@@ -2440,6 +2439,19 @@ async function handleRequest(req, res) {
   //  AUTH API (공개 — 토큰 불필요)
   // ════════════════════════════════════════════════════════════════════
   const clientIP = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+
+  // GET /api/auth/local-bypass — 로컬 개발용 인증 우회 (localhost에서만 작동)
+  if (pathname === '/api/auth/local-bypass' && method === 'GET') {
+    const remoteAddr = req.socket.remoteAddress || '';
+    const isLocal = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
+    if (!isLocal) { fail(res, 403, '로컬에서만 사용 가능합니다'); return; }
+    const user = db.prepare("SELECT user_id, username, display_name, role, email, permissions, favorites FROM users WHERE role = 'admin' AND is_active = 1 LIMIT 1").get();
+    if (!user) { fail(res, 404, '관리자 계정이 없습니다'); return; }
+    const token = signToken(user);
+    let favs = []; try { favs = JSON.parse(user.favorites || '[]'); } catch {}
+    ok(res, { token, user: { user_id: user.user_id, username: user.username, display_name: user.display_name, role: user.role, email: user.email }, permissions: ['*'], favorites: favs });
+    return;
+  }
 
   // POST /api/auth/login
   if (pathname === '/api/auth/login' && method === 'POST') {

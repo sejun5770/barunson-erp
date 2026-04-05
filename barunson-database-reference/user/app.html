@@ -1378,7 +1378,6 @@ var _megaData = {
       {icon:'📅',bg:'#ecfdf5',fg:'#0d9488',name:'입고일정',desc:'입고 예정 일정',page:'delivery-schedule',origins:['한국','중국','더기프트']},
       {icon:'📥',bg:'#f0fdf4',fg:'#059669',name:'입고관리',desc:'수령 처리 + 불량 기록',page:'receipts',origins:['한국','중국','더기프트']},
       {icon:'🏷',bg:'#f5f3ff',fg:'#8b5cf6',name:'OS등록',desc:'외주 생산 등록',page:'os-register'},
-      {icon:'💲',bg:'#fef9c3',fg:'#a16207',name:'원재료 단가',desc:'단가표 관리 + XERP 비교',page:'material-price'}
     ]
   },
   sales: {
@@ -4937,6 +4936,7 @@ function closeMegaMenu() { /* no-op */ }
     <div class="tab" data-closing-tab="outsource-proc" onclick="switchClosingTab('outsource-proc')">외주가공비</div>
     <div class="tab" data-closing-tab="outsource-sub" onclick="switchClosingTab('outsource-sub')">외주비</div>
     <div class="tab" data-closing-tab="raw-material" onclick="switchClosingTab('raw-material')">원재료</div>
+    <div class="tab" data-closing-tab="material-price" onclick="switchClosingTab('material-price')">원재료 단가</div>
   </div>
 
   <!-- 탭 콘텐츠 -->
@@ -4951,6 +4951,23 @@ function closeMegaMenu() { /* no-op */ }
   </div>
   <div id="closing-tab-raw-material" style="display:none;overflow-x:auto;margin-top:0">
     <div id="closingRawMaterialContent"></div>
+  </div>
+  <div id="closing-tab-material-price" style="display:none;margin-top:12px">
+    <div style="display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin-bottom:12px" id="mpTabs">
+      <div class="tab active" data-mptab="list" onclick="switchMpTab('list')" style="padding:10px 20px;cursor:pointer;font-size:13px;font-weight:600;color:#2563eb;border-bottom:2px solid #2563eb">단가표</div>
+      <div class="tab" data-mptab="compare" onclick="switchMpTab('compare')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">XERP 비교</div>
+      <div class="tab" data-mptab="upload" onclick="switchMpTab('upload')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">엑셀 업로드</div>
+    </div>
+    <div id="mpToolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <select id="mpVendorFilter" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+        <option value="">전체 제지사</option>
+      </select>
+      <input type="text" id="mpSearch" placeholder="품목코드/품명 검색" style="padding:6px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:180px">
+      <button class="btn btn-sm" onclick="mpDoSearch()" style="background:#2563eb;color:#fff">조회</button>
+      <button class="btn btn-sm" onclick="exportMpExcel()">엑셀</button>
+    </div>
+    <div id="mpKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px"></div>
+    <div id="mpContent" style="min-height:400px;overflow-x:auto"></div>
   </div>
 </div>
 
@@ -5096,24 +5113,6 @@ function closeMegaMenu() { /* no-op */ }
   <div id="taxPaging" style="display:flex;justify-content:center;gap:8px;margin-top:12px"></div>
 </div>
 
-<!-- ========== 원재료 단가 (Material Price) PAGE ========== -->
-<div class="page" id="page-material-price" style="background:#fff;color:#111">
-  <div style="display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin-bottom:12px" id="mpTabs">
-    <div class="tab active" data-mptab="list" onclick="switchMpTab('list')" style="padding:10px 20px;cursor:pointer;font-size:13px;font-weight:600;color:#2563eb;border-bottom:2px solid #2563eb">단가표</div>
-    <div class="tab" data-mptab="compare" onclick="switchMpTab('compare')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">XERP 비교</div>
-    <div class="tab" data-mptab="upload" onclick="switchMpTab('upload')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">엑셀 업로드</div>
-  </div>
-  <div id="mpToolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
-    <select id="mpVendorFilter" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
-      <option value="">전체 제지사</option>
-    </select>
-    <input type="text" id="mpSearch" placeholder="품목코드/품명 검색" style="padding:6px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:180px">
-    <button class="btn btn-sm" onclick="mpDoSearch()" style="background:#2563eb;color:#fff">조회</button>
-    <button class="btn btn-sm" onclick="exportMpExcel()">엑셀</button>
-  </div>
-  <div id="mpKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px"></div>
-  <div id="mpContent" style="min-height:400px;overflow-x:auto"></div>
-</div>
 
 <!-- ========== 작업지시 (Work Order) PAGE ========== -->
 <div class="page" id="page-work-order" style="background:#fff;color:#111">
@@ -5882,16 +5881,16 @@ async function initAuth() {
       }
     } catch {}
   }
-  // 로컬 개발: 자동 로그인 시도
+  // 로컬 개발: 로그인 우회 (localhost에서 자동 admin 진입)
   if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
     try {
-      const lr = await fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username:'admin',password:'1234'}) });
+      const lr = await fetch('/api/auth/local-bypass');
       const ld = await lr.json();
       if (ld.ok && ld.data && ld.data.token) {
         authToken = ld.data.token;
         localStorage.setItem('authToken', authToken);
         currentAuthUser = ld.data.user;
-        userPermissions = ld.data.permissions || [];
+        userPermissions = ld.data.permissions || ['*'];
         showApp();
         return;
       }
@@ -5916,7 +5915,7 @@ var pageTitles={
   'tasks':'업무관리','meeting-log':'미팅일지','trends':'경영추이',
   'chart-of-accounts':'계정과목','journal':'분개장','general-ledger':'총계정원장',
   'trial-balance':'시산표','financial-statements':'재무제표','ar-ap':'채권/채무',
-  'tax-invoice':'세금계산서','work-order':'작업지시','material-price':'원재료 단가'
+  'tax-invoice':'세금계산서','work-order':'작업지시'
 };
 
 // ===== GLOBAL STATE =====
@@ -6999,7 +6998,7 @@ function showPage(page, opts){
     'invoices':'accounting','mat-purchase':'accounting','cost-mgmt':'accounting','closing':'accounting',
     'chart-of-accounts':'accounting','journal':'accounting','general-ledger':'accounting',
     'trial-balance':'accounting','financial-statements':'accounting','ar-ap':'accounting','tax-invoice':'accounting',
-    'work-order':'production','material-price':'purchase',
+    'work-order':'production',
     'vendors':'master','product-mgmt':'master','bom':'master','post-process':'master',
     'analytics':'analysis','exec-dashboard':'analysis','report':'analysis','defects':'analysis',
     'tasks':'work','notes':'work','board':'work',
@@ -7096,7 +7095,6 @@ function showPage(page, opts){
   if(page==='ar-ap') loadArApPage();
   if(page==='tax-invoice') loadTaxInvoicePage();
   if(page==='work-order') loadWorkOrderPage();
-  if(page==='material-price') loadMaterialPricePage();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -18423,12 +18421,13 @@ window._closingData = {
 }
 
 function switchClosingTab(tab) {
-  ['summary','outsource-proc','outsource-sub','raw-material'].forEach(t => {
+  ['summary','outsource-proc','outsource-sub','raw-material','material-price'].forEach(t => {
     const el = document.getElementById('closing-tab-'+t);
     if(el) el.style.display = t===tab ? '' : 'none';
   });
   document.querySelectorAll('[data-closing-tab]').forEach(b => b.classList.toggle('active', b.dataset.closingTab === tab));
-  renderClosingPage();
+  if(tab === 'material-price') { loadMpLatest(); }
+  else { renderClosingPage(); }
 }
 
 function fmtAmt(v) {
