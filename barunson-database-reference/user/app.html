@@ -5585,11 +5585,16 @@ function closeMegaMenu() { /* no-op */ }
     <div class="tab" data-sotab="ship" onclick="switchSoTab('ship')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">출하관리</div>
   </div>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap" id="soToolbar">
-    <button class="btn btn-sm" onclick="showSoCreateModal()" style="background:#16a34a;color:#fff">+ 견적/수주 생성</button>
+    <button class="btn btn-sm" onclick="showSoCreateModal()" style="background:#16a34a;color:#fff">+ 수동 생성</button>
     <select id="soStatusFilter" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px" onchange="loadSalesOrders()">
       <option value="">전체</option><option value="draft">초안</option><option value="confirmed">확정</option><option value="in_production">생산중</option><option value="shipped">출하</option><option value="delivered">납품</option>
     </select>
     <button class="btn btn-sm" onclick="loadSalesOrders()" style="background:#2563eb;color:#fff">조회</button>
+    <span style="margin-left:auto;display:flex;gap:4px;align-items:center">
+      <button class="btn btn-sm" onclick="manualSyncSO('dd')" style="background:#e11d48;color:#fff;font-size:11px" title="DD 주문 동기화">DD 동기화</button>
+      <button class="btn btn-sm" onclick="manualSyncSO('xerp')" style="background:#0369a1;color:#fff;font-size:11px" title="XERP 매출 동기화">XERP 동기화</button>
+      <span id="soSyncTime" style="font-size:10px;color:#94a3b8"></span>
+    </span>
   </div>
   <div id="soKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px"></div>
   <div id="soContent" style="min-height:400px;overflow-x:auto"></div>
@@ -5602,6 +5607,10 @@ function closeMegaMenu() { /* no-op */ }
     <div class="tab" data-lottab="create" onclick="switchLotTab('create')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">입고등록</div>
     <div class="tab" data-lottab="trace" onclick="switchLotTab('trace')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">이력추적</div>
     <div class="tab" data-lottab="inspect" onclick="switchLotTab('inspect')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">품질검사</div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:6px;padding-right:8px">
+      <button class="btn btn-sm" onclick="manualSyncLots()" style="background:#0369a1;color:#fff;font-size:11px">XERP 동기화</button>
+      <span id="lotSyncTime" style="font-size:10px;color:#94a3b8"></span>
+    </div>
   </div>
   <div id="lotKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px"></div>
   <div id="lotContent" style="min-height:400px;overflow-x:auto"></div>
@@ -5622,6 +5631,7 @@ function closeMegaMenu() { /* no-op */ }
       <option value="">전체</option><option value="01">1월</option><option value="02">2월</option><option value="03">3월</option><option value="04">4월</option><option value="05">5월</option><option value="06">6월</option><option value="07">7월</option><option value="08">8월</option><option value="09">9월</option><option value="10">10월</option><option value="11">11월</option><option value="12">12월</option>
     </select>
     <button class="btn btn-sm" onclick="loadBudgetData()" style="background:#2563eb;color:#fff">조회</button>
+    <button class="btn btn-sm" onclick="manualSyncBudget()" style="background:#0369a1;color:#fff;font-size:11px;margin-left:auto">실적 동기화 (GL)</button>
   </div>
   <div id="budgetKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px"></div>
   <div id="budgetContent" style="min-height:400px;overflow-x:auto"></div>
@@ -22598,16 +22608,45 @@ function switchSoTab(t){
   });
   loadSalesOrders();
 }
-function loadSalesOrderPage(){loadSalesOrders();loadSoKpi();}
+function loadSalesOrderPage(){autoSyncSalesOrders();loadSalesOrders();loadSoKpi();}
+async function autoSyncSalesOrders(){
+  try{
+    var r1=authFetch('/api/sales-orders/sync-dd',{method:'POST'});
+    var r2=authFetch('/api/sales-orders/sync-xerp',{method:'POST'});
+    await Promise.allSettled([r1,r2]);
+    loadSalesOrders();loadSoKpi();
+  }catch(e){}
+}
+async function manualSyncSO(src){
+  var btn=event&&event.target;if(btn)btn.disabled=true;
+  try{
+    var r=await authFetch('/api/sales-orders/sync-'+src,{method:'POST'});
+    var d=await r.json();
+    if(d.ok) alert(src.toUpperCase()+' 동기화 완료: '+(d.data.synced||0)+'건');
+    else alert('동기화 실패: '+(d.error||''));
+  }catch(e){alert('연결 오류');}
+  if(btn)btn.disabled=false;
+  loadSalesOrders();loadSoKpi();
+}
 async function loadSoKpi(){
   var el=document.getElementById('soKpi');if(!el)return;
   try{
     var r=await authFetch('/api/sales-orders/summary');var d=await r.json();
     if(!d.ok)return;var s=d.data;
+    var srcInfo=(s.by_source||[]).map(function(x){return (x.source||'manual')+': '+x.cnt+'건';}).join(' / ');
     el.innerHTML=[
       {l:'견적건수',v:s.quote_count||0,c:'#6366f1'},{l:'수주잔액',v:(s.order_amount||0).toLocaleString()+'원',c:'#2563eb'},
       {l:'출하완료',v:s.shipped_count||0,c:'#10b981'},{l:'미출하',v:s.unshipped_count||0,c:'#ef4444'}
     ].map(function(k){return '<div style="background:#f8fafc;border-radius:10px;padding:14px 16px;text-align:center"><div style="font-size:12px;color:#64748b">'+k.l+'</div><div style="font-size:20px;font-weight:700;color:'+k.c+';margin-top:4px">'+k.v+'</div></div>';}).join('');
+    // Sync status
+    var syncEl=document.getElementById('soSyncTime');
+    if(syncEl){
+      var parts=[];
+      if(s.sync&&s.sync.dd&&s.sync.dd.last_sync) parts.push('DD: '+s.sync.dd.last_sync.substring(5,16));
+      if(s.sync&&s.sync.xerp&&s.sync.xerp.last_sync) parts.push('XERP: '+s.sync.xerp.last_sync.substring(5,16));
+      if(srcInfo) parts.push(srcInfo);
+      syncEl.textContent=parts.length>0?parts.join(' | '):'';
+    }
   }catch(e){}
 }
 async function loadSalesOrders(){
@@ -22628,14 +22667,15 @@ async function loadSalesOrders(){
     var statusColor={draft:'#94a3b8',confirmed:'#2563eb',in_production:'#f59e0b',shipped:'#10b981',delivered:'#059669',cancelled:'#6b7280'};
     var typeMap={quote:'견적',sales:'수주',return:'반품'};
     var h='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f8fafc">';
-    h+='<th style="padding:10px 8px;text-align:left">주문번호</th><th style="padding:10px 8px;text-align:left">유형</th><th style="padding:10px 8px;text-align:left">고객명</th>';
+    h+='<th style="padding:10px 8px;text-align:left">주문번호</th><th style="padding:10px 8px;text-align:center">소스</th><th style="padding:10px 8px;text-align:left">고객명</th>';
     h+='<th style="padding:10px 8px;text-align:right">수량</th><th style="padding:10px 8px;text-align:right">금액</th>';
     h+='<th style="padding:10px 8px;text-align:center">상태</th><th style="padding:10px 8px;text-align:left">주문일</th><th style="padding:10px 8px;text-align:left">납기일</th>';
     h+='<th style="padding:10px 8px;text-align:center">작업</th></tr></thead><tbody>';
     items.forEach(function(o){
       h+='<tr style="border-bottom:1px solid #f1f5f9">';
+      var srcColor={dd:'#e11d48',xerp:'#0369a1',manual:'#6b7280'};var srcLabel={dd:'DD',xerp:'XERP',manual:'수동'};
       h+='<td style="padding:8px;color:#2563eb;font-weight:500">'+esc(o.order_no||'')+'</td>';
-      h+='<td style="padding:8px">'+(typeMap[o.order_type]||o.order_type)+'</td>';
+      h+='<td style="padding:8px;text-align:center"><span style="padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;background:'+(srcColor[o.source]||'#6b7280')+'18;color:'+(srcColor[o.source]||'#6b7280')+'">'+(srcLabel[o.source]||o.source||'수동')+'</span></td>';
       h+='<td style="padding:8px">'+esc(o.customer_name||'')+'</td>';
       h+='<td style="padding:8px;text-align:right">'+(o.total_qty||0)+'</td>';
       h+='<td style="padding:8px;text-align:right;font-weight:500">'+(o.total_amount?Number(o.total_amount).toLocaleString()+'원':'-')+'</td>';
@@ -22742,7 +22782,20 @@ function switchLotTab(t){
   else if(t==='trace') renderLotTraceForm();
   else if(t==='inspect') loadLotInspections();
 }
-function loadLotTrackingPage(){loadLotSummary();loadLotList();}
+function loadLotTrackingPage(){autoSyncLots();loadLotSummary();loadLotList();}
+async function autoSyncLots(){
+  try{await authFetch('/api/lots/sync-xerp',{method:'POST'});loadLotSummary();loadLotList();}catch(e){}
+}
+async function manualSyncLots(){
+  var btn=event&&event.target;if(btn)btn.disabled=true;
+  try{
+    var r=await authFetch('/api/lots/sync-xerp',{method:'POST'});var d=await r.json();
+    if(d.ok) alert('XERP 동기화 완료: Lot '+d.data.lots_synced+'건, 거래 '+d.data.transactions_synced+'건');
+    else alert('동기화 실패: '+(d.error||''));
+  }catch(e){alert('연결 오류');}
+  if(btn)btn.disabled=false;
+  loadLotSummary();loadLotList();
+}
 async function loadLotSummary(){
   var el=document.getElementById('lotKpi');if(!el)return;
   try{
@@ -22965,6 +23018,19 @@ function switchBudgetTab(t){
 }
 function loadBudgetPage(){
   document.getElementById('budgetChartArea').style.display='none';
+  autoSyncBudgetActual();loadBudgetData();loadBudgetKpi();
+}
+async function autoSyncBudgetActual(){
+  var year=(document.getElementById('budgetYear')||{}).value||'2026';
+  try{await authFetch('/api/budget/sync-actual?year='+year,{method:'POST'});}catch(e){}
+}
+async function manualSyncBudget(){
+  var year=(document.getElementById('budgetYear')||{}).value||'2026';
+  try{
+    var r=await authFetch('/api/budget/sync-actual?year='+year,{method:'POST'});var d=await r.json();
+    if(d.ok) alert('실적 동기화 완료: '+d.data.updated+'건 갱신');
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('연결 오류');}
   loadBudgetData();loadBudgetKpi();
 }
 async function loadBudgetKpi(){

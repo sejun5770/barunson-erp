@@ -2091,6 +2091,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS approval_lines (
   UNIQUE(approval_id, step_order)
 )`);
 
+// ── 동기화 메타 ──
+db.exec(`CREATE TABLE IF NOT EXISTS sync_meta (
+  key TEXT PRIMARY KEY, last_sync TEXT, record_count INTEGER DEFAULT 0, status TEXT DEFAULT 'ok', message TEXT DEFAULT ''
+)`);
+
 // ── Phase 2: 수주관리 ──
 db.exec(`CREATE TABLE IF NOT EXISTS sales_orders (
   id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, order_type TEXT DEFAULT 'quote',
@@ -2099,9 +2104,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS sales_orders (
   order_date TEXT, delivery_date TEXT, shipped_date TEXT,
   total_qty INTEGER DEFAULT 0, total_amount REAL DEFAULT 0, tax_amount REAL DEFAULT 0,
   notes TEXT DEFAULT '', created_by TEXT DEFAULT '',
+  source TEXT DEFAULT 'manual', external_id TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
+// source 컬럼 마이그레이션 (기존 테이블에 컬럼 없을 수 있음)
+try { db.exec("ALTER TABLE sales_orders ADD COLUMN source TEXT DEFAULT 'manual'"); } catch(_){}
+try { db.exec("ALTER TABLE sales_orders ADD COLUMN external_id TEXT DEFAULT ''"); } catch(_){}
 db.exec(`CREATE TABLE IF NOT EXISTS sales_order_items (
   id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL,
   product_code TEXT DEFAULT '', product_name TEXT DEFAULT '', spec TEXT DEFAULT '',
@@ -11562,11 +11571,14 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/sales-orders/summary' && method === 'GET') {
-    const quotes = db.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(total_amount),0) AS amt FROM sales_orders WHERE order_type='quote' AND status NOT IN ('cancelled')").get();
-    const orders = db.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(total_amount),0) AS amt FROM sales_orders WHERE order_type='sales' AND status NOT IN ('cancelled','delivered')").get();
-    const shipped = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE status='shipped'").get();
-    const delivered = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE status='delivered'").get();
-    ok(res, { quotes, orders, shipped: shipped.cnt, delivered: delivered.cnt }); return;
+    const quote_count = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE order_type='quote' AND status NOT IN ('cancelled')").get().cnt;
+    const order_amount = db.prepare("SELECT COALESCE(SUM(total_amount),0) AS amt FROM sales_orders WHERE order_type='sales' AND status NOT IN ('cancelled','delivered')").get().amt;
+    const shipped_count = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE status='shipped'").get().cnt;
+    const unshipped_count = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE order_type='sales' AND status IN ('draft','confirmed','in_production')").get().cnt;
+    const bySource = db.prepare("SELECT source, COUNT(*) AS cnt, COALESCE(SUM(total_amount),0) AS amt FROM sales_orders GROUP BY source").all();
+    const syncDD = db.prepare("SELECT last_sync, status FROM sync_meta WHERE key='sales-dd'").get();
+    const syncXerp = db.prepare("SELECT last_sync, status FROM sync_meta WHERE key='sales-xerp'").get();
+    ok(res, { quote_count, order_amount, shipped_count, unshipped_count, by_source: bySource, sync: { dd: syncDD, xerp: syncXerp } }); return;
   }
   if (pathname === '/api/sales-orders' && method === 'GET') {
     const qs = new URL(req.url, 'http://localhost').searchParams;
@@ -11630,6 +11642,83 @@ async function handleRequest(req, res) {
     const id = pathname.match(/^\/api\/sales-orders\/(\d+)\/ship$/)[1];
     db.prepare("UPDATE sales_orders SET status='shipped', shipped_date=date('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?").run(id);
     ok(res, { shipped: true }); return;
+  }
+
+  // ── 수주관리: DD 주문 자동 동기화 ──
+  if (pathname === '/api/sales-orders/sync-dd' && method === 'POST') {
+    const pool = await ensureDdPool();
+    if (!pool) { fail(res, 503, 'DD 데이터베이스 미연결'); return; }
+    try {
+      const [rows] = await pool.query(`SELECT o.id, o.order_number, o.order_state, o.shipping_state,
+        o.total_money, o.paid_money, o.delivery_price, o.created_at, o.cj_invoice_numbers,
+        GROUP_CONCAT(DISTINCT oi.product_name SEPARATOR ', ') AS product_names,
+        SUM(oi.qty) AS total_qty
+        FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE o.created_at >= DATE_SUB(NOW(), INTERVAL 90 DAY) AND o.order_state != 'C'
+        GROUP BY o.id ORDER BY o.created_at DESC LIMIT 500`);
+      const stateMap = {B:'draft', P:'confirmed', D:'shipped', F:'delivered', C:'cancelled'};
+      const upsert = db.prepare(`INSERT INTO sales_orders (order_no,order_type,status,customer_name,total_qty,total_amount,order_date,shipped_date,notes,source,external_id,created_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(order_no) DO UPDATE SET status=excluded.status, total_qty=excluded.total_qty, total_amount=excluded.total_amount, shipped_date=excluded.shipped_date, updated_at=datetime('now','localtime')`);
+      const tx = db.transaction(function() {
+        rows.forEach(function(r) {
+          const oNo = 'DD-' + (r.order_number || r.id);
+          const st = stateMap[r.order_state] || 'draft';
+          const shipDate = (r.shipping_state === 'Y' || r.order_state === 'D') ? (r.created_at ? r.created_at.toISOString().slice(0,10) : '') : '';
+          upsert.run(oNo, 'sales', st, 'DD고객', r.total_qty||0, r.total_money||0,
+            r.created_at ? r.created_at.toISOString().slice(0,10) : '', shipDate,
+            (r.product_names||'').substring(0,200), 'dd', String(r.id));
+        });
+      });
+      tx();
+      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('sales-dd',datetime('now','localtime'),?,'ok')").run(rows.length);
+      ok(res, { synced: rows.length, source: 'DD' }); return;
+    } catch(e) {
+      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,status,message) VALUES ('sales-dd',datetime('now','localtime'),'error',?)").run(e.message);
+      fail(res, 500, 'DD 동기화 실패: ' + e.message); return;
+    }
+  }
+  if (pathname === '/api/sales-orders/sync-xerp' && method === 'POST') {
+    if (!await ensureXerpPool()) { fail(res, 503, 'XERP 데이터베이스 미연결'); return; }
+    try {
+      const end = new Date(); const start = new Date(); start.setDate(start.getDate() - 90);
+      const fmt = d => d.toISOString().slice(0,10).replace(/-/g,'');
+      const r = await xerpPool.request()
+        .input('s', sql.NVarChar(16), fmt(start))
+        .input('e', sql.NVarChar(16), fmt(end))
+        .query(`SELECT h_date, h_orderid, DeptGubun, b_goodCode, b_OrderNum, h_sumPrice, h_offerPrice
+          FROM ERP_SalesData WITH (NOLOCK) WHERE h_date >= @s AND h_date <= @e ORDER BY h_date DESC`);
+      const rows = r.recordset || [];
+      // 일별 집계로 수주 데이터 생성
+      const byDate = {};
+      rows.forEach(function(row) {
+        const d = (row.h_date||'').toString().trim();
+        if (!byDate[d]) byDate[d] = { count: 0, amount: 0, qty: 0, dept: new Set() };
+        byDate[d].count++;
+        byDate[d].amount += (row.h_sumPrice || 0);
+        byDate[d].qty += (row.b_OrderNum || 0);
+        if (row.DeptGubun) byDate[d].dept.add(row.DeptGubun);
+      });
+      const upsert = db.prepare(`INSERT INTO sales_orders (order_no,order_type,status,customer_name,total_qty,total_amount,order_date,notes,source,external_id,created_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(order_no) DO UPDATE SET total_qty=excluded.total_qty, total_amount=excluded.total_amount, notes=excluded.notes, updated_at=datetime('now','localtime')`);
+      const tx = db.transaction(function() {
+        Object.keys(byDate).forEach(function(d) {
+          const v = byDate[d];
+          const dateStr = d.length===8 ? d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8) : d;
+          upsert.run('XERP-'+d, 'sales', 'delivered', 'XERP매출', v.qty, v.amount, dateStr,
+            '채널: '+Array.from(v.dept).join(',')+'  건수: '+v.count, 'xerp', d, 'sync');
+        });
+      });
+      tx();
+      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('sales-xerp',datetime('now','localtime'),?,'ok')").run(Object.keys(byDate).length);
+      ok(res, { synced: Object.keys(byDate).length, raw_records: rows.length, source: 'XERP' }); return;
+    } catch(e) {
+      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,status,message) VALUES ('sales-xerp',datetime('now','localtime'),'error',?)").run(e.message);
+      fail(res, 500, 'XERP 동기화 실패: ' + e.message); return;
+    }
+  }
+  if (pathname === '/api/sync-meta' && method === 'GET') {
+    const rows = db.prepare("SELECT * FROM sync_meta ORDER BY key").all();
+    ok(res, rows); return;
   }
 
   // ════════════════════════════════════════════════════════════════════
@@ -11719,6 +11808,82 @@ async function handleRequest(req, res) {
     const txns = db.prepare("SELECT * FROM batch_transactions WHERE batch_number=? ORDER BY created_at").all(bn);
     const insps = db.prepare("SELECT * FROM batch_inspections WHERE batch_number=? ORDER BY insp_date").all(bn);
     ok(res, { lot, transactions: txns, inspections: insps }); return;
+  }
+
+  // ── Lot 추적: XERP 입출고 자동 동기화 ──
+  if (pathname === '/api/lots/sync-xerp' && method === 'POST') {
+    if (!await ensureXerpPool()) { fail(res, 503, 'XERP 데이터베이스 미연결'); return; }
+    try {
+      // mmInventory에서 현재 재고 → Lot 생성/갱신
+      const invR = await xerpPool.request().query(`
+        SELECT RTRIM(ItemCode) AS item_code, RTRIM(ItemName) AS item_name,
+          RTRIM(ItemStnd) AS item_spec, SUM(OhQty) AS oh_qty, RTRIM(WhCode) AS wh_code
+        FROM mmInventory WITH (NOLOCK) WHERE SiteCode='BK10' AND OhQty > 0
+        GROUP BY RTRIM(ItemCode), RTRIM(ItemName), RTRIM(ItemStnd), RTRIM(WhCode)`);
+      const invRows = invR.recordset || [];
+      const upsertLot = db.prepare(`INSERT INTO batch_master (batch_number,product_code,product_name,warehouse,received_qty,current_qty,quality_status,notes,created_by)
+        VALUES (?,?,?,?,?,?,'GOOD','XERP 자동동기화','sync') ON CONFLICT(batch_number,product_code) DO UPDATE SET current_qty=excluded.current_qty, warehouse=excluded.warehouse, updated_at=datetime('now','localtime')`);
+      const tx1 = db.transaction(function() {
+        invRows.forEach(function(r) {
+          const bn = 'XERP-' + (r.item_code||'').trim();
+          upsertLot.run(bn, (r.item_code||'').trim(), (r.item_name||'').trim(), (r.wh_code||'BK10').trim(), r.oh_qty||0, r.oh_qty||0);
+        });
+      });
+      tx1();
+      // mmInoutItem에서 최근 30일 입출고 → 거래이력
+      const end = new Date(); const start = new Date(); start.setDate(start.getDate() - 30);
+      const fmt = d => d.toISOString().slice(0,10).replace(/-/g,'');
+      const txnR = await xerpPool.request()
+        .input('s', sql.NVarChar(16), fmt(start))
+        .input('e', sql.NVarChar(16), fmt(end))
+        .query(`SELECT RTRIM(ItemCode) AS item_code, RTRIM(ItemName) AS item_name,
+          InoutDate, InoutGubun, SUM(InoutQty) AS qty, SUM(InoutAmnt) AS amt
+          FROM mmInoutItem WITH (NOLOCK) WHERE SiteCode='BK10' AND InoutDate >= @s AND InoutDate <= @e
+          GROUP BY RTRIM(ItemCode), RTRIM(ItemName), InoutDate, InoutGubun`);
+      const txnRows = txnR.recordset || [];
+      const typeMap = {MI:'receipt', MO:'usage', SO:'usage', SI:'return'};
+      const insTxn = db.prepare(`INSERT OR IGNORE INTO batch_transactions (batch_number,txn_type,txn_date,product_code,qty,reference_no,actor,notes)
+        VALUES (?,?,?,?,?,?,?,?)`);
+      const tx2 = db.transaction(function() {
+        txnRows.forEach(function(r) {
+          const bn = 'XERP-' + (r.item_code||'').trim();
+          const d = (r.InoutDate||'').toString().trim();
+          const dateStr = d.length===8 ? d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8) : d;
+          insTxn.run(bn, typeMap[r.InoutGubun]||'usage', dateStr, (r.item_code||'').trim(), r.qty||0, 'XERP-'+r.InoutGubun+'-'+d, 'sync', (r.item_name||'').trim());
+        });
+      });
+      tx2();
+      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('lot-xerp',datetime('now','localtime'),?,'ok')").run(invRows.length);
+      ok(res, { lots_synced: invRows.length, transactions_synced: txnRows.length, source: 'XERP' }); return;
+    } catch(e) {
+      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,status,message) VALUES ('lot-xerp',datetime('now','localtime'),'error',?)").run(e.message);
+      fail(res, 500, 'Lot XERP 동기화 실패: ' + e.message); return;
+    }
+  }
+
+  // ── 예산관리: XERP GL 실적 자동 집계 ──
+  if (pathname === '/api/budget/sync-actual' && method === 'POST') {
+    try {
+      const qs = new URL(req.url, 'http://localhost').searchParams;
+      const year = qs.get('year') || new Date().getFullYear().toString();
+      // gl_balance_cache 갱신 (이미 있으면 그걸 사용)
+      const budgets = db.prepare("SELECT DISTINCT acc_code, month FROM budgets WHERE year=? AND acc_code IS NOT NULL AND acc_code != ''").all(year);
+      let updated = 0;
+      budgets.forEach(function(b) {
+        const ym = year + '-' + b.month;
+        const cache = db.prepare("SELECT period_dr, period_cr FROM gl_balance_cache WHERE acc_code=? AND year_month=?").get(b.acc_code, ym);
+        if (cache) {
+          const budget = db.prepare("SELECT budget_type FROM budgets WHERE year=? AND month=? AND acc_code=?").get(year, b.month, b.acc_code);
+          const actual = budget && budget.budget_type === 'revenue' ? cache.period_cr : cache.period_dr;
+          db.prepare("UPDATE budgets SET actual_amount=?, updated_at=datetime('now','localtime') WHERE year=? AND month=? AND acc_code=?").run(actual, year, b.month, b.acc_code);
+          updated++;
+        }
+      });
+      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('budget-actual',datetime('now','localtime'),?,'ok')").run(updated);
+      ok(res, { updated, source: 'GL Cache' }); return;
+    } catch(e) {
+      fail(res, 500, '예산 실적 동기화 실패: ' + e.message); return;
+    }
   }
 
   // ════════════════════════════════════════════════════════════════════
