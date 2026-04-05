@@ -5833,7 +5833,7 @@ async function handleRequest(req, res) {
         const mod = modified && modified[i] ? modified[i] : null;
         const currentPrice = mod ? mod.unit_price : item.unit_price;
         const qty = mod ? (mod.qty || item.qty) : item.qty;
-        const amount = (currentPrice || 0) * (qty || 0);
+        const amount = Math.round((currentPrice || 0) * (qty || 0));
         totalAmount += amount;
 
         // 가격 변동 감지 (같은 업체+품목의 직전 거래 대비)
@@ -5918,7 +5918,7 @@ async function handleRequest(req, res) {
         const mod = modified && modified[i] ? modified[i] : null;
         const price = mod ? mod.unit_price : item.unit_price;
         const qty = item.qty || 0;
-        const amount = (price || 0) * qty;
+        const amount = Math.round((price || 0) * qty);
         const tax = Math.round(amount * 0.1);
         const pi = piMap[item.product_code] || {};
         const cut = parseFloat(item.cut || pi['절']) || 0;
@@ -12702,10 +12702,11 @@ async function handleRequest(req, res) {
     const type = qs.get('type') || '';
     const search = qs.get('search') || '';
     let where = '1=1';
-    if (status) where += " AND status='" + status.replace(/'/g,'') + "'";
-    if (type) where += " AND order_type='" + type.replace(/'/g,'') + "'";
-    if (search) where += " AND (order_no LIKE '%" + search.replace(/'/g,'') + "%' OR customer_name LIKE '%" + search.replace(/'/g,'') + "%')";
-    const rows = db.prepare('SELECT * FROM sales_orders WHERE '+where+' ORDER BY created_at DESC LIMIT 200').all();
+    const params = [];
+    if (status) { where += " AND status=?"; params.push(status); }
+    if (type) { where += " AND order_type=?"; params.push(type); }
+    if (search) { where += " AND (order_no LIKE ? OR customer_name LIKE ?)"; params.push('%'+search+'%', '%'+search+'%'); }
+    const rows = db.prepare('SELECT * FROM sales_orders WHERE '+where+' ORDER BY created_at DESC LIMIT 200').all(...params);
     ok(res, rows); return;
   }
   if (pathname === '/api/sales-orders' && method === 'POST') {
@@ -12718,8 +12719,9 @@ async function handleRequest(req, res) {
     const items = body.items || [];
     const totalQty = items.reduce(function(s,i){return s+(i.qty||0);},0);
     const totalAmt = items.reduce(function(s,i){return s+(i.amount||(i.qty||0)*(i.unit_price||0));},0);
+    const taxAmt = body.tax_amount || Math.round(totalAmt * 0.1);
     const info = db.prepare("INSERT INTO sales_orders (order_no,order_type,status,customer_name,customer_contact,customer_tel,order_date,delivery_date,total_qty,total_amount,tax_amount,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
-      no, body.order_type||'quote', 'draft', body.customer_name||'', body.customer_contact||'', body.customer_tel||'', body.order_date||new Date().toISOString().slice(0,10), body.delivery_date||'', totalQty, totalAmt, body.tax_amount||0, body.notes||'', uname);
+      no, body.order_type||'quote', 'draft', body.customer_name||'', body.customer_contact||'', body.customer_tel||'', body.order_date||new Date().toISOString().slice(0,10), body.delivery_date||'', totalQty, totalAmt, taxAmt, body.notes||'', uname);
     const oid = info.lastInsertRowid;
     items.forEach(function(it) {
       db.prepare("INSERT INTO sales_order_items (order_id,product_code,product_name,spec,unit_price,qty,amount,notes) VALUES (?,?,?,?,?,?,?,?)").run(oid, it.product_code||'', it.product_name||'', it.spec||'', it.unit_price||0, it.qty||0, it.amount||(it.qty||0)*(it.unit_price||0), it.notes||'');
@@ -12739,10 +12741,11 @@ async function handleRequest(req, res) {
     db.prepare("UPDATE sales_orders SET customer_name=COALESCE(?,customer_name), customer_contact=COALESCE(?,customer_contact), customer_tel=COALESCE(?,customer_tel), delivery_date=COALESCE(?,delivery_date), notes=COALESCE(?,notes), updated_at=datetime('now','localtime') WHERE id=?").run(body.customer_name, body.customer_contact, body.customer_tel, body.delivery_date, body.notes, id);
     if (body.items) {
       db.prepare("DELETE FROM sales_order_items WHERE order_id=?").run(id);
-      body.items.forEach(function(it) { db.prepare("INSERT INTO sales_order_items (order_id,product_code,product_name,spec,unit_price,qty,amount,notes) VALUES (?,?,?,?,?,?,?,?)").run(id, it.product_code||'', it.product_name||'', it.spec||'', it.unit_price||0, it.qty||0, it.amount||0, it.notes||''); });
+      body.items.forEach(function(it) { db.prepare("INSERT INTO sales_order_items (order_id,product_code,product_name,spec,unit_price,qty,amount,notes) VALUES (?,?,?,?,?,?,?,?)").run(id, it.product_code||'', it.product_name||'', it.spec||'', it.unit_price||0, it.qty||0, it.amount||((it.qty||0)*(it.unit_price||0)), it.notes||''); });
       const totalQty = body.items.reduce(function(s,i){return s+(i.qty||0);},0);
-      const totalAmt = body.items.reduce(function(s,i){return s+(i.amount||0);},0);
-      db.prepare("UPDATE sales_orders SET total_qty=?, total_amount=?, updated_at=datetime('now','localtime') WHERE id=?").run(totalQty, totalAmt, id);
+      const totalAmt = body.items.reduce(function(s,i){return s+(i.amount||((i.qty||0)*(i.unit_price||0)));},0);
+      const taxAmt = body.tax_amount || Math.round(totalAmt * 0.1);
+      db.prepare("UPDATE sales_orders SET total_qty=?, total_amount=?, tax_amount=?, updated_at=datetime('now','localtime') WHERE id=?").run(totalQty, totalAmt, taxAmt, id);
     }
     ok(res, { updated: true }); return;
   }
