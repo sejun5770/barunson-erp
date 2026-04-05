@@ -2064,6 +2064,84 @@ db.exec("CREATE INDEX IF NOT EXISTS idx_matprice_code ON material_prices(product
 db.exec("CREATE INDEX IF NOT EXISTS idx_matprice_vendor ON material_prices(vendor_name)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_matprice_month ON material_prices(apply_month)");
 
+// ── Phase 5: 알림센터 ──
+db.exec(`CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY, user_id INTEGER, type TEXT NOT NULL DEFAULT 'system',
+  title TEXT NOT NULL DEFAULT '', message TEXT DEFAULT '', link TEXT DEFAULT '',
+  is_read INTEGER DEFAULT 0, is_email_sent INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+)`);
+db.exec("CREATE INDEX IF NOT EXISTS idx_noti_user ON notifications(user_id, is_read)");
+
+// ── Phase 1: 전자결재 ──
+db.exec(`CREATE TABLE IF NOT EXISTS approvals (
+  id INTEGER PRIMARY KEY, approval_no TEXT UNIQUE, doc_type TEXT NOT NULL DEFAULT 'general',
+  doc_ref TEXT DEFAULT '', title TEXT NOT NULL DEFAULT '', content TEXT DEFAULT '',
+  amount REAL DEFAULT 0, status TEXT DEFAULT 'draft',
+  requester_id INTEGER, requester_name TEXT DEFAULT '',
+  current_step INTEGER DEFAULT 1, total_steps INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS approval_lines (
+  id INTEGER PRIMARY KEY, approval_id INTEGER NOT NULL, step_order INTEGER NOT NULL,
+  approver_id INTEGER, approver_name TEXT DEFAULT '',
+  role TEXT DEFAULT 'approver', status TEXT DEFAULT 'pending',
+  comment TEXT DEFAULT '', acted_at TEXT,
+  UNIQUE(approval_id, step_order)
+)`);
+
+// ── Phase 2: 수주관리 ──
+db.exec(`CREATE TABLE IF NOT EXISTS sales_orders (
+  id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, order_type TEXT DEFAULT 'quote',
+  status TEXT DEFAULT 'draft', customer_name TEXT NOT NULL DEFAULT '',
+  customer_contact TEXT DEFAULT '', customer_tel TEXT DEFAULT '',
+  order_date TEXT, delivery_date TEXT, shipped_date TEXT,
+  total_qty INTEGER DEFAULT 0, total_amount REAL DEFAULT 0, tax_amount REAL DEFAULT 0,
+  notes TEXT DEFAULT '', created_by TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS sales_order_items (
+  id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL,
+  product_code TEXT DEFAULT '', product_name TEXT DEFAULT '', spec TEXT DEFAULT '',
+  unit_price REAL DEFAULT 0, qty INTEGER DEFAULT 0, amount REAL DEFAULT 0, notes TEXT DEFAULT ''
+)`);
+
+// ── Phase 4: 예산관리 ──
+db.exec(`CREATE TABLE IF NOT EXISTS budgets (
+  id INTEGER PRIMARY KEY, year TEXT NOT NULL, month TEXT NOT NULL,
+  acc_code TEXT DEFAULT '', acc_name TEXT DEFAULT '',
+  budget_type TEXT DEFAULT 'expense', budget_amount REAL DEFAULT 0,
+  actual_amount REAL DEFAULT 0, notes TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(year, month, acc_code)
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS daily_cash (
+  id INTEGER PRIMARY KEY, cash_date TEXT NOT NULL,
+  acc_code TEXT DEFAULT '', acc_name TEXT DEFAULT '',
+  inflow REAL DEFAULT 0, outflow REAL DEFAULT 0, balance REAL DEFAULT 0,
+  notes TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(cash_date, acc_code)
+)`);
+
+// ── Phase 6: 생산실적 ──
+db.exec(`CREATE TABLE IF NOT EXISTS work_order_results (
+  id INTEGER PRIMARY KEY, work_order_id INTEGER NOT NULL,
+  result_date TEXT NOT NULL, good_qty INTEGER DEFAULT 0, defect_qty INTEGER DEFAULT 0,
+  worker_name TEXT DEFAULT '', work_hours REAL DEFAULT 0, notes TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+)`);
+
+// 알림 생성 헬퍼
+function createNotification(userId, type, title, message, link) {
+  try {
+    db.prepare("INSERT INTO notifications (user_id, type, title, message, link) VALUES (?,?,?,?,?)").run(userId, type, title, message || '', link || '');
+  } catch(e) { console.error('알림 생성 실패:', e.message); }
+}
+
 // JWT 시크릿 (서버 고유 — 최초 생성 후 파일 저장)
 const JWT_SECRET_PATH = path.join(DATA_DIR, '.jwt_secret');
 let JWT_SECRET;
@@ -2184,7 +2262,14 @@ const ALL_PAGES = [
   { id: 'exec-dashboard', name: '경영대시보드', group: '경영분석' },
   { id: 'report', name: '보고서', group: '경영분석' },
   { id: 'defects', name: '불량관리', group: '경영분석' },
+  // 판매
+  { id: 'sales-order', name: '수주관리', group: '판매' },
+  // 재고
+  { id: 'lot-tracking', name: 'Lot추적', group: '재고' },
+  // 회계
+  { id: 'budget', name: '예산관리', group: '회계' },
   // 업무
+  { id: 'approval', name: '전자결재', group: '업무' },
   { id: 'tasks', name: '업무관리', group: '업무' },
   { id: 'notes', name: '미팅일지', group: '업무' },
   { id: 'board', name: '공지/게시판', group: '업무' },
@@ -2192,6 +2277,7 @@ const ALL_PAGES = [
   { id: 'settings', name: '설정', group: '시스템' },
   { id: 'user-mgmt', name: '사용자 관리', group: '시스템' },
   { id: 'audit-log', name: '감사로그', group: '시스템' },
+  { id: 'notification', name: '알림센터', group: '시스템' },
 ];
 
 // 역할 기본 권한 맵 (개별 permissions가 없을 때 fallback)
@@ -2200,8 +2286,9 @@ const ROLE_PERMISSIONS = {
   purchase: ['dashboard', 'inventory', 'warehouse', 'shipments', 'auto-order', 'create-po', 'po-list', 'os-register',
     'delivery-schedule', 'receipts', 'invoices', 'notes', 'product-mgmt', 'bom', 'mrp', 'post-process', 'defects',
     'closing', 'report', 'po-mgmt', 'china-shipment', 'mat-purchase', 'tasks', 'meeting-log', 'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'cost-mgmt', 'board', 'audit-log', 'exec-dashboard', 'customer-orders', 'shipping',
-    'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'work-order', 'lot-tracking'],
-  production: ['dashboard', 'inventory', 'warehouse', 'shipments', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks'],
+    'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'work-order', 'lot-tracking',
+    'approval', 'sales-order', 'budget', 'notification'],
+  production: ['dashboard', 'inventory', 'warehouse', 'shipments', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks', 'approval', 'lot-tracking'],
   viewer: ['dashboard', 'inventory', 'warehouse', 'shipments', 'po-list', 'notes', 'sales', 'sales-barun', 'sales-gift', 'cost-mgmt', 'board', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap'],
 };
@@ -11365,6 +11452,352 @@ async function handleRequest(req, res) {
     const monthlyOrders = db.prepare(`SELECT strftime('%Y-%m', created_at) AS ym, COUNT(*) AS cnt, SUM(ordered_qty) AS total_qty FROM work_orders GROUP BY strftime('%Y-%m', created_at) ORDER BY ym DESC LIMIT 12`).all();
     const recentCompleted = db.prepare(`SELECT * FROM work_orders WHERE status='completed' ORDER BY completed_date DESC LIMIT 10`).all();
     ok(res, { statusSummary, monthlyOrders, recentCompleted }); return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  알림센터 API (Notifications)
+  // ════════════════════════════════════════════════════════════════════
+
+  if (pathname === '/api/notifications' && method === 'GET') {
+    const uid = currentUser ? currentUser.userId : 0;
+    const rows = db.prepare("SELECT * FROM notifications WHERE user_id IS NULL OR user_id = ? ORDER BY created_at DESC LIMIT 100").all(uid);
+    ok(res, rows); return;
+  }
+  if (pathname === '/api/notifications/unread-count' && method === 'GET') {
+    const uid = currentUser ? currentUser.userId : 0;
+    const r = db.prepare("SELECT COUNT(*) AS cnt FROM notifications WHERE (user_id IS NULL OR user_id = ?) AND is_read = 0").get(uid);
+    ok(res, { count: r.cnt }); return;
+  }
+  if (pathname.match(/^\/api\/notifications\/read\/(\d+)$/) && method === 'POST') {
+    const id = pathname.match(/^\/api\/notifications\/read\/(\d+)$/)[1];
+    db.prepare("UPDATE notifications SET is_read = 1 WHERE id = ?").run(id);
+    ok(res, { updated: true }); return;
+  }
+  if (pathname === '/api/notifications/read-all' && method === 'POST') {
+    const uid = currentUser ? currentUser.userId : 0;
+    db.prepare("UPDATE notifications SET is_read = 1 WHERE (user_id IS NULL OR user_id = ?) AND is_read = 0").run(uid);
+    ok(res, { updated: true }); return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  전자결재 API (Approvals)
+  // ════════════════════════════════════════════════════════════════════
+
+  if (pathname === '/api/approvals/pending-count' && method === 'GET') {
+    const uid = currentUser ? currentUser.userId : 0;
+    const r = db.prepare("SELECT COUNT(*) AS cnt FROM approval_lines al JOIN approvals a ON a.id=al.approval_id WHERE al.approver_id=? AND al.status='pending' AND a.status='pending'").get(uid);
+    ok(res, { count: r.cnt }); return;
+  }
+  if (pathname === '/api/approvals' && method === 'GET') {
+    const uid = currentUser ? currentUser.userId : 0;
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const tab = qs.get('tab') || 'my'; // my/pending/done
+    let rows = [];
+    if (tab === 'my') rows = db.prepare("SELECT * FROM approvals WHERE requester_id=? ORDER BY created_at DESC LIMIT 200").all(uid);
+    else if (tab === 'pending') rows = db.prepare("SELECT a.* FROM approvals a JOIN approval_lines al ON a.id=al.approval_id WHERE al.approver_id=? AND al.status='pending' AND a.status='pending' ORDER BY a.created_at DESC").all(uid);
+    else rows = db.prepare("SELECT a.* FROM approvals a JOIN approval_lines al ON a.id=al.approval_id WHERE al.approver_id=? AND al.status IN ('approved','rejected') ORDER BY al.acted_at DESC LIMIT 200").all(uid);
+    ok(res, rows); return;
+  }
+  if (pathname === '/api/approvals' && method === 'POST') {
+    const body = await readJSON(req);
+    const uid = currentUser ? currentUser.userId : 0;
+    const uname = currentUser ? currentUser.username : 'system';
+    const today = new Date().toISOString().slice(0,10).replace(/-/g,'');
+    const seq = db.prepare("SELECT COUNT(*) AS cnt FROM approvals WHERE approval_no LIKE ?").get('AP-'+today+'%').cnt + 1;
+    const no = 'AP-'+today+'-'+String(seq).padStart(3,'0');
+    const lines = body.lines || []; // [{approver_id, approver_name}]
+    const info = db.prepare("INSERT INTO approvals (approval_no,doc_type,doc_ref,title,content,amount,status,requester_id,requester_name,current_step,total_steps) VALUES (?,?,?,?,?,?,?,?,?,1,?)").run(
+      no, body.doc_type||'general', body.doc_ref||'', body.title||'', body.content||'', body.amount||0, 'pending', uid, uname, Math.max(lines.length,1));
+    const aid = info.lastInsertRowid;
+    lines.forEach(function(ln, i) {
+      db.prepare("INSERT INTO approval_lines (approval_id,step_order,approver_id,approver_name,role) VALUES (?,?,?,?,?)").run(aid, i+1, ln.approver_id, ln.approver_name||'', ln.role||'approver');
+    });
+    // 첫 번째 결재자에게 알림
+    if (lines.length > 0) createNotification(lines[0].approver_id, 'approval', '결재 요청: '+body.title, uname+'님이 결재를 요청했습니다.', 'approval');
+    ok(res, { id: aid, approval_no: no }); return;
+  }
+  if (pathname.match(/^\/api\/approvals\/(\d+)$/) && method === 'GET') {
+    const id = pathname.match(/^\/api\/approvals\/(\d+)$/)[1];
+    const row = db.prepare("SELECT * FROM approvals WHERE id=?").get(id);
+    if (!row) { fail(res, 404, '결재 문서를 찾을 수 없습니다'); return; }
+    const lines = db.prepare("SELECT * FROM approval_lines WHERE approval_id=? ORDER BY step_order").all(id);
+    ok(res, { ...row, lines }); return;
+  }
+  if (pathname.match(/^\/api\/approvals\/(\d+)\/approve$/) && method === 'POST') {
+    const id = pathname.match(/^\/api\/approvals\/(\d+)\/approve$/)[1];
+    const body = await readJSON(req);
+    const uid = currentUser ? currentUser.userId : 0;
+    const ap = db.prepare("SELECT * FROM approvals WHERE id=?").get(id);
+    if (!ap || ap.status !== 'pending') { fail(res, 400, '결재 불가 상태'); return; }
+    const line = db.prepare("SELECT * FROM approval_lines WHERE approval_id=? AND step_order=? AND status='pending'").get(id, ap.current_step);
+    if (!line) { fail(res, 403, '결재 권한이 없습니다'); return; }
+    db.prepare("UPDATE approval_lines SET status='approved', comment=?, acted_at=datetime('now','localtime') WHERE id=?").run(body.comment||'', line.id);
+    // 다음 단계 또는 최종 승인
+    const nextLine = db.prepare("SELECT * FROM approval_lines WHERE approval_id=? AND step_order>? AND status='pending' ORDER BY step_order LIMIT 1").get(id, line.step_order);
+    if (nextLine) {
+      db.prepare("UPDATE approvals SET current_step=?, updated_at=datetime('now','localtime') WHERE id=?").run(nextLine.step_order, id);
+      createNotification(nextLine.approver_id, 'approval', '결재 요청: '+ap.title, '다음 단계 결재를 요청합니다.', 'approval');
+    } else {
+      db.prepare("UPDATE approvals SET status='approved', updated_at=datetime('now','localtime') WHERE id=?").run(id);
+      createNotification(ap.requester_id, 'approval', '결재 승인: '+ap.title, '요청하신 결재가 최종 승인되었습니다.', 'approval');
+    }
+    ok(res, { approved: true }); return;
+  }
+  if (pathname.match(/^\/api\/approvals\/(\d+)\/reject$/) && method === 'POST') {
+    const id = pathname.match(/^\/api\/approvals\/(\d+)\/reject$/)[1];
+    const body = await readJSON(req);
+    const uid = currentUser ? currentUser.userId : 0;
+    const ap = db.prepare("SELECT * FROM approvals WHERE id=?").get(id);
+    if (!ap || ap.status !== 'pending') { fail(res, 400, '결재 불가 상태'); return; }
+    const line = db.prepare("SELECT * FROM approval_lines WHERE approval_id=? AND step_order=? AND status='pending'").get(id, ap.current_step);
+    if (!line) { fail(res, 403, '결재 권한이 없습니다'); return; }
+    db.prepare("UPDATE approval_lines SET status='rejected', comment=?, acted_at=datetime('now','localtime') WHERE id=?").run(body.comment||'', line.id);
+    db.prepare("UPDATE approvals SET status='rejected', updated_at=datetime('now','localtime') WHERE id=?").run(id);
+    createNotification(ap.requester_id, 'approval', '결재 반려: '+ap.title, (body.comment||'사유 없음'), 'approval');
+    ok(res, { rejected: true }); return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  수주관리 API (Sales Orders)
+  // ════════════════════════════════════════════════════════════════════
+
+  if (pathname === '/api/sales-orders/summary' && method === 'GET') {
+    const quotes = db.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(total_amount),0) AS amt FROM sales_orders WHERE order_type='quote' AND status NOT IN ('cancelled')").get();
+    const orders = db.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(total_amount),0) AS amt FROM sales_orders WHERE order_type='sales' AND status NOT IN ('cancelled','delivered')").get();
+    const shipped = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE status='shipped'").get();
+    const delivered = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE status='delivered'").get();
+    ok(res, { quotes, orders, shipped: shipped.cnt, delivered: delivered.cnt }); return;
+  }
+  if (pathname === '/api/sales-orders' && method === 'GET') {
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const status = qs.get('status') || '';
+    const type = qs.get('type') || '';
+    const search = qs.get('search') || '';
+    let where = '1=1';
+    if (status) where += " AND status='" + status.replace(/'/g,'') + "'";
+    if (type) where += " AND order_type='" + type.replace(/'/g,'') + "'";
+    if (search) where += " AND (order_no LIKE '%" + search.replace(/'/g,'') + "%' OR customer_name LIKE '%" + search.replace(/'/g,'') + "%')";
+    const rows = db.prepare('SELECT * FROM sales_orders WHERE '+where+' ORDER BY created_at DESC LIMIT 200').all();
+    ok(res, rows); return;
+  }
+  if (pathname === '/api/sales-orders' && method === 'POST') {
+    const body = await readJSON(req);
+    const uname = currentUser ? currentUser.username : 'system';
+    const today = new Date().toISOString().slice(0,10).replace(/-/g,'');
+    const prefix = (body.order_type === 'quote') ? 'QT' : 'SO';
+    const seq = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE order_no LIKE ?").get(prefix+'-'+today+'%').cnt + 1;
+    const no = prefix+'-'+today+'-'+String(seq).padStart(3,'0');
+    const items = body.items || [];
+    const totalQty = items.reduce(function(s,i){return s+(i.qty||0);},0);
+    const totalAmt = items.reduce(function(s,i){return s+(i.amount||(i.qty||0)*(i.unit_price||0));},0);
+    const info = db.prepare("INSERT INTO sales_orders (order_no,order_type,status,customer_name,customer_contact,customer_tel,order_date,delivery_date,total_qty,total_amount,tax_amount,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+      no, body.order_type||'quote', 'draft', body.customer_name||'', body.customer_contact||'', body.customer_tel||'', body.order_date||new Date().toISOString().slice(0,10), body.delivery_date||'', totalQty, totalAmt, body.tax_amount||0, body.notes||'', uname);
+    const oid = info.lastInsertRowid;
+    items.forEach(function(it) {
+      db.prepare("INSERT INTO sales_order_items (order_id,product_code,product_name,spec,unit_price,qty,amount,notes) VALUES (?,?,?,?,?,?,?,?)").run(oid, it.product_code||'', it.product_name||'', it.spec||'', it.unit_price||0, it.qty||0, it.amount||(it.qty||0)*(it.unit_price||0), it.notes||'');
+    });
+    ok(res, { id: oid, order_no: no }); return;
+  }
+  if (pathname.match(/^\/api\/sales-orders\/(\d+)$/) && method === 'GET') {
+    const id = pathname.match(/^\/api\/sales-orders\/(\d+)$/)[1];
+    const row = db.prepare("SELECT * FROM sales_orders WHERE id=?").get(id);
+    if (!row) { fail(res, 404, '수주를 찾을 수 없습니다'); return; }
+    const items = db.prepare("SELECT * FROM sales_order_items WHERE order_id=?").all(id);
+    ok(res, { ...row, items }); return;
+  }
+  if (pathname.match(/^\/api\/sales-orders\/(\d+)$/) && method === 'PUT') {
+    const id = pathname.match(/^\/api\/sales-orders\/(\d+)$/)[1];
+    const body = await readJSON(req);
+    db.prepare("UPDATE sales_orders SET customer_name=COALESCE(?,customer_name), customer_contact=COALESCE(?,customer_contact), customer_tel=COALESCE(?,customer_tel), delivery_date=COALESCE(?,delivery_date), notes=COALESCE(?,notes), updated_at=datetime('now','localtime') WHERE id=?").run(body.customer_name, body.customer_contact, body.customer_tel, body.delivery_date, body.notes, id);
+    if (body.items) {
+      db.prepare("DELETE FROM sales_order_items WHERE order_id=?").run(id);
+      body.items.forEach(function(it) { db.prepare("INSERT INTO sales_order_items (order_id,product_code,product_name,spec,unit_price,qty,amount,notes) VALUES (?,?,?,?,?,?,?,?)").run(id, it.product_code||'', it.product_name||'', it.spec||'', it.unit_price||0, it.qty||0, it.amount||0, it.notes||''); });
+      const totalQty = body.items.reduce(function(s,i){return s+(i.qty||0);},0);
+      const totalAmt = body.items.reduce(function(s,i){return s+(i.amount||0);},0);
+      db.prepare("UPDATE sales_orders SET total_qty=?, total_amount=?, updated_at=datetime('now','localtime') WHERE id=?").run(totalQty, totalAmt, id);
+    }
+    ok(res, { updated: true }); return;
+  }
+  if (pathname.match(/^\/api\/sales-orders\/(\d+)\/confirm$/) && method === 'POST') {
+    const id = pathname.match(/^\/api\/sales-orders\/(\d+)\/confirm$/)[1];
+    const row = db.prepare("SELECT * FROM sales_orders WHERE id=?").get(id);
+    if (!row) { fail(res, 404, '문서 없음'); return; }
+    const newType = row.order_type === 'quote' ? 'sales' : row.order_type;
+    db.prepare("UPDATE sales_orders SET order_type=?, status='confirmed', updated_at=datetime('now','localtime') WHERE id=?").run(newType, id);
+    ok(res, { confirmed: true }); return;
+  }
+  if (pathname.match(/^\/api\/sales-orders\/(\d+)\/ship$/) && method === 'POST') {
+    const id = pathname.match(/^\/api\/sales-orders\/(\d+)\/ship$/)[1];
+    db.prepare("UPDATE sales_orders SET status='shipped', shipped_date=date('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?").run(id);
+    ok(res, { shipped: true }); return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  Lot/시리얼 추적 API (Lot Tracking)
+  // ════════════════════════════════════════════════════════════════════
+
+  if (pathname === '/api/lots/summary' && method === 'GET') {
+    const total = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master").get().cnt;
+    const active = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE current_qty > 0").get().cnt;
+    const held = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE quality_status='HOLD'").get().cnt;
+    const totalQty = db.prepare("SELECT COALESCE(SUM(current_qty),0) AS qty FROM batch_master").get().qty;
+    const expiring = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE exp_date IS NOT NULL AND exp_date != '' AND exp_date <= date('now','+30 days','localtime') AND current_qty > 0").get().cnt;
+    ok(res, { total, active, held, totalQty, expiring }); return;
+  }
+  if (pathname === '/api/lots' && method === 'GET') {
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const product = qs.get('product') || '';
+    const warehouse = qs.get('warehouse') || '';
+    const status = qs.get('status') || '';
+    const search = qs.get('search') || '';
+    let where = '1=1';
+    if (product) where += " AND product_code='" + product.replace(/'/g,'') + "'";
+    if (warehouse) where += " AND warehouse='" + warehouse.replace(/'/g,'') + "'";
+    if (status) where += " AND quality_status='" + status.replace(/'/g,'') + "'";
+    if (search) where += " AND (batch_number LIKE '%" + search.replace(/'/g,'') + "%' OR product_name LIKE '%" + search.replace(/'/g,'') + "%')";
+    const rows = db.prepare('SELECT * FROM batch_master WHERE '+where+' ORDER BY created_at DESC LIMIT 300').all();
+    ok(res, rows); return;
+  }
+  if (pathname === '/api/lots' && method === 'POST') {
+    const body = await readJSON(req);
+    const uname = currentUser ? currentUser.username : 'system';
+    const today = new Date().toISOString().slice(0,10).replace(/-/g,'');
+    const seq = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE batch_number LIKE ?").get('LOT-'+today+'%').cnt + 1;
+    const batchNo = 'LOT-'+today+'-'+String(seq).padStart(3,'0');
+    const info = db.prepare("INSERT INTO batch_master (batch_number,product_code,product_name,vendor_name,vendor_lot,received_date,po_number,received_qty,current_qty,quality_status,warehouse,mfg_date,exp_date,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+      batchNo, body.product_code||'', body.product_name||'', body.vendor_name||'', body.vendor_lot||'', body.received_date||new Date().toISOString().slice(0,10), body.po_number||'', body.received_qty||0, body.received_qty||0, body.quality_status||'GOOD', body.warehouse||'본사', body.mfg_date||'', body.exp_date||'', body.notes||'', uname);
+    const bid = info.lastInsertRowid;
+    db.prepare("INSERT INTO batch_transactions (batch_id,batch_number,txn_type,product_code,qty,qty_before,qty_after,to_warehouse,reference_no,actor,notes) VALUES (?,?,'receipt',?,?,0,?,?,?,?,?)").run(bid, batchNo, body.product_code||'', body.received_qty||0, body.received_qty||0, body.warehouse||'본사', body.po_number||'', uname, '입고 등록');
+    ok(res, { id: bid, batch_number: batchNo }); return;
+  }
+  if (pathname.match(/^\/api\/lots\/(\d+)$/) && method === 'GET') {
+    const id = pathname.match(/^\/api\/lots\/(\d+)$/)[1];
+    const row = db.prepare("SELECT * FROM batch_master WHERE batch_id=?").get(id);
+    if (!row) { fail(res, 404, 'Lot를 찾을 수 없습니다'); return; }
+    const txns = db.prepare("SELECT * FROM batch_transactions WHERE batch_id=? ORDER BY created_at DESC").all(id);
+    const inspections = db.prepare("SELECT * FROM batch_inspections WHERE batch_id=? ORDER BY insp_date DESC").all(id);
+    ok(res, { ...row, transactions: txns, inspections }); return;
+  }
+  if (pathname.match(/^\/api\/lots\/(\d+)$/) && method === 'PUT') {
+    const id = pathname.match(/^\/api\/lots\/(\d+)$/)[1];
+    const body = await readJSON(req);
+    db.prepare("UPDATE batch_master SET quality_status=COALESCE(?,quality_status), warehouse=COALESCE(?,warehouse), notes=COALESCE(?,notes), updated_at=datetime('now','localtime') WHERE batch_id=?").run(body.quality_status, body.warehouse, body.notes, id);
+    ok(res, { updated: true }); return;
+  }
+  if (pathname.match(/^\/api\/lots\/(\d+)\/transaction$/) && method === 'POST') {
+    const id = pathname.match(/^\/api\/lots\/(\d+)\/transaction$/)[1];
+    const body = await readJSON(req);
+    const uname = currentUser ? currentUser.username : 'system';
+    const lot = db.prepare("SELECT * FROM batch_master WHERE batch_id=?").get(id);
+    if (!lot) { fail(res, 404, 'Lot 없음'); return; }
+    const qtyBefore = lot.current_qty;
+    let qtyAfter = qtyBefore;
+    const txnType = body.txn_type || 'usage';
+    if (txnType === 'usage' || txnType === 'transfer') qtyAfter = qtyBefore - (body.qty || 0);
+    else if (txnType === 'receipt' || txnType === 'return') qtyAfter = qtyBefore + (body.qty || 0);
+    else if (txnType === 'quality_hold') qtyAfter = qtyBefore;
+    db.prepare("INSERT INTO batch_transactions (batch_id,batch_number,txn_type,txn_date,from_warehouse,to_warehouse,product_code,qty,qty_before,qty_after,reference_no,actor,notes) VALUES (?,?,?,datetime('now','localtime'),?,?,?,?,?,?,?,?,?)").run(
+      id, lot.batch_number, txnType, body.from_warehouse||lot.warehouse, body.to_warehouse||'', lot.product_code, body.qty||0, qtyBefore, qtyAfter, body.reference_no||'', uname, body.notes||'');
+    db.prepare("UPDATE batch_master SET current_qty=?, warehouse=COALESCE(?,warehouse), updated_at=datetime('now','localtime') WHERE batch_id=?").run(qtyAfter, body.to_warehouse||null, id);
+    if (txnType === 'quality_hold') db.prepare("UPDATE batch_master SET quality_status='HOLD' WHERE batch_id=?").run(id);
+    ok(res, { txn_type: txnType, qty_before: qtyBefore, qty_after: qtyAfter }); return;
+  }
+  if (pathname.match(/^\/api\/lots\/(\d+)\/inspect$/) && method === 'POST') {
+    const id = pathname.match(/^\/api\/lots\/(\d+)\/inspect$/)[1];
+    const body = await readJSON(req);
+    const uname = currentUser ? currentUser.username : 'system';
+    db.prepare("INSERT INTO batch_inspections (batch_id,batch_number,insp_date,inspector,insp_type,sample_size,defects_found,defect_desc,result,next_action,notes,created_by) VALUES (?,?,datetime('now','localtime'),?,?,?,?,?,?,?,?,?)").run(
+      id, body.batch_number||'', body.inspector||uname, body.insp_type||'RECEIVING', body.sample_size||0, body.defects_found||0, body.defect_desc||'', body.result||'PASS', body.next_action||'OK', body.notes||'', uname);
+    if (body.result === 'FAIL') db.prepare("UPDATE batch_master SET quality_status='HOLD', updated_at=datetime('now','localtime') WHERE batch_id=?").run(id);
+    else if (body.result === 'PASS') db.prepare("UPDATE batch_master SET quality_status='GOOD', updated_at=datetime('now','localtime') WHERE batch_id=?").run(id);
+    ok(res, { inspected: true }); return;
+  }
+  if (pathname.match(/^\/api\/lots\/trace\/(.+)$/) && method === 'GET') {
+    const bn = decodeURIComponent(pathname.match(/^\/api\/lots\/trace\/(.+)$/)[1]);
+    const lot = db.prepare("SELECT * FROM batch_master WHERE batch_number=?").get(bn);
+    if (!lot) { fail(res, 404, 'Lot 없음'); return; }
+    const txns = db.prepare("SELECT * FROM batch_transactions WHERE batch_number=? ORDER BY created_at").all(bn);
+    const insps = db.prepare("SELECT * FROM batch_inspections WHERE batch_number=? ORDER BY insp_date").all(bn);
+    ok(res, { lot, transactions: txns, inspections: insps }); return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  예산관리 API (Budget)
+  // ════════════════════════════════════════════════════════════════════
+
+  if (pathname === '/api/budget/list' && method === 'GET') {
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const year = qs.get('year') || new Date().getFullYear().toString();
+    const rows = db.prepare("SELECT * FROM budgets WHERE year=? ORDER BY month, acc_code").all(year);
+    ok(res, rows); return;
+  }
+  if (pathname === '/api/budget/save' && method === 'POST') {
+    const body = await readJSON(req);
+    const items = body.items || [];
+    const upsert = db.prepare("INSERT INTO budgets (year,month,acc_code,acc_name,budget_type,budget_amount,notes) VALUES (?,?,?,?,?,?,?) ON CONFLICT(year,month,acc_code) DO UPDATE SET budget_amount=excluded.budget_amount, acc_name=excluded.acc_name, budget_type=excluded.budget_type, notes=excluded.notes, updated_at=datetime('now','localtime')");
+    const tx = db.transaction(function() { items.forEach(function(it) { upsert.run(it.year, it.month, it.acc_code||'', it.acc_name||'', it.budget_type||'expense', it.budget_amount||0, it.notes||''); }); });
+    tx();
+    ok(res, { saved: items.length }); return;
+  }
+  if (pathname === '/api/budget/vs-actual' && method === 'GET') {
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const year = qs.get('year') || new Date().getFullYear().toString();
+    const month = qs.get('month') || String(new Date().getMonth()+1).padStart(2,'0');
+    const budgets = db.prepare("SELECT * FROM budgets WHERE year=? AND month=? ORDER BY acc_code").all(year, month);
+    // 실적은 gl_balance_cache에서 가져오기 시도
+    const ym = year + '-' + month;
+    budgets.forEach(function(b) {
+      const cache = db.prepare("SELECT period_dr, period_cr FROM gl_balance_cache WHERE acc_code=? AND year_month=?").get(b.acc_code, ym);
+      if (cache) b.actual_amount = (b.budget_type === 'expense') ? cache.period_dr : cache.period_cr;
+    });
+    ok(res, budgets); return;
+  }
+  if (pathname === '/api/budget/summary' && method === 'GET') {
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const year = qs.get('year') || new Date().getFullYear().toString();
+    const rows = db.prepare("SELECT month, budget_type, SUM(budget_amount) AS total_budget, SUM(actual_amount) AS total_actual FROM budgets WHERE year=? GROUP BY month, budget_type ORDER BY month").all(year);
+    ok(res, rows); return;
+  }
+  if (pathname === '/api/cash/daily' && method === 'GET') {
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const from = qs.get('from') || new Date(Date.now()-30*86400000).toISOString().slice(0,10);
+    const to = qs.get('to') || new Date().toISOString().slice(0,10);
+    const rows = db.prepare("SELECT * FROM daily_cash WHERE cash_date BETWEEN ? AND ? ORDER BY cash_date, acc_code").all(from, to);
+    ok(res, rows); return;
+  }
+  if (pathname === '/api/cash/daily' && method === 'POST') {
+    const body = await readJSON(req);
+    const items = body.items || [body];
+    const upsert = db.prepare("INSERT INTO daily_cash (cash_date,acc_code,acc_name,inflow,outflow,balance,notes) VALUES (?,?,?,?,?,?,?) ON CONFLICT(cash_date,acc_code) DO UPDATE SET inflow=excluded.inflow, outflow=excluded.outflow, balance=excluded.balance, notes=excluded.notes");
+    items.forEach(function(it) { upsert.run(it.cash_date, it.acc_code||'', it.acc_name||'', it.inflow||0, it.outflow||0, it.balance||0, it.notes||''); });
+    ok(res, { saved: items.length }); return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  생산실적 API (Work Order Results)
+  // ════════════════════════════════════════════════════════════════════
+
+  if (pathname.match(/^\/api\/work-orders\/(\d+)\/result$/) && method === 'POST') {
+    const woid = pathname.match(/^\/api\/work-orders\/(\d+)\/result$/)[1];
+    const body = await readJSON(req);
+    db.prepare("INSERT INTO work_order_results (work_order_id,result_date,good_qty,defect_qty,worker_name,work_hours,notes) VALUES (?,?,?,?,?,?,?)").run(
+      woid, body.result_date||new Date().toISOString().slice(0,10), body.good_qty||0, body.defect_qty||0, body.worker_name||'', body.work_hours||0, body.notes||'');
+    // 작업지시에 누적 반영
+    const totals = db.prepare("SELECT COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect FROM work_order_results WHERE work_order_id=?").get(woid);
+    db.prepare("UPDATE work_orders SET completed_qty=?, updated_at=datetime('now','localtime') WHERE id=?").run(totals.good, woid);
+    ok(res, { saved: true, total_good: totals.good, total_defect: totals.defect }); return;
+  }
+  if (pathname.match(/^\/api\/work-orders\/(\d+)\/results$/) && method === 'GET') {
+    const woid = pathname.match(/^\/api\/work-orders\/(\d+)\/results$/)[1];
+    const rows = db.prepare("SELECT * FROM work_order_results WHERE work_order_id=? ORDER BY result_date DESC").all(woid);
+    ok(res, rows); return;
+  }
+  if (pathname === '/api/work-orders/daily-report' && method === 'GET') {
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const date = qs.get('date') || new Date().toISOString().slice(0,10);
+    const rows = db.prepare("SELECT r.*, w.wo_number, w.product_name FROM work_order_results r JOIN work_orders w ON w.wo_id=r.work_order_id WHERE r.result_date=? ORDER BY r.created_at DESC").all(date);
+    const summary = db.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect, COALESCE(SUM(work_hours),0) AS hours FROM work_order_results WHERE result_date=?").get(date);
+    ok(res, { total_good: summary.good, total_defect: summary.defect, total_hours: summary.hours, order_count: summary.cnt, results: rows }); return;
   }
 
   // ════════════════════════════════════════════════════════════════════

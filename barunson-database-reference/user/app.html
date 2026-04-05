@@ -1388,7 +1388,8 @@ var _megaData = {
       {icon:'💳',bg:'#fce7f3',fg:'#db2777',name:'DD매출',desc:'디얼디어 매출',page:'sales-dd'},
       {icon:'🎁',bg:'#ecfdf5',fg:'#059669',name:'더기프트매출',desc:'답례품 매출',page:'sales-gift'},
       {icon:'🛒',bg:'#f5f3ff',fg:'#7c3aed',name:'고객주문',desc:'주문 조회/현황',page:'customer-orders'},
-      {icon:'🚛',bg:'#fff7ed',fg:'#ea580c',name:'배송추적',desc:'배송 현황/추적',page:'shipping'}
+      {icon:'🚛',bg:'#fff7ed',fg:'#ea580c',name:'배송추적',desc:'배송 현황/추적',page:'shipping'},
+      {icon:'📝',bg:'#f0fdf4',fg:'#16a34a',name:'수주관리',desc:'견적→수주→출하',page:'sales-order'}
     ]
   },
   stock: {
@@ -1396,7 +1397,8 @@ var _megaData = {
     items: [
       {icon:'📦',bg:'#fef2f2',fg:'#ef4444',name:'재고현황',desc:'XERP 실시간 재고',page:'inventory',badgeId:'qmInventory'},
       {icon:'🏢',bg:'#ecfdf5',fg:'#059669',name:'창고별 재고',desc:'창고별 현황/이동/조정',page:'warehouse'},
-      {icon:'🔄',bg:'#fff7ed',fg:'#ea580c',name:'입출고 현황',desc:'입고/출고 내역 조회',page:'shipments'}
+      {icon:'🔄',bg:'#fff7ed',fg:'#ea580c',name:'입출고 현황',desc:'입고/출고 내역 조회',page:'shipments'},
+      {icon:'🏷️',bg:'#f5f3ff',fg:'#7c3aed',name:'Lot 추적',desc:'Lot/시리얼 이력 관리',page:'lot-tracking'}
     ]
   },
   production: {
@@ -1421,7 +1423,8 @@ var _megaData = {
       {icon:'⚖️',bg:'#fce7f3',fg:'#be185d',name:'시산표',desc:'차대 잔액 검증',page:'trial-balance'},
       {icon:'📊',bg:'#e0e7ff',fg:'#4338ca',name:'재무제표',desc:'BS/IS 보고서',page:'financial-statements'},
       {icon:'💳',bg:'#fff7ed',fg:'#c2410c',name:'채권/채무',desc:'AR/AP 관리',page:'ar-ap'},
-      {icon:'🧾',bg:'#fef2f2',fg:'#dc2626',name:'세금계산서',desc:'매출/매입 세금계산서',page:'tax-invoice'}
+      {icon:'🧾',bg:'#fef2f2',fg:'#dc2626',name:'세금계산서',desc:'매출/매입 세금계산서',page:'tax-invoice'},
+      {icon:'💰',bg:'#fef3c7',fg:'#d97706',name:'예산관리',desc:'예산편성/실적/자금일보',page:'budget'}
     ]
   },
   master: {
@@ -1447,7 +1450,8 @@ var _megaData = {
     items: [
       {icon:'✅',bg:'#ecfdf5',fg:'#10b981',name:'업무관리',desc:'등록 + 추적 + 협업',page:'tasks',badgeId:'qmTaskTodo'},
       {icon:'📓',bg:'#fef9c3',fg:'#a16207',name:'미팅일지',desc:'회의 기록 + 공유',page:'notes'},
-      {icon:'📢',bg:'#fef2f2',fg:'#dc2626',name:'공지/게시판',desc:'공지사항 + 팝업 관리',page:'board'}
+      {icon:'📢',bg:'#fef2f2',fg:'#dc2626',name:'공지/게시판',desc:'공지사항 + 팝업 관리',page:'board'},
+      {icon:'✍️',bg:'#e0e7ff',fg:'#4338ca',name:'전자결재',desc:'결재 상신/승인/반려',page:'approval'}
     ]
   },
   system: {
@@ -1455,7 +1459,8 @@ var _megaData = {
     items: [
       {icon:'⚙',bg:'#f1f5f9',fg:'#64748b',name:'설정',desc:'시스템 설정',page:'settings'},
       {icon:'👤',bg:'#fef3c7',fg:'#92400e',name:'사용자 관리',desc:'권한 + 계정 관리',page:'user-mgmt'},
-      {icon:'🔒',bg:'#f0f9ff',fg:'#0369a1',name:'감사로그',desc:'사용자 활동 추적',page:'audit-log'}
+      {icon:'🔒',bg:'#f0f9ff',fg:'#0369a1',name:'감사로그',desc:'사용자 활동 추적',page:'audit-log'},
+      {icon:'🔔',bg:'#fef2f2',fg:'#ef4444',name:'알림센터',desc:'알림 이력/관리',page:'notification'}
     ]
   }
 };
@@ -1717,6 +1722,18 @@ function closeMegaMenu() { /* no-op */ }
     </div>
   </div>
   <div class="header-right" style="display:flex;align-items:center;gap:10px">
+    <button id="headerApprovalBtn" onclick="showPage('approval')" title="결재 대기" style="position:relative;background:none;border:1px solid #e2e8f0;border-radius:8px;padding:5px 10px;cursor:pointer;font-size:15px;display:none">✍️<span id="headerApprovalBadge" style="display:none;position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;font-size:10px;font-weight:700;border-radius:50%;min-width:16px;height:16px;line-height:16px;text-align:center;padding:0 3px">0</span></button>
+    <button id="headerNotifBtn" onclick="toggleNotifDropdown()" title="알림" style="position:relative;background:none;border:1px solid #e2e8f0;border-radius:8px;padding:5px 10px;cursor:pointer;font-size:15px">🔔<span id="headerNotifBadge" style="display:none;position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;font-size:10px;font-weight:700;border-radius:50%;min-width:16px;height:16px;line-height:16px;text-align:center;padding:0 3px">0</span></button>
+    <div id="notifDropdown" style="display:none;position:absolute;top:48px;right:10px;width:360px;max-height:420px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.12);z-index:9999;overflow:hidden">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #f1f5f9">
+        <span style="font-weight:600;font-size:14px">알림</span>
+        <button onclick="markAllNotifRead()" style="background:none;border:none;color:#2563eb;font-size:12px;cursor:pointer">모두 읽음</button>
+      </div>
+      <div id="notifDropdownList" style="max-height:340px;overflow-y:auto;padding:4px 0"></div>
+      <div style="padding:8px 16px;border-top:1px solid #f1f5f9;text-align:center">
+        <a href="#" onclick="showPage('notification');closeNotifDropdown();return false" style="color:#2563eb;font-size:12px;text-decoration:none">전체 보기</a>
+      </div>
+    </div>
     <span id="erpSyncBadge" style="display:none;font-size:12px;padding:3px 10px;border-radius:12px;font-weight:500;white-space:nowrap"></span>
     <button class="btn btn-sm" onclick="syncDDProducts()" id="ddSyncBtn" style="background:#e11d48;color:#fff;border-color:#e11d48">DD 동기화</button>
     <button class="btn btn-primary btn-sm" onclick="loadXerpInventory(true)" id="refreshBtn">ERP 동기화</button>
@@ -5120,6 +5137,7 @@ function closeMegaMenu() { /* no-op */ }
     <div class="tab active" data-wotab="list" onclick="switchWoTab('list')" style="padding:10px 20px;cursor:pointer;font-size:13px;font-weight:600;color:#2563eb;border-bottom:2px solid #2563eb">작업지시 목록</div>
     <div class="tab" data-wotab="create" onclick="switchWoTab('create')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">새 작업지시</div>
     <div class="tab" data-wotab="stats" onclick="switchWoTab('stats')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">생산 현황</div>
+    <div class="tab" data-wotab="results" onclick="switchWoTab('results')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">생산실적</div>
   </div>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap" id="woToolbar">
     <select id="woStatusFilter" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px" onchange="loadWorkOrders()">
@@ -5535,6 +5553,81 @@ function closeMegaMenu() { /* no-op */ }
   </div>
 </div>
 
+<!-- ========== NOTIFICATION (알림센터) PAGE ========== -->
+<div class="page" id="page-notification" style="background:#fff;color:#111">
+  <div id="notifPageContent" style="min-height:400px"></div>
+</div>
+
+<!-- ========== APPROVAL (전자결재) PAGE ========== -->
+<div class="page" id="page-approval" style="background:#fff;color:#111">
+  <div style="display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin-bottom:12px" id="approvalTabs">
+    <div class="tab active" data-aptab="my" onclick="switchApprovalTab('my')" style="padding:10px 20px;cursor:pointer;font-size:13px;font-weight:600;color:#2563eb;border-bottom:2px solid #2563eb">내 상신</div>
+    <div class="tab" data-aptab="pending" onclick="switchApprovalTab('pending')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">결재 대기</div>
+    <div class="tab" data-aptab="done" onclick="switchApprovalTab('done')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">결재 완료</div>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap" id="approvalToolbar">
+    <button class="btn btn-sm" onclick="showApprovalCreateModal()" style="background:#4338ca;color:#fff">+ 결재 상신</button>
+    <select id="approvalDocType" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px" onchange="loadApprovalList()">
+      <option value="">전체</option><option value="po">발주</option><option value="expense">지출</option><option value="leave">휴가</option><option value="general">일반</option>
+    </select>
+    <button class="btn btn-sm" onclick="loadApprovalList()" style="background:#2563eb;color:#fff">조회</button>
+  </div>
+  <div id="approvalKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px"></div>
+  <div id="approvalContent" style="min-height:400px;overflow-x:auto"></div>
+  <div id="approvalDetail" style="display:none"></div>
+</div>
+
+<!-- ========== SALES ORDER (수주관리) PAGE ========== -->
+<div class="page" id="page-sales-order" style="background:#fff;color:#111">
+  <div style="display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin-bottom:12px" id="soTabs">
+    <div class="tab active" data-sotab="quote" onclick="switchSoTab('quote')" style="padding:10px 20px;cursor:pointer;font-size:13px;font-weight:600;color:#2563eb;border-bottom:2px solid #2563eb">견적관리</div>
+    <div class="tab" data-sotab="order" onclick="switchSoTab('order')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">수주현황</div>
+    <div class="tab" data-sotab="ship" onclick="switchSoTab('ship')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">출하관리</div>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap" id="soToolbar">
+    <button class="btn btn-sm" onclick="showSoCreateModal()" style="background:#16a34a;color:#fff">+ 견적/수주 생성</button>
+    <select id="soStatusFilter" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px" onchange="loadSalesOrders()">
+      <option value="">전체</option><option value="draft">초안</option><option value="confirmed">확정</option><option value="in_production">생산중</option><option value="shipped">출하</option><option value="delivered">납품</option>
+    </select>
+    <button class="btn btn-sm" onclick="loadSalesOrders()" style="background:#2563eb;color:#fff">조회</button>
+  </div>
+  <div id="soKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px"></div>
+  <div id="soContent" style="min-height:400px;overflow-x:auto"></div>
+</div>
+
+<!-- ========== LOT TRACKING (Lot 추적) PAGE ========== -->
+<div class="page" id="page-lot-tracking" style="background:#fff;color:#111">
+  <div style="display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin-bottom:12px" id="lotTabs">
+    <div class="tab active" data-lottab="list" onclick="switchLotTab('list')" style="padding:10px 20px;cursor:pointer;font-size:13px;font-weight:600;color:#2563eb;border-bottom:2px solid #2563eb">Lot 현황</div>
+    <div class="tab" data-lottab="create" onclick="switchLotTab('create')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">입고등록</div>
+    <div class="tab" data-lottab="trace" onclick="switchLotTab('trace')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">이력추적</div>
+    <div class="tab" data-lottab="inspect" onclick="switchLotTab('inspect')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">품질검사</div>
+  </div>
+  <div id="lotKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px"></div>
+  <div id="lotContent" style="min-height:400px;overflow-x:auto"></div>
+</div>
+
+<!-- ========== BUDGET (예산관리) PAGE ========== -->
+<div class="page" id="page-budget" style="background:#fff;color:#111">
+  <div style="display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin-bottom:12px" id="budgetTabs">
+    <div class="tab active" data-budgettab="plan" onclick="switchBudgetTab('plan')" style="padding:10px 20px;cursor:pointer;font-size:13px;font-weight:600;color:#2563eb;border-bottom:2px solid #2563eb">예산편성</div>
+    <div class="tab" data-budgettab="compare" onclick="switchBudgetTab('compare')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">예산vs실적</div>
+    <div class="tab" data-budgettab="cash" onclick="switchBudgetTab('cash')" style="padding:10px 20px;cursor:pointer;font-size:13px;color:#64748b">자금일보</div>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap" id="budgetToolbar">
+    <select id="budgetYear" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px" onchange="loadBudgetData()">
+      <option value="2026" selected>2026</option><option value="2025">2025</option><option value="2024">2024</option>
+    </select>
+    <select id="budgetMonth" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+      <option value="">전체</option><option value="01">1월</option><option value="02">2월</option><option value="03">3월</option><option value="04">4월</option><option value="05">5월</option><option value="06">6월</option><option value="07">7월</option><option value="08">8월</option><option value="09">9월</option><option value="10">10월</option><option value="11">11월</option><option value="12">12월</option>
+    </select>
+    <button class="btn btn-sm" onclick="loadBudgetData()" style="background:#2563eb;color:#fff">조회</button>
+  </div>
+  <div id="budgetKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px"></div>
+  <div id="budgetContent" style="min-height:400px;overflow-x:auto"></div>
+  <div id="budgetChartArea" style="margin-top:16px"><canvas id="budgetChart" height="300"></canvas></div>
+</div>
+
 </div><!-- /page-content -->
 
 <!-- Footer -->
@@ -5813,6 +5906,8 @@ function showApp() {
   }
   // 대시보드 로드
   showPage('dashboard');
+  // 알림/결재 뱃지 폴링 시작
+  setTimeout(startNotifPolling, 300);
   // 팝업 공지 체크 (로그인 직후)
   setTimeout(function(){ if(typeof checkPopupNotices==='function') checkPopupNotices(); }, 500);
 }
@@ -5915,7 +6010,9 @@ var pageTitles={
   'tasks':'업무관리',
   'chart-of-accounts':'계정과목','journal':'분개장','general-ledger':'총계정원장',
   'trial-balance':'시산표','financial-statements':'재무제표','ar-ap':'채권/채무',
-  'tax-invoice':'세금계산서','work-order':'작업지시'
+  'tax-invoice':'세금계산서','work-order':'작업지시',
+  'approval':'전자결재','sales-order':'수주관리','lot-tracking':'Lot 추적',
+  'budget':'예산관리','notification':'알림센터'
 };
 
 // ===== GLOBAL STATE =====
@@ -7001,8 +7098,9 @@ function showPage(page, opts){
     'work-order':'production',
     'vendors':'master','product-mgmt':'master','bom':'master','post-process':'master',
     'analytics':'analysis','exec-dashboard':'analysis','report':'analysis','defects':'analysis',
-    'tasks':'work','notes':'work','board':'work',
-    'settings':'system','user-mgmt':'system','audit-log':'system'
+    'tasks':'work','notes':'work','board':'work','approval':'work',
+    'settings':'system','user-mgmt':'system','audit-log':'system','notification':'system',
+    'sales-order':'sales','lot-tracking':'stock','budget':'accounting'
   };
   var activeCat = (pageCatMap && pageCatMap[page]) || '';
   // Update page visibility
@@ -7095,6 +7193,11 @@ function showPage(page, opts){
   if(page==='ar-ap') loadArApPage();
   if(page==='tax-invoice') loadTaxInvoicePage();
   if(page==='work-order') loadWorkOrderPage();
+  if(page==='approval') loadApprovalPage();
+  if(page==='sales-order') loadSalesOrderPage();
+  if(page==='lot-tracking') loadLotTrackingPage();
+  if(page==='budget') loadBudgetPage();
+  if(page==='notification') loadNotificationPage();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -8498,10 +8601,11 @@ function switchWoTab(t) {
     el.style.color=isA?'#2563eb':'#64748b';el.style.fontWeight=isA?'600':'400';
     el.style.borderBottom=isA?'2px solid #2563eb':'2px solid transparent';
   });
-  document.getElementById('woToolbar').style.display=t==='create'?'none':'flex';
+  document.getElementById('woToolbar').style.display=(t==='create'||t==='results')?'none':'flex';
   if(t==='list') loadWorkOrders();
   else if(t==='create') renderWoCreateForm();
   else if(t==='stats') loadWoStats();
+  else if(t==='results') loadWoResults();
 }
 async function loadWorkOrders() {
   var el=document.getElementById('woContent');
@@ -22208,6 +22312,934 @@ function showWhModal(id, html) {
 function closeWhModal(id) {
   var el = document.getElementById(id);
   if (el) el.remove();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Phase 5: 알림센터 (Notification Center)
+// ═══════════════════════════════════════════════════════════════
+var _notifInterval=null;
+function startNotifPolling(){
+  loadHeaderBadges();
+  if(_notifInterval) clearInterval(_notifInterval);
+  _notifInterval=setInterval(loadHeaderBadges,60000);
+}
+async function loadHeaderBadges(){
+  try{
+    var r1=await authFetch('/api/notifications/unread-count');
+    var d1=await r1.json();
+    if(d1.ok){
+      var cnt=d1.data.count||0;
+      var b=document.getElementById('headerNotifBadge');
+      if(b){b.textContent=cnt;b.style.display=cnt>0?'block':'none';}
+    }
+  }catch(e){}
+  try{
+    var r2=await authFetch('/api/approvals/pending-count');
+    var d2=await r2.json();
+    if(d2.ok){
+      var cnt2=d2.data.count||0;
+      var ab=document.getElementById('headerApprovalBadge');
+      var abtn=document.getElementById('headerApprovalBtn');
+      if(ab){ab.textContent=cnt2;ab.style.display=cnt2>0?'block':'none';}
+      if(abtn) abtn.style.display='inline-block';
+    }
+  }catch(e){}
+}
+function toggleNotifDropdown(){
+  var dd=document.getElementById('notifDropdown');
+  if(!dd)return;
+  if(dd.style.display==='none'){dd.style.display='block';loadNotifDropdown();}
+  else dd.style.display='none';
+}
+function closeNotifDropdown(){var dd=document.getElementById('notifDropdown');if(dd)dd.style.display='none';}
+document.addEventListener('click',function(e){
+  var dd=document.getElementById('notifDropdown'),btn=document.getElementById('headerNotifBtn');
+  if(dd&&btn&&!dd.contains(e.target)&&!btn.contains(e.target)) dd.style.display='none';
+});
+async function loadNotifDropdown(){
+  var el=document.getElementById('notifDropdownList');
+  if(!el)return;
+  el.innerHTML='<div style="padding:20px;text-align:center;color:#94a3b8">로딩...</div>';
+  try{
+    var r=await authFetch('/api/notifications?limit=20');
+    var d=await r.json();
+    if(!d.ok||!d.data||d.data.length===0){el.innerHTML='<div style="padding:20px;text-align:center;color:#94a3b8">알림 없음</div>';return;}
+    var h='';
+    d.data.forEach(function(n){
+      var bg=n.is_read?'#fff':'#eff6ff';
+      var typeIcon={'approval':'✍️','po':'📦','inventory':'📦','deadline':'⏰','system':'🔧'}[n.type]||'🔔';
+      h+='<div onclick="handleNotifClick('+n.id+',\''+esc(n.link||'')+'\')" style="padding:10px 16px;cursor:pointer;background:'+bg+';border-bottom:1px solid #f8fafc;display:flex;gap:10px;align-items:flex-start" onmouseover="this.style.background=\'#f8fafc\'" onmouseout="this.style.background=\''+bg+'\'">';
+      h+='<span style="font-size:16px;flex-shrink:0">'+typeIcon+'</span>';
+      h+='<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:'+(n.is_read?'400':'600')+';color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(n.title)+'</div>';
+      h+='<div style="font-size:11px;color:#94a3b8;margin-top:2px">'+esc(n.message||'').substring(0,50)+'</div>';
+      h+='<div style="font-size:10px;color:#cbd5e1;margin-top:2px">'+esc(n.created_at||'')+'</div></div></div>';
+    });
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="padding:20px;text-align:center;color:#ef4444">오류</div>';}
+}
+async function handleNotifClick(id,link){
+  try{await authFetch('/api/notifications/read/'+id,{method:'POST'});}catch(e){}
+  closeNotifDropdown();
+  loadHeaderBadges();
+  if(link) showPage(link);
+}
+async function markAllNotifRead(){
+  try{await authFetch('/api/notifications/read-all',{method:'POST'});}catch(e){}
+  loadHeaderBadges();loadNotifDropdown();
+}
+async function loadNotificationPage(){
+  var el=document.getElementById('notifPageContent');
+  if(!el)return;
+  el.innerHTML='<div style="text-align:center;padding:40px;color:#94a3b8">로딩 중...</div>';
+  try{
+    var r=await authFetch('/api/notifications?limit=200');
+    var d=await r.json();
+    if(!d.ok){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">로드 실패</div>';return;}
+    var items=d.data||[];
+    var h='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><span style="font-size:14px;color:#64748b">총 '+items.length+'건</span><button class="btn btn-sm" onclick="markAllNotifRead();setTimeout(loadNotificationPage,300)" style="background:#2563eb;color:#fff">모두 읽음 처리</button></div>';
+    if(items.length===0){h+='<div style="padding:60px;text-align:center;color:#94a3b8;font-size:15px">알림이 없습니다</div>';el.innerHTML=h;return;}
+    h+='<div style="display:flex;flex-direction:column;gap:4px">';
+    items.forEach(function(n){
+      var bg=n.is_read?'#fff':'#eff6ff';
+      var typeIcon={'approval':'✍️','po':'📦','inventory':'📦','deadline':'⏰','system':'🔧'}[n.type]||'🔔';
+      var typeLabel={'approval':'결재','po':'발주','inventory':'재고','deadline':'납기','system':'시스템'}[n.type]||n.type;
+      h+='<div style="display:flex;gap:12px;align-items:flex-start;padding:12px 16px;background:'+bg+';border:1px solid #f1f5f9;border-radius:8px;cursor:pointer" onclick="handleNotifClick('+n.id+',\''+esc(n.link||'')+'\')">';
+      h+='<span style="font-size:20px">'+typeIcon+'</span>';
+      h+='<div style="flex:1"><div style="display:flex;gap:8px;align-items:center"><span style="font-weight:'+(n.is_read?'400':'600')+';font-size:14px;color:#1e293b">'+esc(n.title)+'</span><span style="font-size:11px;padding:2px 6px;border-radius:4px;background:#f1f5f9;color:#64748b">'+typeLabel+'</span></div>';
+      h+='<div style="font-size:13px;color:#64748b;margin-top:4px">'+esc(n.message||'')+'</div>';
+      h+='<div style="font-size:11px;color:#94a3b8;margin-top:4px">'+esc(n.created_at||'')+'</div></div></div>';
+    });
+    h+='</div>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">오류 발생</div>';}
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Phase 1: 전자결재 (Approval Workflow)
+// ═══════════════════════════════════════════════════════════════
+var _apTab='my';
+function switchApprovalTab(t){
+  _apTab=t;
+  document.querySelectorAll('#approvalTabs .tab').forEach(function(el){
+    var isA=el.getAttribute('data-aptab')===t;
+    el.style.color=isA?'#2563eb':'#64748b';el.style.fontWeight=isA?'600':'400';
+    el.style.borderBottom=isA?'2px solid #2563eb':'2px solid transparent';
+  });
+  loadApprovalList();
+}
+function loadApprovalPage(){loadApprovalList();loadApprovalKpi();}
+async function loadApprovalKpi(){
+  var el=document.getElementById('approvalKpi');if(!el)return;
+  try{
+    var r=await authFetch('/api/approvals/pending-count');var d=await r.json();
+    var pending=d.ok?d.data.count:0;
+    var r2=await authFetch('/api/approvals?tab=my');var d2=await r2.json();
+    var myAll=d2.ok?d2.data.length:0;
+    var myPending=d2.ok?d2.data.filter(function(x){return x.status==='pending';}).length:0;
+    el.innerHTML=[
+      {l:'내 상신',v:myAll,c:'#2563eb'},{l:'진행중',v:myPending,c:'#f59e0b'},
+      {l:'결재 대기',v:pending,c:'#ef4444'},{l:'완료',v:myAll-myPending,c:'#10b981'}
+    ].map(function(k){return '<div style="background:#f8fafc;border-radius:10px;padding:14px 16px;text-align:center"><div style="font-size:12px;color:#64748b">'+k.l+'</div><div style="font-size:22px;font-weight:700;color:'+k.c+';margin-top:4px">'+k.v+'</div></div>';}).join('');
+  }catch(e){}
+}
+async function loadApprovalList(){
+  var el=document.getElementById('approvalContent');if(!el)return;
+  el.innerHTML='<div style="text-align:center;padding:40px;color:#94a3b8">로딩 중...</div>';
+  var docType=(document.getElementById('approvalDocType')||{}).value||'';
+  try{
+    var url='/api/approvals?tab='+_apTab;
+    if(docType) url+='&doc_type='+docType;
+    var r=await authFetch(url);var d=await r.json();
+    if(!d.ok){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">로드 실패</div>';return;}
+    var items=d.data||[];
+    if(items.length===0){el.innerHTML='<div style="padding:60px;text-align:center;color:#94a3b8">데이터 없음</div>';return;}
+    var statusMap={draft:'초안',pending:'진행중',approved:'승인',rejected:'반려',cancelled:'취소'};
+    var statusColor={draft:'#94a3b8',pending:'#f59e0b',approved:'#10b981',rejected:'#ef4444',cancelled:'#6b7280'};
+    var docTypeMap={po:'발주',expense:'지출',leave:'휴가',general:'일반'};
+    var h='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f8fafc">';
+    h+='<th style="padding:10px 8px;text-align:left">결재번호</th><th style="padding:10px 8px;text-align:left">유형</th><th style="padding:10px 8px;text-align:left">제목</th>';
+    h+='<th style="padding:10px 8px;text-align:right">금액</th><th style="padding:10px 8px;text-align:center">상태</th>';
+    h+='<th style="padding:10px 8px;text-align:center">단계</th><th style="padding:10px 8px;text-align:left">상신자</th><th style="padding:10px 8px;text-align:left">일시</th></tr></thead><tbody>';
+    items.forEach(function(a){
+      h+='<tr style="border-bottom:1px solid #f1f5f9;cursor:pointer" onclick="showApprovalDetail('+a.id+')">';
+      h+='<td style="padding:8px;color:#2563eb;font-weight:500">'+esc(a.approval_no||'')+'</td>';
+      h+='<td style="padding:8px">'+(docTypeMap[a.doc_type]||a.doc_type)+'</td>';
+      h+='<td style="padding:8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.title)+'</td>';
+      h+='<td style="padding:8px;text-align:right;font-weight:500">'+(a.amount?Number(a.amount).toLocaleString()+'원':'-')+'</td>';
+      h+='<td style="padding:8px;text-align:center"><span style="padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:'+(statusColor[a.status]||'#94a3b8')+'20;color:'+(statusColor[a.status]||'#94a3b8')+'">'+(statusMap[a.status]||a.status)+'</span></td>';
+      h+='<td style="padding:8px;text-align:center">'+a.current_step+'/'+a.total_steps+'</td>';
+      h+='<td style="padding:8px">'+esc(a.requester_name||'')+'</td>';
+      h+='<td style="padding:8px;color:#94a3b8;font-size:12px">'+esc(a.created_at||'').substring(0,16)+'</td></tr>';
+    });
+    h+='</tbody></table>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">오류 발생</div>';}
+}
+async function showApprovalDetail(id){
+  var el=document.getElementById('approvalDetail');if(!el)return;
+  el.style.display='block';
+  el.innerHTML='<div style="text-align:center;padding:20px;color:#94a3b8">로딩...</div>';
+  try{
+    var r=await authFetch('/api/approvals/'+id);var d=await r.json();
+    if(!d.ok){el.innerHTML='<div style="color:#ef4444">상세 로드 실패</div>';return;}
+    var a=d.data;var lines=a.lines||[];
+    var statusMap={draft:'초안',pending:'진행중',approved:'승인',rejected:'반려',cancelled:'취소'};
+    var statusColor={pending:'#f59e0b',approved:'#10b981',rejected:'#ef4444',skipped:'#94a3b8'};
+    var docTypeMap={po:'발주',expense:'지출',leave:'휴가',general:'일반'};
+    var h='<div style="border-top:2px solid #e2e8f0;padding-top:16px;margin-top:16px">';
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><h3 style="margin:0;font-size:16px">'+esc(a.title)+'</h3><button onclick="document.getElementById(\'approvalDetail\').style.display=\'none\'" style="background:none;border:none;font-size:18px;cursor:pointer;color:#94a3b8">✕</button></div>';
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;font-size:13px">';
+    h+='<div><span style="color:#64748b">결재번호:</span> <strong>'+esc(a.approval_no)+'</strong></div>';
+    h+='<div><span style="color:#64748b">문서유형:</span> '+(docTypeMap[a.doc_type]||a.doc_type)+'</div>';
+    h+='<div><span style="color:#64748b">상신자:</span> '+esc(a.requester_name||'')+'</div>';
+    h+='<div><span style="color:#64748b">금액:</span> '+(a.amount?Number(a.amount).toLocaleString()+'원':'-')+'</div>';
+    h+='<div><span style="color:#64748b">상태:</span> '+(statusMap[a.status]||a.status)+'</div>';
+    h+='<div><span style="color:#64748b">상신일:</span> '+esc(a.created_at||'').substring(0,16)+'</div></div>';
+    if(a.content) h+='<div style="background:#f8fafc;padding:12px;border-radius:8px;margin-bottom:16px;font-size:13px;white-space:pre-wrap">'+esc(a.content)+'</div>';
+    // Timeline
+    h+='<div style="margin-bottom:16px"><h4 style="margin:0 0 12px 0;font-size:14px">결재선</h4>';
+    h+='<div style="display:flex;gap:0;align-items:center;flex-wrap:wrap">';
+    lines.forEach(function(ln,i){
+      var sc=statusColor[ln.status]||'#94a3b8';
+      h+='<div style="text-align:center;padding:10px 16px;background:'+sc+'15;border:2px solid '+sc+';border-radius:10px;min-width:80px">';
+      h+='<div style="font-size:11px;color:#64748b">'+ln.step_order+'단계</div>';
+      h+='<div style="font-weight:600;font-size:13px;margin:4px 0">'+esc(ln.approver_name||'미지정')+'</div>';
+      h+='<div style="font-size:11px;color:'+sc+';font-weight:600">'+(statusMap[ln.status]||ln.status)+'</div>';
+      if(ln.comment) h+='<div style="font-size:10px;color:#64748b;margin-top:4px">"'+esc(ln.comment)+'"</div>';
+      if(ln.acted_at) h+='<div style="font-size:10px;color:#94a3b8">'+esc(ln.acted_at).substring(0,16)+'</div>';
+      h+='</div>';
+      if(i<lines.length-1) h+='<div style="width:30px;text-align:center;color:#cbd5e1;font-size:16px">→</div>';
+    });
+    h+='</div></div>';
+    // Action buttons
+    if(a.status==='pending'){
+      var canApprove=lines.some(function(ln){return ln.step_order===a.current_step&&ln.status==='pending';});
+      if(canApprove||_apTab==='pending'){
+        h+='<div style="display:flex;gap:8px;margin-top:12px">';
+        h+='<button class="btn btn-sm" onclick="approveApproval('+a.id+')" style="background:#10b981;color:#fff;padding:8px 24px">승인</button>';
+        h+='<button class="btn btn-sm" onclick="rejectApproval('+a.id+')" style="background:#ef4444;color:#fff;padding:8px 24px">반려</button></div>';
+      }
+    }
+    h+='</div>';
+    el.innerHTML=h;
+    el.scrollIntoView({behavior:'smooth'});
+  }catch(e){el.innerHTML='<div style="color:#ef4444">오류</div>';}
+}
+async function approveApproval(id){
+  var comment=prompt('승인 코멘트 (선택):');
+  try{
+    var r=await authFetch('/api/approvals/'+id+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({comment:comment||''})});
+    var d=await r.json();
+    if(d.ok){alert('승인 완료');loadApprovalList();loadApprovalKpi();loadHeaderBadges();document.getElementById('approvalDetail').style.display='none';}
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
+}
+async function rejectApproval(id){
+  var comment=prompt('반려 사유:');
+  if(!comment){alert('반려 사유를 입력하세요');return;}
+  try{
+    var r=await authFetch('/api/approvals/'+id+'/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({comment:comment})});
+    var d=await r.json();
+    if(d.ok){alert('반려 완료');loadApprovalList();loadApprovalKpi();loadHeaderBadges();document.getElementById('approvalDetail').style.display='none';}
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
+}
+function showApprovalCreateModal(){
+  var bg=document.createElement('div');bg.id='approvalModal';
+  bg.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:10000;display:flex;align-items:center;justify-content:center';
+  var h='<div style="background:#fff;border-radius:12px;padding:24px;width:500px;max-width:90vw;max-height:80vh;overflow-y:auto">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><h3 style="margin:0">결재 상신</h3><button onclick="document.getElementById(\'approvalModal\').remove()" style="background:none;border:none;font-size:18px;cursor:pointer">✕</button></div>';
+  h+='<div style="display:flex;flex-direction:column;gap:12px">';
+  h+='<div><label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">문서유형</label><select id="apNewDocType" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"><option value="general">일반</option><option value="po">발주</option><option value="expense">지출</option><option value="leave">휴가</option></select></div>';
+  h+='<div><label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">제목</label><input id="apNewTitle" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="결재 제목"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">내용</label><textarea id="apNewContent" rows="4" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="상세 내용"></textarea></div>';
+  h+='<div><label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">금액</label><input id="apNewAmount" type="number" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="0"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b;display:block;margin-bottom:4px">결재선 (1~3단계)</label>';
+  h+='<input id="apLine1" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px;margin-bottom:4px" placeholder="1단계 결재자 이름">';
+  h+='<input id="apLine2" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px;margin-bottom:4px" placeholder="2단계 결재자 이름 (선택)">';
+  h+='<input id="apLine3" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="3단계 결재자 이름 (선택)"></div>';
+  h+='<button onclick="submitApproval()" class="btn btn-sm" style="background:#4338ca;color:#fff;padding:10px 24px;width:100%">상신하기</button>';
+  h+='</div></div>';
+  bg.innerHTML=h;
+  document.body.appendChild(bg);
+}
+async function submitApproval(){
+  var docType=(document.getElementById('apNewDocType')||{}).value||'general';
+  var title=(document.getElementById('apNewTitle')||{}).value||'';
+  var content=(document.getElementById('apNewContent')||{}).value||'';
+  var amount=parseFloat((document.getElementById('apNewAmount')||{}).value)||0;
+  if(!title){alert('제목을 입력하세요');return;}
+  var lines=[];
+  var l1=(document.getElementById('apLine1')||{}).value;
+  var l2=(document.getElementById('apLine2')||{}).value;
+  var l3=(document.getElementById('apLine3')||{}).value;
+  if(l1) lines.push({approver_name:l1});
+  if(l2) lines.push({approver_name:l2});
+  if(l3) lines.push({approver_name:l3});
+  if(lines.length===0){alert('결재자를 최소 1명 지정하세요');return;}
+  try{
+    var r=await authFetch('/api/approvals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({doc_type:docType,title:title,content:content,amount:amount,lines:lines})});
+    var d=await r.json();
+    if(d.ok){alert('상신 완료');document.getElementById('approvalModal').remove();loadApprovalList();loadApprovalKpi();loadHeaderBadges();}
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Phase 2: 수주관리 (Sales Order)
+// ═══════════════════════════════════════════════════════════════
+var _soTab='quote';
+function switchSoTab(t){
+  _soTab=t;
+  document.querySelectorAll('#soTabs .tab').forEach(function(el){
+    var isA=el.getAttribute('data-sotab')===t;
+    el.style.color=isA?'#2563eb':'#64748b';el.style.fontWeight=isA?'600':'400';
+    el.style.borderBottom=isA?'2px solid #2563eb':'2px solid transparent';
+  });
+  loadSalesOrders();
+}
+function loadSalesOrderPage(){loadSalesOrders();loadSoKpi();}
+async function loadSoKpi(){
+  var el=document.getElementById('soKpi');if(!el)return;
+  try{
+    var r=await authFetch('/api/sales-orders/summary');var d=await r.json();
+    if(!d.ok)return;var s=d.data;
+    el.innerHTML=[
+      {l:'견적건수',v:s.quote_count||0,c:'#6366f1'},{l:'수주잔액',v:(s.order_amount||0).toLocaleString()+'원',c:'#2563eb'},
+      {l:'출하완료',v:s.shipped_count||0,c:'#10b981'},{l:'미출하',v:s.unshipped_count||0,c:'#ef4444'}
+    ].map(function(k){return '<div style="background:#f8fafc;border-radius:10px;padding:14px 16px;text-align:center"><div style="font-size:12px;color:#64748b">'+k.l+'</div><div style="font-size:20px;font-weight:700;color:'+k.c+';margin-top:4px">'+k.v+'</div></div>';}).join('');
+  }catch(e){}
+}
+async function loadSalesOrders(){
+  var el=document.getElementById('soContent');if(!el)return;
+  el.innerHTML='<div style="text-align:center;padding:40px;color:#94a3b8">로딩 중...</div>';
+  var status=(document.getElementById('soStatusFilter')||{}).value||'';
+  try{
+    var url='/api/sales-orders?';
+    if(_soTab==='quote') url+='type=quote';
+    else if(_soTab==='ship') url+='type=ship';
+    else url+='type=sales';
+    if(status) url+='&status='+status;
+    var r=await authFetch(url);var d=await r.json();
+    if(!d.ok){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">로드 실패</div>';return;}
+    var items=d.data||[];
+    if(items.length===0){el.innerHTML='<div style="padding:60px;text-align:center;color:#94a3b8">데이터 없음</div>';return;}
+    var statusMap={draft:'초안',confirmed:'확정',in_production:'생산중',shipped:'출하',delivered:'납품',cancelled:'취소'};
+    var statusColor={draft:'#94a3b8',confirmed:'#2563eb',in_production:'#f59e0b',shipped:'#10b981',delivered:'#059669',cancelled:'#6b7280'};
+    var typeMap={quote:'견적',sales:'수주',return:'반품'};
+    var h='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f8fafc">';
+    h+='<th style="padding:10px 8px;text-align:left">주문번호</th><th style="padding:10px 8px;text-align:left">유형</th><th style="padding:10px 8px;text-align:left">고객명</th>';
+    h+='<th style="padding:10px 8px;text-align:right">수량</th><th style="padding:10px 8px;text-align:right">금액</th>';
+    h+='<th style="padding:10px 8px;text-align:center">상태</th><th style="padding:10px 8px;text-align:left">주문일</th><th style="padding:10px 8px;text-align:left">납기일</th>';
+    h+='<th style="padding:10px 8px;text-align:center">작업</th></tr></thead><tbody>';
+    items.forEach(function(o){
+      h+='<tr style="border-bottom:1px solid #f1f5f9">';
+      h+='<td style="padding:8px;color:#2563eb;font-weight:500">'+esc(o.order_no||'')+'</td>';
+      h+='<td style="padding:8px">'+(typeMap[o.order_type]||o.order_type)+'</td>';
+      h+='<td style="padding:8px">'+esc(o.customer_name||'')+'</td>';
+      h+='<td style="padding:8px;text-align:right">'+(o.total_qty||0)+'</td>';
+      h+='<td style="padding:8px;text-align:right;font-weight:500">'+(o.total_amount?Number(o.total_amount).toLocaleString()+'원':'-')+'</td>';
+      h+='<td style="padding:8px;text-align:center"><span style="padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:'+(statusColor[o.status]||'#94a3b8')+'20;color:'+(statusColor[o.status]||'#94a3b8')+'">'+(statusMap[o.status]||o.status)+'</span></td>';
+      h+='<td style="padding:8px;font-size:12px">'+esc(o.order_date||'')+'</td>';
+      h+='<td style="padding:8px;font-size:12px">'+esc(o.delivery_date||'')+'</td>';
+      h+='<td style="padding:8px;text-align:center">';
+      if(o.status==='draft') h+='<button class="btn btn-sm" onclick="confirmSalesOrder('+o.id+')" style="background:#2563eb;color:#fff;font-size:11px;padding:3px 8px">확정</button> ';
+      if(o.status==='confirmed'||o.status==='in_production') h+='<button class="btn btn-sm" onclick="shipSalesOrder('+o.id+')" style="background:#10b981;color:#fff;font-size:11px;padding:3px 8px">출하</button>';
+      h+='</td></tr>';
+    });
+    h+='</tbody></table>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">오류 발생</div>';}
+}
+async function confirmSalesOrder(id){
+  if(!confirm('이 견적을 수주 확정하시겠습니까?'))return;
+  try{var r=await authFetch('/api/sales-orders/'+id+'/confirm',{method:'POST'});var d=await r.json();
+    if(d.ok){loadSalesOrders();loadSoKpi();}else alert(d.error||'실패');
+  }catch(e){alert('오류');}
+}
+async function shipSalesOrder(id){
+  if(!confirm('출하 처리하시겠습니까?'))return;
+  try{var r=await authFetch('/api/sales-orders/'+id+'/ship',{method:'POST'});var d=await r.json();
+    if(d.ok){loadSalesOrders();loadSoKpi();}else alert(d.error||'실패');
+  }catch(e){alert('오류');}
+}
+function showSoCreateModal(){
+  var bg=document.createElement('div');bg.id='soModal';
+  bg.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:10000;display:flex;align-items:center;justify-content:center';
+  var h='<div style="background:#fff;border-radius:12px;padding:24px;width:560px;max-width:90vw;max-height:85vh;overflow-y:auto">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><h3 style="margin:0">견적/수주 생성</h3><button onclick="document.getElementById(\'soModal\').remove()" style="background:none;border:none;font-size:18px;cursor:pointer">✕</button></div>';
+  h+='<div style="display:flex;flex-direction:column;gap:10px">';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">유형</label><select id="soNewType" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"><option value="quote">견적</option><option value="sales">수주</option></select></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">고객명</label><input id="soNewCustomer" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="고객명"></div></div>';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">연락처</label><input id="soNewContact" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="담당자"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">전화번호</label><input id="soNewTel" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="전화번호"></div></div>';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">주문일</label><input id="soNewDate" type="date" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">납기일</label><input id="soNewDelivery" type="date" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">품목</label><div id="soItemRows"></div><button onclick="addSoItemRow()" style="margin-top:4px;background:none;border:1px dashed #d1d5db;border-radius:6px;padding:6px;width:100%;cursor:pointer;color:#64748b;font-size:12px">+ 품목 추가</button></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">비고</label><textarea id="soNewNotes" rows="2" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></textarea></div>';
+  h+='<button onclick="submitSalesOrder()" class="btn btn-sm" style="background:#16a34a;color:#fff;padding:10px 24px;width:100%">저장</button>';
+  h+='</div></div>';
+  bg.innerHTML=h;
+  document.body.appendChild(bg);
+  addSoItemRow();
+}
+var _soItemIdx=0;
+function addSoItemRow(){
+  var c=document.getElementById('soItemRows');if(!c)return;
+  var idx=_soItemIdx++;
+  var r=document.createElement('div');r.style.cssText='display:grid;grid-template-columns:2fr 1fr 80px 80px 30px;gap:4px;margin-bottom:4px;align-items:center';
+  r.innerHTML='<input class="soItemName" placeholder="품명" style="padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">'
+    +'<input class="soItemSpec" placeholder="규격" style="padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">'
+    +'<input class="soItemPrice" type="number" placeholder="단가" style="padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">'
+    +'<input class="soItemQty" type="number" placeholder="수량" style="padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">'
+    +'<button onclick="this.parentElement.remove()" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:14px">✕</button>';
+  c.appendChild(r);
+}
+async function submitSalesOrder(){
+  var type=(document.getElementById('soNewType')||{}).value||'quote';
+  var customer=(document.getElementById('soNewCustomer')||{}).value||'';
+  if(!customer){alert('고객명을 입력하세요');return;}
+  var items=[];
+  document.querySelectorAll('#soItemRows > div').forEach(function(r){
+    var name=r.querySelector('.soItemName').value;
+    var spec=r.querySelector('.soItemSpec').value;
+    var price=parseFloat(r.querySelector('.soItemPrice').value)||0;
+    var qty=parseInt(r.querySelector('.soItemQty').value)||0;
+    if(name&&qty>0) items.push({product_name:name,spec:spec,unit_price:price,qty:qty});
+  });
+  try{
+    var r=await authFetch('/api/sales-orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      order_type:type,customer_name:customer,
+      customer_contact:(document.getElementById('soNewContact')||{}).value||'',
+      customer_tel:(document.getElementById('soNewTel')||{}).value||'',
+      order_date:(document.getElementById('soNewDate')||{}).value||'',
+      delivery_date:(document.getElementById('soNewDelivery')||{}).value||'',
+      notes:(document.getElementById('soNewNotes')||{}).value||'',
+      items:items
+    })});
+    var d=await r.json();
+    if(d.ok){alert('저장 완료');document.getElementById('soModal').remove();loadSalesOrders();loadSoKpi();}
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Phase 3: Lot 추적 (Lot Tracking)
+// ═══════════════════════════════════════════════════════════════
+var _lotTab='list';
+function switchLotTab(t){
+  _lotTab=t;
+  document.querySelectorAll('#lotTabs .tab').forEach(function(el){
+    var isA=el.getAttribute('data-lottab')===t;
+    el.style.color=isA?'#2563eb':'#64748b';el.style.fontWeight=isA?'600':'400';
+    el.style.borderBottom=isA?'2px solid #2563eb':'2px solid transparent';
+  });
+  if(t==='list') loadLotList();
+  else if(t==='create') renderLotCreateForm();
+  else if(t==='trace') renderLotTraceForm();
+  else if(t==='inspect') loadLotInspections();
+}
+function loadLotTrackingPage(){loadLotSummary();loadLotList();}
+async function loadLotSummary(){
+  var el=document.getElementById('lotKpi');if(!el)return;
+  try{
+    var r=await authFetch('/api/lots/summary');var d=await r.json();
+    if(!d.ok)return;var s=d.data;
+    el.innerHTML=[
+      {l:'활성 Lot',v:s.active_lots||0,c:'#2563eb'},{l:'총 재고',v:(s.total_qty||0).toLocaleString(),c:'#10b981'},
+      {l:'품질 보류',v:s.held_lots||0,c:'#f59e0b'},{l:'만기 30일내',v:s.expiring_soon||0,c:'#ef4444'}
+    ].map(function(k){return '<div style="background:#f8fafc;border-radius:10px;padding:14px 16px;text-align:center"><div style="font-size:12px;color:#64748b">'+k.l+'</div><div style="font-size:22px;font-weight:700;color:'+k.c+';margin-top:4px">'+k.v+'</div></div>';}).join('');
+  }catch(e){}
+}
+async function loadLotList(){
+  var el=document.getElementById('lotContent');if(!el)return;
+  el.innerHTML='<div style="text-align:center;padding:40px;color:#94a3b8">로딩 중...</div>';
+  try{
+    var r=await authFetch('/api/lots');var d=await r.json();
+    if(!d.ok){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">로드 실패</div>';return;}
+    var items=d.data||[];
+    if(items.length===0){el.innerHTML='<div style="padding:60px;text-align:center;color:#94a3b8">Lot 데이터 없음</div>';return;}
+    var statusColor={active:'#10b981',hold:'#f59e0b',depleted:'#94a3b8',expired:'#ef4444'};
+    var statusMap={active:'활성',hold:'보류',depleted:'소진',expired:'만기'};
+    var h='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f8fafc">';
+    h+='<th style="padding:10px 8px;text-align:left">Lot번호</th><th style="padding:10px 8px;text-align:left">품목</th>';
+    h+='<th style="padding:10px 8px;text-align:left">창고</th><th style="padding:10px 8px;text-align:right">수량</th>';
+    h+='<th style="padding:10px 8px;text-align:center">상태</th><th style="padding:10px 8px;text-align:left">입고일</th>';
+    h+='<th style="padding:10px 8px;text-align:left">유효기한</th><th style="padding:10px 8px;text-align:center">작업</th></tr></thead><tbody>';
+    items.forEach(function(l){
+      h+='<tr style="border-bottom:1px solid #f1f5f9">';
+      h+='<td style="padding:8px;color:#7c3aed;font-weight:500;cursor:pointer" onclick="showLotDetail('+l.id+')">'+esc(l.batch_number||'')+'</td>';
+      h+='<td style="padding:8px">'+esc(l.product_name||'')+'</td>';
+      h+='<td style="padding:8px">'+esc(l.warehouse||'')+'</td>';
+      h+='<td style="padding:8px;text-align:right;font-weight:500">'+(l.current_qty||0).toLocaleString()+'</td>';
+      h+='<td style="padding:8px;text-align:center"><span style="padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:'+(statusColor[l.status]||'#94a3b8')+'20;color:'+(statusColor[l.status]||'#94a3b8')+'">'+(statusMap[l.status]||l.status)+'</span></td>';
+      h+='<td style="padding:8px;font-size:12px">'+esc(l.received_date||'')+'</td>';
+      h+='<td style="padding:8px;font-size:12px">'+esc(l.expiry_date||'')+'</td>';
+      h+='<td style="padding:8px;text-align:center"><button class="btn btn-sm" onclick="showLotActionModal('+l.id+',\''+esc(l.batch_number)+'\')" style="font-size:11px;padding:3px 8px">이동/사용</button></td></tr>';
+    });
+    h+='</tbody></table>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">오류 발생</div>';}
+}
+async function showLotDetail(id){
+  var el=document.getElementById('lotContent');if(!el)return;
+  try{
+    var r=await authFetch('/api/lots/'+id);var d=await r.json();
+    if(!d.ok){alert('로드 실패');return;}
+    var l=d.data;var txns=l.transactions||[];var insp=l.inspections||[];
+    var h='<div style="margin-bottom:16px"><button class="btn btn-sm" onclick="loadLotList()" style="font-size:12px">← 목록으로</button></div>';
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;font-size:13px;background:#f8fafc;padding:16px;border-radius:10px">';
+    h+='<div><strong>Lot번호:</strong> '+esc(l.batch_number)+'</div><div><strong>품목:</strong> '+esc(l.product_name||'')+'</div>';
+    h+='<div><strong>창고:</strong> '+esc(l.warehouse||'')+'</div><div><strong>현재수량:</strong> '+(l.current_qty||0).toLocaleString()+'</div>';
+    h+='<div><strong>입고일:</strong> '+esc(l.received_date||'')+'</div><div><strong>유효기한:</strong> '+esc(l.expiry_date||'')+'</div>';
+    h+='<div><strong>공급업체:</strong> '+esc(l.supplier||'')+'</div><div><strong>상태:</strong> '+esc(l.status||'')+'</div></div>';
+    // Transactions timeline
+    h+='<h4 style="margin:16px 0 8px 0">거래 이력</h4>';
+    if(txns.length>0){
+      h+='<div style="display:flex;flex-direction:column;gap:4px">';
+      txns.forEach(function(t){
+        var icon={in:'📥',out:'📤',move:'🔄',adjust:'⚙',return:'↩️'}[t.type]||'📝';
+        h+='<div style="display:flex;gap:10px;align-items:center;padding:8px 12px;background:#fff;border:1px solid #f1f5f9;border-radius:6px;font-size:13px">';
+        h+='<span>'+icon+'</span><span style="font-weight:500;min-width:50px">'+(t.type||'')+'</span>';
+        h+='<span>수량: '+(t.qty||0)+'</span><span style="color:#64748b">'+esc(t.reference||'')+'</span>';
+        h+='<span style="color:#94a3b8;font-size:11px;margin-left:auto">'+esc(t.created_at||'').substring(0,16)+'</span></div>';
+      });
+      h+='</div>';
+    }else h+='<div style="color:#94a3b8;font-size:13px">이력 없음</div>';
+    // Inspections
+    if(insp.length>0){
+      h+='<h4 style="margin:16px 0 8px 0">품질검사</h4><div style="display:flex;flex-direction:column;gap:4px">';
+      insp.forEach(function(i){
+        var rc=i.result==='pass'?'#10b981':'#ef4444';
+        h+='<div style="display:flex;gap:10px;align-items:center;padding:8px 12px;background:#fff;border:1px solid #f1f5f9;border-radius:6px;font-size:13px">';
+        h+='<span style="color:'+rc+';font-weight:600">'+(i.result==='pass'?'합격':'불합격')+'</span>';
+        h+='<span>'+esc(i.inspector||'')+'</span><span style="color:#64748b">'+esc(i.notes||'')+'</span>';
+        h+='<span style="color:#94a3b8;font-size:11px;margin-left:auto">'+esc(i.inspected_at||'').substring(0,16)+'</span></div>';
+      });
+      h+='</div>';
+    }
+    el.innerHTML=h;
+  }catch(e){alert('오류');}
+}
+function renderLotCreateForm(){
+  var el=document.getElementById('lotContent');if(!el)return;
+  var h='<div style="max-width:500px;margin:0 auto">';
+  h+='<h4 style="margin:0 0 16px 0">Lot 입고 등록</h4>';
+  h+='<div style="display:flex;flex-direction:column;gap:10px">';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">품목코드</label><input id="lotNewCode" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">품목명</label><input id="lotNewName" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div></div>';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">수량</label><input id="lotNewQty" type="number" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">창고</label><input id="lotNewWH" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" value="본사 창고"></div></div>';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">공급업체</label><input id="lotNewSupplier" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">유효기한</label><input id="lotNewExpiry" type="date" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">비고</label><textarea id="lotNewNotes" rows="2" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></textarea></div>';
+  h+='<button onclick="submitNewLot()" class="btn btn-sm" style="background:#7c3aed;color:#fff;padding:10px;width:100%">Lot 등록</button>';
+  h+='</div></div>';
+  el.innerHTML=h;
+}
+async function submitNewLot(){
+  var code=(document.getElementById('lotNewCode')||{}).value||'';
+  var name=(document.getElementById('lotNewName')||{}).value||'';
+  var qty=parseInt((document.getElementById('lotNewQty')||{}).value)||0;
+  if(!name||qty<=0){alert('품목명과 수량을 입력하세요');return;}
+  try{
+    var r=await authFetch('/api/lots',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      product_code:code,product_name:name,initial_qty:qty,
+      warehouse:(document.getElementById('lotNewWH')||{}).value||'본사 창고',
+      supplier:(document.getElementById('lotNewSupplier')||{}).value||'',
+      expiry_date:(document.getElementById('lotNewExpiry')||{}).value||'',
+      notes:(document.getElementById('lotNewNotes')||{}).value||''
+    })});
+    var d=await r.json();
+    if(d.ok){alert('Lot 등록 완료: '+d.data.batch_number);switchLotTab('list');loadLotSummary();}
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
+}
+function renderLotTraceForm(){
+  var el=document.getElementById('lotContent');if(!el)return;
+  var h='<div style="max-width:500px;margin:0 auto">';
+  h+='<h4 style="margin:0 0 16px 0">Lot 이력 추적</h4>';
+  h+='<div style="display:flex;gap:8px;margin-bottom:16px"><input id="lotTraceNumber" placeholder="Lot 번호 입력" style="flex:1;padding:8px;border:1px solid #d1d5db;border-radius:6px">';
+  h+='<button onclick="traceLot()" class="btn btn-sm" style="background:#7c3aed;color:#fff">추적</button></div>';
+  h+='<div id="lotTraceResult"></div></div>';
+  el.innerHTML=h;
+}
+async function traceLot(){
+  var bn=(document.getElementById('lotTraceNumber')||{}).value||'';
+  if(!bn){alert('Lot 번호를 입력하세요');return;}
+  var el=document.getElementById('lotTraceResult');if(!el)return;
+  el.innerHTML='<div style="text-align:center;padding:20px;color:#94a3b8">추적 중...</div>';
+  try{
+    var r=await authFetch('/api/lots/trace/'+encodeURIComponent(bn));var d=await r.json();
+    if(!d.ok){el.innerHTML='<div style="color:#ef4444">'+(d.error||'조회 실패')+'</div>';return;}
+    var data=d.data;
+    var h='<div style="background:#f8fafc;padding:16px;border-radius:10px;margin-bottom:12px;font-size:13px">';
+    h+='<div><strong>Lot:</strong> '+esc(data.batch_number)+'</div>';
+    h+='<div><strong>품목:</strong> '+esc(data.product_name||'')+'</div>';
+    h+='<div><strong>현재수량:</strong> '+(data.current_qty||0)+'</div></div>';
+    var txns=data.transactions||[];
+    if(txns.length>0){
+      h+='<h4>전체 이력 ('+txns.length+'건)</h4><div style="display:flex;flex-direction:column;gap:4px">';
+      txns.forEach(function(t){
+        h+='<div style="padding:8px 12px;background:#fff;border:1px solid #f1f5f9;border-radius:6px;font-size:13px;display:flex;gap:10px">';
+        h+='<span style="font-weight:500">'+(t.type||'')+'</span><span>수량: '+(t.qty||0)+'</span>';
+        h+='<span style="color:#64748b">'+esc(t.reference||'')+'</span>';
+        h+='<span style="color:#94a3b8;font-size:11px;margin-left:auto">'+esc(t.created_at||'').substring(0,16)+'</span></div>';
+      });
+      h+='</div>';
+    }else h+='<div style="color:#94a3b8">이력 없음</div>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="color:#ef4444">오류</div>';}
+}
+function loadLotInspections(){
+  var el=document.getElementById('lotContent');if(!el)return;
+  el.innerHTML='<div style="max-width:500px;margin:0 auto"><h4 style="margin:0 0 16px 0">품질검사 등록</h4>'
+    +'<div style="display:flex;flex-direction:column;gap:10px">'
+    +'<div><label style="font-size:12px;color:#64748b">Lot ID</label><input id="inspLotId" type="number" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="Lot ID"></div>'
+    +'<div><label style="font-size:12px;color:#64748b">검사결과</label><select id="inspResult" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"><option value="pass">합격</option><option value="fail">불합격</option></select></div>'
+    +'<div><label style="font-size:12px;color:#64748b">검사자</label><input id="inspInspector" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>'
+    +'<div><label style="font-size:12px;color:#64748b">비고</label><textarea id="inspNotes" rows="2" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></textarea></div>'
+    +'<button onclick="submitInspection()" class="btn btn-sm" style="background:#7c3aed;color:#fff;padding:10px;width:100%">검사 등록</button>'
+    +'</div></div>';
+}
+async function submitInspection(){
+  var lotId=parseInt((document.getElementById('inspLotId')||{}).value)||0;
+  if(!lotId){alert('Lot ID를 입력하세요');return;}
+  try{
+    var r=await authFetch('/api/lots/'+lotId+'/inspect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      result:(document.getElementById('inspResult')||{}).value||'pass',
+      inspector:(document.getElementById('inspInspector')||{}).value||'',
+      notes:(document.getElementById('inspNotes')||{}).value||''
+    })});
+    var d=await r.json();
+    if(d.ok) alert('검사 등록 완료');
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
+}
+function showLotActionModal(id,batchNo){
+  var bg=document.createElement('div');bg.id='lotActionModal';
+  bg.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:10000;display:flex;align-items:center;justify-content:center';
+  var h='<div style="background:#fff;border-radius:12px;padding:24px;width:400px;max-width:90vw">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><h3 style="margin:0">Lot 이동/사용 — '+esc(batchNo)+'</h3><button onclick="document.getElementById(\'lotActionModal\').remove()" style="background:none;border:none;font-size:18px;cursor:pointer">✕</button></div>';
+  h+='<div style="display:flex;flex-direction:column;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">유형</label><select id="lotActType" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"><option value="out">출고</option><option value="move">이동</option><option value="adjust">조정</option><option value="return">반품</option></select></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">수량</label><input id="lotActQty" type="number" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">참조/사유</label><input id="lotActRef" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<button onclick="submitLotAction('+id+')" class="btn btn-sm" style="background:#7c3aed;color:#fff;padding:10px;width:100%">처리</button>';
+  h+='</div></div>';
+  bg.innerHTML=h;document.body.appendChild(bg);
+}
+async function submitLotAction(id){
+  var type=(document.getElementById('lotActType')||{}).value||'out';
+  var qty=parseInt((document.getElementById('lotActQty')||{}).value)||0;
+  if(qty<=0){alert('수량을 입력하세요');return;}
+  try{
+    var r=await authFetch('/api/lots/'+id+'/transaction',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      type:type,qty:qty,reference:(document.getElementById('lotActRef')||{}).value||''
+    })});
+    var d=await r.json();
+    if(d.ok){alert('처리 완료');document.getElementById('lotActionModal').remove();loadLotList();loadLotSummary();}
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Phase 4: 예산관리 (Budget Management)
+// ═══════════════════════════════════════════════════════════════
+var _budgetTab='plan',_budgetChart=null;
+function switchBudgetTab(t){
+  _budgetTab=t;
+  document.querySelectorAll('#budgetTabs .tab').forEach(function(el){
+    var isA=el.getAttribute('data-budgettab')===t;
+    el.style.color=isA?'#2563eb':'#64748b';el.style.fontWeight=isA?'600':'400';
+    el.style.borderBottom=isA?'2px solid #2563eb':'2px solid transparent';
+  });
+  document.getElementById('budgetChartArea').style.display=t==='compare'?'block':'none';
+  loadBudgetData();
+}
+function loadBudgetPage(){
+  document.getElementById('budgetChartArea').style.display='none';
+  loadBudgetData();loadBudgetKpi();
+}
+async function loadBudgetKpi(){
+  var el=document.getElementById('budgetKpi');if(!el)return;
+  var year=(document.getElementById('budgetYear')||{}).value||'2026';
+  try{
+    var r=await authFetch('/api/budget/summary?year='+year);var d=await r.json();
+    if(!d.ok)return;var s=d.data;
+    el.innerHTML=[
+      {l:'총 예산',v:(s.total_budget||0).toLocaleString()+'원',c:'#2563eb'},
+      {l:'총 실적',v:(s.total_actual||0).toLocaleString()+'원',c:'#10b981'},
+      {l:'집행률',v:(s.execution_rate||0).toFixed(1)+'%',c:s.execution_rate>100?'#ef4444':'#f59e0b'},
+      {l:'잔여 예산',v:((s.total_budget||0)-(s.total_actual||0)).toLocaleString()+'원',c:'#6366f1'}
+    ].map(function(k){return '<div style="background:#f8fafc;border-radius:10px;padding:14px 16px;text-align:center"><div style="font-size:12px;color:#64748b">'+k.l+'</div><div style="font-size:18px;font-weight:700;color:'+k.c+';margin-top:4px">'+k.v+'</div></div>';}).join('');
+  }catch(e){}
+}
+async function loadBudgetData(){
+  var el=document.getElementById('budgetContent');if(!el)return;
+  el.innerHTML='<div style="text-align:center;padding:40px;color:#94a3b8">로딩 중...</div>';
+  var year=(document.getElementById('budgetYear')||{}).value||'2026';
+  var month=(document.getElementById('budgetMonth')||{}).value||'';
+  if(_budgetTab==='cash') return loadCashDaily();
+  if(_budgetTab==='compare') return loadBudgetCompare();
+  // Plan tab
+  try{
+    var url='/api/budget/list?year='+year;
+    if(month) url+='&month='+month;
+    var r=await authFetch(url);var d=await r.json();
+    if(!d.ok){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">로드 실패</div>';return;}
+    var items=d.data||[];
+    var h='<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button class="btn btn-sm" onclick="showBudgetAddModal()" style="background:#d97706;color:#fff">+ 예산 추가</button></div>';
+    if(items.length===0){h+='<div style="padding:60px;text-align:center;color:#94a3b8">예산 데이터 없음</div>';el.innerHTML=h;return;}
+    h+='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f8fafc">';
+    h+='<th style="padding:10px 8px;text-align:left">월</th><th style="padding:10px 8px;text-align:left">계정코드</th><th style="padding:10px 8px;text-align:left">계정명</th>';
+    h+='<th style="padding:10px 8px;text-align:center">유형</th><th style="padding:10px 8px;text-align:right">예산</th>';
+    h+='<th style="padding:10px 8px;text-align:right">실적</th><th style="padding:10px 8px;text-align:right">차이</th></tr></thead><tbody>';
+    items.forEach(function(b){
+      var diff=(b.budget_amount||0)-(b.actual_amount||0);
+      var diffColor=diff>=0?'#10b981':'#ef4444';
+      h+='<tr style="border-bottom:1px solid #f1f5f9">';
+      h+='<td style="padding:8px">'+esc(b.month||'')+'월</td>';
+      h+='<td style="padding:8px">'+esc(b.acc_code||'')+'</td>';
+      h+='<td style="padding:8px">'+esc(b.acc_name||'')+'</td>';
+      h+='<td style="padding:8px;text-align:center">'+(b.budget_type==='revenue'?'수입':'지출')+'</td>';
+      h+='<td style="padding:8px;text-align:right;font-weight:500">'+(b.budget_amount||0).toLocaleString()+'</td>';
+      h+='<td style="padding:8px;text-align:right">'+(b.actual_amount||0).toLocaleString()+'</td>';
+      h+='<td style="padding:8px;text-align:right;color:'+diffColor+';font-weight:500">'+diff.toLocaleString()+'</td></tr>';
+    });
+    h+='</tbody></table>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">오류</div>';}
+}
+async function loadBudgetCompare(){
+  var el=document.getElementById('budgetContent');if(!el)return;
+  var year=(document.getElementById('budgetYear')||{}).value||'2026';
+  var month=(document.getElementById('budgetMonth')||{}).value||'';
+  try{
+    var url='/api/budget/vs-actual?year='+year;
+    if(month) url+='&month='+month;
+    var r=await authFetch(url);var d=await r.json();
+    if(!d.ok){el.innerHTML='<div style="color:#ef4444">로드 실패</div>';return;}
+    var items=d.data||[];
+    if(items.length===0){el.innerHTML='<div style="padding:40px;text-align:center;color:#94a3b8">비교 데이터 없음</div>';return;}
+    // Render chart
+    var labels=items.map(function(i){return i.acc_name||i.acc_code;});
+    var budgets=items.map(function(i){return i.budget_amount||0;});
+    var actuals=items.map(function(i){return i.actual_amount||0;});
+    var ctx=document.getElementById('budgetChart');
+    if(_budgetChart){_budgetChart.destroy();_budgetChart=null;}
+    _budgetChart=new Chart(ctx,{type:'bar',data:{labels:labels,datasets:[
+      {label:'예산',data:budgets,backgroundColor:'rgba(37,99,235,0.7)'},
+      {label:'실적',data:actuals,backgroundColor:'rgba(16,185,129,0.7)'}
+    ]},options:{responsive:true,plugins:{legend:{position:'top'}},scales:{y:{beginAtZero:true,ticks:{callback:function(v){return (v/10000).toFixed(0)+'만';}}}}}});
+    // Also render table
+    var h='<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px"><thead><tr style="background:#f8fafc">';
+    h+='<th style="padding:8px;text-align:left">계정</th><th style="padding:8px;text-align:right">예산</th><th style="padding:8px;text-align:right">실적</th><th style="padding:8px;text-align:right">집행률</th></tr></thead><tbody>';
+    items.forEach(function(i){
+      var rate=i.budget_amount>0?((i.actual_amount/i.budget_amount)*100).toFixed(1):'-';
+      var rc=(typeof rate==='string')?'#94a3b8':parseFloat(rate)>100?'#ef4444':'#10b981';
+      h+='<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:8px">'+esc(i.acc_name||i.acc_code)+'</td>';
+      h+='<td style="padding:8px;text-align:right">'+(i.budget_amount||0).toLocaleString()+'</td>';
+      h+='<td style="padding:8px;text-align:right">'+(i.actual_amount||0).toLocaleString()+'</td>';
+      h+='<td style="padding:8px;text-align:right;color:'+rc+';font-weight:500">'+rate+'%</td></tr>';
+    });
+    h+='</tbody></table>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="color:#ef4444">오류</div>';}
+}
+async function loadCashDaily(){
+  var el=document.getElementById('budgetContent');if(!el)return;
+  try{
+    var today=new Date();
+    var from=today.getFullYear()+'-'+(''+(today.getMonth()+1)).padStart(2,'0')+'-01';
+    var to=today.getFullYear()+'-'+(''+(today.getMonth()+1)).padStart(2,'0')+'-'+(''+today.getDate()).padStart(2,'0');
+    var r=await authFetch('/api/cash/daily?from='+from+'&to='+to);var d=await r.json();
+    if(!d.ok){el.innerHTML='<div style="color:#ef4444">로드 실패</div>';return;}
+    var items=d.data||[];
+    var h='<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button class="btn btn-sm" onclick="showCashAddModal()" style="background:#d97706;color:#fff">+ 수기 등록</button></div>';
+    if(items.length===0){h+='<div style="padding:60px;text-align:center;color:#94a3b8">자금 데이터 없음</div>';el.innerHTML=h;return;}
+    h+='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f8fafc">';
+    h+='<th style="padding:10px 8px;text-align:left">일자</th><th style="padding:10px 8px;text-align:left">계정</th>';
+    h+='<th style="padding:10px 8px;text-align:right;color:#2563eb">입금</th><th style="padding:10px 8px;text-align:right;color:#ef4444">출금</th>';
+    h+='<th style="padding:10px 8px;text-align:right">잔액</th><th style="padding:10px 8px;text-align:left">비고</th></tr></thead><tbody>';
+    items.forEach(function(c){
+      h+='<tr style="border-bottom:1px solid #f1f5f9">';
+      h+='<td style="padding:8px">'+esc(c.cash_date||'')+'</td>';
+      h+='<td style="padding:8px">'+esc(c.acc_name||c.acc_code||'')+'</td>';
+      h+='<td style="padding:8px;text-align:right;color:#2563eb">'+(c.inflow?c.inflow.toLocaleString():'-')+'</td>';
+      h+='<td style="padding:8px;text-align:right;color:#ef4444">'+(c.outflow?c.outflow.toLocaleString():'-')+'</td>';
+      h+='<td style="padding:8px;text-align:right;font-weight:500">'+(c.balance||0).toLocaleString()+'</td>';
+      h+='<td style="padding:8px;font-size:12px;color:#64748b">'+esc(c.notes||'')+'</td></tr>';
+    });
+    h+='</tbody></table>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="color:#ef4444">오류</div>';}
+}
+function showBudgetAddModal(){
+  var bg=document.createElement('div');bg.id='budgetModal';
+  bg.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:10000;display:flex;align-items:center;justify-content:center';
+  var year=(document.getElementById('budgetYear')||{}).value||'2026';
+  var h='<div style="background:#fff;border-radius:12px;padding:24px;width:440px;max-width:90vw">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><h3 style="margin:0">예산 추가</h3><button onclick="document.getElementById(\'budgetModal\').remove()" style="background:none;border:none;font-size:18px;cursor:pointer">✕</button></div>';
+  h+='<div style="display:flex;flex-direction:column;gap:10px">';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">월</label><select id="budgetNewMonth" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px">';
+  for(var m=1;m<=12;m++) h+='<option value="'+(m<10?'0':'')+m+'">'+m+'월</option>';
+  h+='</select></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">유형</label><select id="budgetNewType" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"><option value="expense">지출</option><option value="revenue">수입</option></select></div></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">계정코드</label><input id="budgetNewCode" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="예: 4100"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">계정명</label><input id="budgetNewName" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="예: 원재료비"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">예산금액</label><input id="budgetNewAmt" type="number" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="0"></div>';
+  h+='<button onclick="submitBudgetAdd(\''+year+'\')" class="btn btn-sm" style="background:#d97706;color:#fff;padding:10px;width:100%">저장</button>';
+  h+='</div></div>';
+  bg.innerHTML=h;document.body.appendChild(bg);
+}
+async function submitBudgetAdd(year){
+  var month=(document.getElementById('budgetNewMonth')||{}).value||'01';
+  var code=(document.getElementById('budgetNewCode')||{}).value||'';
+  var name=(document.getElementById('budgetNewName')||{}).value||'';
+  var amt=parseFloat((document.getElementById('budgetNewAmt')||{}).value)||0;
+  var type=(document.getElementById('budgetNewType')||{}).value||'expense';
+  if(!code||!name){alert('계정코드와 계정명을 입력하세요');return;}
+  try{
+    var r=await authFetch('/api/budget/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      items:[{year:year,month:month,acc_code:code,acc_name:name,budget_type:type,budget_amount:amt}]
+    })});
+    var d=await r.json();
+    if(d.ok){alert('저장 완료');document.getElementById('budgetModal').remove();loadBudgetData();loadBudgetKpi();}
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
+}
+function showCashAddModal(){
+  var bg=document.createElement('div');bg.id='cashModal';
+  bg.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:10000;display:flex;align-items:center;justify-content:center';
+  var h='<div style="background:#fff;border-radius:12px;padding:24px;width:440px;max-width:90vw">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><h3 style="margin:0">자금일보 수기 등록</h3><button onclick="document.getElementById(\'cashModal\').remove()" style="background:none;border:none;font-size:18px;cursor:pointer">✕</button></div>';
+  h+='<div style="display:flex;flex-direction:column;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">일자</label><input id="cashNewDate" type="date" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">계정</label><input id="cashNewAcc" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="예: 보통예금"></div>';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">입금</label><input id="cashNewIn" type="number" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="0"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">출금</label><input id="cashNewOut" type="number" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="0"></div></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">비고</label><input id="cashNewNotes" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<button onclick="submitCashAdd()" class="btn btn-sm" style="background:#d97706;color:#fff;padding:10px;width:100%">저장</button>';
+  h+='</div></div>';
+  bg.innerHTML=h;document.body.appendChild(bg);
+}
+async function submitCashAdd(){
+  var dt=(document.getElementById('cashNewDate')||{}).value||'';
+  var acc=(document.getElementById('cashNewAcc')||{}).value||'';
+  if(!dt||!acc){alert('일자와 계정을 입력하세요');return;}
+  try{
+    var r=await authFetch('/api/cash/daily',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      cash_date:dt,acc_name:acc,
+      inflow:parseFloat((document.getElementById('cashNewIn')||{}).value)||0,
+      outflow:parseFloat((document.getElementById('cashNewOut')||{}).value)||0,
+      notes:(document.getElementById('cashNewNotes')||{}).value||''
+    })});
+    var d=await r.json();
+    if(d.ok){alert('저장 완료');document.getElementById('cashModal').remove();loadCashDaily();}
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Phase 6: 생산실적 (Work Order Results)
+// ═══════════════════════════════════════════════════════════════
+async function loadWoResults(){
+  var el=document.getElementById('woContent');if(!el)return;
+  el.innerHTML='<div style="text-align:center;padding:40px;color:#94a3b8">로딩 중...</div>';
+  var kpi=document.getElementById('woKpi');if(kpi)kpi.innerHTML='';
+  try{
+    var today=new Date().toISOString().slice(0,10);
+    var r=await authFetch('/api/work-orders/daily-report?date='+today);
+    var d=await r.json();
+    // Daily report
+    var report=d.ok?d.data:{};
+    if(kpi){
+      kpi.innerHTML=[
+        {l:'오늘 양품',v:(report.total_good||0).toLocaleString(),c:'#10b981'},
+        {l:'오늘 불량',v:(report.total_defect||0).toLocaleString(),c:'#ef4444'},
+        {l:'총 작업시간',v:(report.total_hours||0).toFixed(1)+'h',c:'#2563eb'},
+        {l:'작업건수',v:report.order_count||0,c:'#6366f1'}
+      ].map(function(k){return '<div style="background:#f8fafc;border-radius:10px;padding:14px 16px;text-align:center"><div style="font-size:12px;color:#64748b">'+k.l+'</div><div style="font-size:22px;font-weight:700;color:'+k.c+';margin-top:4px">'+k.v+'</div></div>';}).join('');
+    }
+    // Work orders list for result entry
+    var r2=await authFetch('/api/work-orders');var d2=await r2.json();
+    var orders=(d2.ok?d2.data:[]).filter(function(o){return o.status==='in_progress'||o.status==='planned';});
+    var h='<h4 style="margin:0 0 12px 0;font-size:14px">생산실적 등록</h4>';
+    if(orders.length===0){h+='<div style="color:#94a3b8;padding:20px;text-align:center">진행중인 작업지시가 없습니다</div>';el.innerHTML=h;return;}
+    h+='<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#f8fafc">';
+    h+='<th style="padding:8px;text-align:left">지시번호</th><th style="padding:8px;text-align:left">품명</th>';
+    h+='<th style="padding:8px;text-align:right">지시수량</th><th style="padding:8px;text-align:center">상태</th>';
+    h+='<th style="padding:8px;text-align:center">실적등록</th></tr></thead><tbody>';
+    orders.forEach(function(o){
+      h+='<tr style="border-bottom:1px solid #f1f5f9">';
+      h+='<td style="padding:8px;color:#2563eb;font-weight:500">'+esc(o.order_no||'')+'</td>';
+      h+='<td style="padding:8px">'+esc(o.product_name||'')+'</td>';
+      h+='<td style="padding:8px;text-align:right">'+(o.order_qty||0)+'</td>';
+      h+='<td style="padding:8px;text-align:center">'+esc(o.status||'')+'</td>';
+      h+='<td style="padding:8px;text-align:center"><button class="btn btn-sm" onclick="showWoResultModal('+o.id+',\''+esc(o.order_no)+'\')" style="background:#f59e0b;color:#fff;font-size:11px;padding:3px 10px">실적입력</button></td></tr>';
+    });
+    h+='</tbody></table>';
+    // Show existing results
+    h+='<h4 style="margin:24px 0 12px 0;font-size:14px">최근 실적</h4>';
+    var results=report.results||[];
+    if(results.length>0){
+      h+='<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#f8fafc">';
+      h+='<th style="padding:8px;text-align:left">작업지시</th><th style="padding:8px;text-align:right">양품</th><th style="padding:8px;text-align:right">불량</th>';
+      h+='<th style="padding:8px;text-align:left">작업자</th><th style="padding:8px;text-align:right">시간</th><th style="padding:8px;text-align:left">비고</th></tr></thead><tbody>';
+      results.forEach(function(rs){
+        h+='<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:6px">WO-'+rs.work_order_id+'</td>';
+        h+='<td style="padding:6px;text-align:right;color:#10b981;font-weight:500">'+(rs.good_qty||0)+'</td>';
+        h+='<td style="padding:6px;text-align:right;color:#ef4444">'+(rs.defect_qty||0)+'</td>';
+        h+='<td style="padding:6px">'+esc(rs.worker_name||'')+'</td>';
+        h+='<td style="padding:6px;text-align:right">'+(rs.work_hours||0)+'h</td>';
+        h+='<td style="padding:6px;color:#64748b">'+esc(rs.notes||'')+'</td></tr>';
+      });
+      h+='</tbody></table>';
+    }else h+='<div style="color:#94a3b8;font-size:13px">오늘 등록된 실적 없음</div>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="padding:40px;text-align:center;color:#ef4444">오류 발생</div>';}
+}
+function showWoResultModal(woId,orderNo){
+  var bg=document.createElement('div');bg.id='woResultModal';
+  bg.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.4);z-index:10000;display:flex;align-items:center;justify-content:center';
+  var h='<div style="background:#fff;border-radius:12px;padding:24px;width:400px;max-width:90vw">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><h3 style="margin:0">실적 입력 — '+esc(orderNo)+'</h3><button onclick="document.getElementById(\'woResultModal\').remove()" style="background:none;border:none;font-size:18px;cursor:pointer">✕</button></div>';
+  h+='<div style="display:flex;flex-direction:column;gap:10px">';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">양품 수량</label><input id="wrGood" type="number" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="0"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">불량 수량</label><input id="wrDefect" type="number" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="0"></div></div>';
+  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  h+='<div><label style="font-size:12px;color:#64748b">작업자</label><input id="wrWorker" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">작업시간(h)</label><input id="wrHours" type="number" step="0.5" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px" placeholder="0"></div></div>';
+  h+='<div><label style="font-size:12px;color:#64748b">비고</label><input id="wrNotes" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px"></div>';
+  h+='<button onclick="submitWoResult('+woId+')" class="btn btn-sm" style="background:#f59e0b;color:#fff;padding:10px;width:100%">실적 등록</button>';
+  h+='</div></div>';
+  bg.innerHTML=h;document.body.appendChild(bg);
+}
+async function submitWoResult(woId){
+  var good=parseInt((document.getElementById('wrGood')||{}).value)||0;
+  var defect=parseInt((document.getElementById('wrDefect')||{}).value)||0;
+  if(good===0&&defect===0){alert('수량을 입력하세요');return;}
+  try{
+    var r=await authFetch('/api/work-orders/'+woId+'/result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      good_qty:good,defect_qty:defect,
+      worker_name:(document.getElementById('wrWorker')||{}).value||'',
+      work_hours:parseFloat((document.getElementById('wrHours')||{}).value)||0,
+      notes:(document.getElementById('wrNotes')||{}).value||''
+    })});
+    var d=await r.json();
+    if(d.ok){alert('실적 등록 완료');document.getElementById('woResultModal').remove();loadWoResults();}
+    else alert('실패: '+(d.error||''));
+  }catch(e){alert('오류');}
 }
 
 // ===== 앱 시작: 인증 체크 =====
