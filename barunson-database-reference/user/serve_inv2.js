@@ -2800,6 +2800,13 @@ console.log(`📦 총 ${moduleRouters.reduce((s,r) => s + r.count, 0)}개 모듈
 
 // ── Server ──────────────────────────────────────────────────────────
 http.createServer(async (req, res) => {
+  // 헬스체크는 최우선 처리 (Docker/Starlog 배포 안정성)
+  const u = req.url;
+  if ((u === '/health' || u === '/api/health') && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json', ...CORS });
+    res.end(JSON.stringify({ ok: true, data: { status: 'ok', timestamp: new Date().toISOString() } }));
+    return;
+  }
   try {
     await handleRequest(req, res);
   } catch (e) {
