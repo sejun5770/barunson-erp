@@ -5955,6 +5955,23 @@ function closeMegaMenu() { /* no-op */ }
 </div>
 
 <script>
+// ===== BASE PATH 자동 감지 (Starlog /c/s-c-erp/ 등 서브패스 지원) =====
+const _BASE_PATH = (() => {
+  const p = window.location.pathname;
+  const m = p.match(/^(\/c\/[^/]+)/);  // /c/s-c-erp → '/c/s-c-erp'
+  return m ? m[1] : '';
+})();
+if (_BASE_PATH) {
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    if (typeof input === 'string' && input.startsWith('/')) {
+      input = _BASE_PATH + input;
+    }
+    return _origFetch(input, init);
+  };
+  console.log('📡 API Base Path:', _BASE_PATH);
+}
+
 // ===== AUTH STATE =====
 let authToken = localStorage.getItem('authToken') || '';
 let currentAuthUser = null;

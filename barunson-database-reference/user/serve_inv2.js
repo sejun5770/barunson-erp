@@ -46,7 +46,14 @@ try {
   const envContent = fs.readFileSync(dotenvPath, 'utf8');
   envContent.replace(/\r/g, '').split('\n').forEach(line => {
     const m = line.match(/^([^#=]+)=(.*)$/);
-    if (m) envVars[m[1].trim()] = m[2].trim();
+    if (m) {
+      let val = m[2].trim();
+      // 따옴표 제거 (DB_PASSWORD="xxx#" 형태 지원)
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      envVars[m[1].trim()] = val;
+    }
   });
   console.log('환경변수 로드:', dotenvPath, '(DB_SERVER:', envVars.DB_SERVER ? 'OK' : 'missing', ')');
 } catch (e) { console.warn('.env 로드 실패:', e.message); }
