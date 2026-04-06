@@ -229,7 +229,37 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_oh_date ON order_history(order_date);
 `);
 
-console.log('DB 초기화 완료:', DB_PATH);
+console.log('DB 테이블 생성 완료:', DB_PATH);
+
+// ── 시드 데이터 임포트 (빈 DB일 때만) ──────────────────────────────
+const fs = require('fs');
+const seedDir = __dirname;
+
+function seedTable(fileName, tableName, uniqueCol) {
+  const filePath = path.join(seedDir, fileName);
+  if (!fs.existsSync(filePath)) { console.log(`  ⏭ ${fileName} 없음 — 건너뜀`); return 0; }
+  const existing = db.prepare(`SELECT COUNT(*) AS cnt FROM ${tableName}`).get();
+  if (existing.cnt > 0) { console.log(`  ⏭ ${tableName}: 이미 ${existing.cnt}건 존재 — 건너뜀`); return 0; }
+  try {
+    const rows = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!rows.length) return 0;
+    const cols = Object.keys(rows[0]).filter(c => c !== 'id' && c !== 'user_id' && c !== 'vendor_id' && c !== 'product_id');
+    const placeholders = cols.map(c => '@' + c).join(',');
+    const stmt = db.prepare(`INSERT OR IGNORE INTO ${tableName} (${cols.join(',')}) VALUES (${placeholders})`);
+    const tx = db.transaction((data) => { for (const r of data) stmt.run(r); });
+    tx(rows);
+    console.log(`  ✅ ${tableName}: ${rows.length}건 임포트`);
+    return rows.length;
+  } catch (e) { console.log(`  ❌ ${tableName} 임포트 실패:`, e.message); return 0; }
+}
+
+console.log('시드 데이터 임포트 시작...');
+seedTable('seed_products.json', 'products', 'product_code');
+seedTable('seed_vendors.json', 'vendors', 'name');
+seedTable('seed_users.json', 'users', 'email');
+seedTable('seed_auto_order.json', 'auto_order_items', 'product_code');
+seedTable('seed_menu_settings.json', 'menu_settings', 'page_id');
+console.log('DB 초기화 완료!');
 
 // localStorage 거래처 데이터 마이그레이션 헬퍼
 const migrateVendors = db.prepare(`
