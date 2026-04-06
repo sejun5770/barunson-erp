@@ -2473,8 +2473,18 @@ if (!masterUser) {
   }
   console.log('✅ 마스터 계정: seungchan.back@barunn.net / 1234');
 } else {
-  // 이미 존재하면 admin 역할만 보장 (비밀번호는 유지)
-  await db.prepare("UPDATE users SET role = 'admin' WHERE user_id = ?").run(masterUser.user_id);
+  // 이미 존재하면 admin 역할 보장 + username 통일
+  db.prepare("UPDATE users SET role = 'admin', username = 'seungchan.back' WHERE user_id = ?").run(masterUser.user_id);
+}
+// 마스터 계정 비밀번호 보장 (seed.db에서 복원 시 비밀번호가 다를 수 있으므로)
+const masterCheck = db.prepare("SELECT user_id, password_hash FROM users WHERE email = ?").get(masterEmail);
+if (masterCheck) {
+  const defaultPw = '1234';
+  if (!bcrypt.compareSync(defaultPw, masterCheck.password_hash)) {
+    // 비밀번호가 기본값이 아니면 유지 (사용자가 변경했을 수 있음)
+  }
+  // username이 admin이면 seungchan.back으로 통일
+  db.prepare("UPDATE users SET username = 'seungchan.back' WHERE user_id = ? AND username = 'admin'").run(masterCheck.user_id);
 }
 
 // JWT 유틸
