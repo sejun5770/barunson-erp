@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { URL } = require('url');
-const Database = require('better-sqlite3');
+const pgAdapter = require('./pg-adapter');
 const nodemailer = require('nodemailer');
 const sql = require('mssql');
 const jwt = require('jsonwebtoken');
@@ -409,9 +409,9 @@ function getProductInfo() {
 }
 
 // 업체+제품코드 직전 단가 조회 (최신 승인/확인 거래명세서에서)
-function getLastVendorPrice(vendorName, productCode) {
+async function getLastVendorPrice(vendorName, productCode) {
   try {
-    const docs = db.prepare(`SELECT items_json, vendor_modified_json FROM trade_document
+    const docs = await db.prepare(`SELECT items_json, vendor_modified_json FROM trade_document
       WHERE vendor_name=? AND status IN ('vendor_confirmed','approved')
       ORDER BY id DESC LIMIT 10`).all(vendorName);
     for (const doc of docs) {
@@ -427,17 +427,17 @@ function getLastVendorPrice(vendorName, productCode) {
   } catch(e) {}
   // 후공정 단가 마스터에서도 조회
   try {
-    const pp = db.prepare(`SELECT unit_price FROM post_process_price WHERE vendor_name=? AND unit_price>0 ORDER BY id DESC LIMIT 1`).get(vendorName);
+    const pp = await db.prepare(`SELECT unit_price FROM post_process_price WHERE vendor_name=? AND unit_price>0 ORDER BY id DESC LIMIT 1`).get(vendorName);
     if (pp) return pp.unit_price;
   } catch(e) {}
   return 0;
 }
 
 // PO 활동 로그 기록
-function logPOActivity(poId, action, opts = {}) {
-  const po = db.prepare('SELECT po_number, status, material_status, process_status FROM po_header WHERE po_id=?').get(poId);
+async function logPOActivity(poId, action, opts = {}) {
+  const po = await db.prepare('SELECT po_number, status, material_status, process_status FROM po_header WHERE po_id=?').get(poId);
   if (!po) return;
-  db.prepare(`INSERT INTO po_activity_log (po_id, po_number, action, actor, actor_type, from_status, to_status, from_material_status, to_material_status, from_process_status, to_process_status, details) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+  await db.prepare(`INSERT INTO po_activity_log (po_id, po_number, action, actor, actor_type, from_status, to_status, from_material_status, to_material_status, from_process_status, to_process_status, details) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(
       poId, po.po_number, action,
       opts.actor || '', opts.actor_type || 'system',
@@ -481,7 +481,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
   // 원재료: 다음 입고처(후공정 업체) 조회
   let nextDestinations = [];
   if (isRawMaterial && po.po_date) {
-    const postPOs = db.prepare(`SELECT DISTINCT vendor_name FROM po_header WHERE po_date = ? AND po_type = '후공정' AND status != 'cancelled'`).all(po.po_date);
+    const postPOs = await db.prepare(`SELECT DISTINCT vendor_name FROM po_header WHERE po_date = ? AND po_type = '후공정' AND status != 'cancelled'`).all(po.po_date);
     nextDestinations = postPOs.map(p => p.vendor_name);
   }
 
@@ -558,10 +558,11 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
   const totalReams = enrichedItems.reduce((s, it) => s + (parseFloat(it.ream_qty) || 0), 0);
 
   // 중국 거래처 판별 (origin 기반)
-  const isChinaVendor = items.some(it => {
-    const prod = db.prepare('SELECT origin FROM products WHERE product_code=?').get(it.product_code);
-    return prod && prod.origin === '중국';
-  });
+  let isChinaVendor = false;
+  for (const it of items) {
+    const prod = await db.prepare('SELECT origin FROM products WHERE product_code=?').get(it.product_code);
+    if (prod && prod.origin === '중국') { isChinaVendor = true; break; }
+  }
 
   // 첨부파일용 발주서 HTML (인쇄 최적화 — 프로페셔널 양식)
   const attachmentHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -841,14 +842,22 @@ const __dir = __dirname;
 const DATA_DIR = process.env.DATA_DIR || __dir;
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dir, 'uploads');
 
-// ── SQLite ──────────────────────────────────────────────────────────
-const DB_PATH = path.join(DATA_DIR, 'orders.db');
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+// ── PostgreSQL ──────────────────────────────────────────────────────────
+const db = pgAdapter;
+
+async function startServer() {
+  // PostgreSQL 연결
+  await db.connect({
+    host: envVars.PG_HOST || process.env.PG_HOST || 'onely-postgres',
+    port: envVars.PG_PORT || process.env.PG_PORT || '5432',
+    user: envVars.PG_USER || process.env.PG_USER || 'onely',
+    password: envVars.PG_PASSWORD || process.env.PG_PASSWORD || 'onely',
+    database: envVars.PG_DATABASE || process.env.PG_DATABASE || 'sc_erp',
+  });
+  console.log('✅ PostgreSQL 연결 완료');
 
 // ── Ensure order_history table ──────────────────────────────────────
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS order_history (
     history_id     INTEGER PRIMARY KEY AUTOINCREMENT,
     order_date     TEXT DEFAULT '',
@@ -883,7 +892,7 @@ db.exec(`
 `);
 
 // ── product_notes 테이블 (품목별 특이사항) ──
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS product_notes (
     product_code TEXT PRIMARY KEY,
     note_type    TEXT DEFAULT '',
@@ -893,7 +902,7 @@ db.exec(`
 `);
 
 // ── 필수 자동발주 테이블 ─────────────────────────────────────────────
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS auto_order_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product_code TEXT NOT NULL UNIQUE,
@@ -906,7 +915,7 @@ db.exec(`
   );
 `);
 // ── 품목관리 테이블 ──
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product_code TEXT NOT NULL UNIQUE,
@@ -927,29 +936,29 @@ db.exec(`
 `);
 
 // ── BOM 조판 계산 확장 컬럼 ──
-try { db.exec("ALTER TABLE bom_items ADD COLUMN material_type TEXT DEFAULT 'IMPOSITION'"); } catch {}
-try { db.exec("ALTER TABLE bom_items ADD COLUMN paper_standard TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE bom_items ADD COLUMN paper_type TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE bom_items ADD COLUMN gsm INTEGER DEFAULT 0"); } catch {}
-try { db.exec("ALTER TABLE bom_items ADD COLUMN finished_w REAL DEFAULT 0"); } catch {}
-try { db.exec("ALTER TABLE bom_items ADD COLUMN finished_h REAL DEFAULT 0"); } catch {}
-try { db.exec("ALTER TABLE bom_items ADD COLUMN bleed REAL DEFAULT 3"); } catch {}
-try { db.exec("ALTER TABLE bom_items ADD COLUMN grip REAL DEFAULT 10"); } catch {}
-try { db.exec("ALTER TABLE bom_items ADD COLUMN loss_rate REAL DEFAULT 5"); } catch {}
-try { db.exec("ALTER TABLE bom_header ADD COLUMN default_order_qty INTEGER DEFAULT 1000"); } catch {}
-try { db.exec("ALTER TABLE bom_header ADD COLUMN finished_w REAL DEFAULT 0"); } catch {}
-try { db.exec("ALTER TABLE bom_header ADD COLUMN finished_h REAL DEFAULT 0"); } catch {}
+try { await db.exec("ALTER TABLE bom_items ADD COLUMN material_type TEXT DEFAULT 'IMPOSITION'"); } catch {}
+try { await db.exec("ALTER TABLE bom_items ADD COLUMN paper_standard TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE bom_items ADD COLUMN paper_type TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE bom_items ADD COLUMN gsm INTEGER DEFAULT 0"); } catch {}
+try { await db.exec("ALTER TABLE bom_items ADD COLUMN finished_w REAL DEFAULT 0"); } catch {}
+try { await db.exec("ALTER TABLE bom_items ADD COLUMN finished_h REAL DEFAULT 0"); } catch {}
+try { await db.exec("ALTER TABLE bom_items ADD COLUMN bleed REAL DEFAULT 3"); } catch {}
+try { await db.exec("ALTER TABLE bom_items ADD COLUMN grip REAL DEFAULT 10"); } catch {}
+try { await db.exec("ALTER TABLE bom_items ADD COLUMN loss_rate REAL DEFAULT 5"); } catch {}
+try { await db.exec("ALTER TABLE bom_header ADD COLUMN default_order_qty INTEGER DEFAULT 1000"); } catch {}
+try { await db.exec("ALTER TABLE bom_header ADD COLUMN finished_w REAL DEFAULT 0"); } catch {}
+try { await db.exec("ALTER TABLE bom_header ADD COLUMN finished_h REAL DEFAULT 0"); } catch {}
 
 // ── os_number 컬럼 추가 (발주 프로세스 자동화) ──
-try { db.exec("ALTER TABLE po_header ADD COLUMN os_number TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN os_number TEXT DEFAULT ''"); } catch(_) {}
 
 // ── 신제품 관리 컬럼 추가 ──
-try { db.exec("ALTER TABLE products ADD COLUMN is_new_product INTEGER DEFAULT 0"); } catch(e) {}
-try { db.exec("ALTER TABLE products ADD COLUMN first_order_done INTEGER DEFAULT 0"); } catch(e) {}
-try { db.exec("ALTER TABLE products ADD COLUMN die_cost INTEGER DEFAULT 0"); } catch(e) {}
-try { db.exec("ALTER TABLE products ADD COLUMN lead_time_days INTEGER DEFAULT 0"); } catch(e) {}
-try { db.exec("ALTER TABLE products ADD COLUMN post_vendor TEXT DEFAULT ''"); } catch(e) {}
-try { db.exec("ALTER TABLE products ADD COLUMN unit TEXT DEFAULT 'EA'"); } catch(e) {}
+try { await db.exec("ALTER TABLE products ADD COLUMN is_new_product INTEGER DEFAULT 0"); } catch(e) {}
+try { await db.exec("ALTER TABLE products ADD COLUMN first_order_done INTEGER DEFAULT 0"); } catch(e) {}
+try { await db.exec("ALTER TABLE products ADD COLUMN die_cost INTEGER DEFAULT 0"); } catch(e) {}
+try { await db.exec("ALTER TABLE products ADD COLUMN lead_time_days INTEGER DEFAULT 0"); } catch(e) {}
+try { await db.exec("ALTER TABLE products ADD COLUMN post_vendor TEXT DEFAULT ''"); } catch(e) {}
+try { await db.exec("ALTER TABLE products ADD COLUMN unit TEXT DEFAULT 'EA'"); } catch(e) {}
 
 // ── 생산지별 기본 리드타임 (일) ──
 const ORIGIN_LEAD_TIME = { '중국': 50, '한국': 7, '더기프트': 14 };
@@ -970,21 +979,21 @@ function resolveVendor(paperMaker) {
 }
 
 // ── 2단계 파이프라인 추적 컬럼 추가 (원재료 + 후공정) ──
-try { db.exec("ALTER TABLE po_header ADD COLUMN material_status TEXT DEFAULT 'sent'"); } catch(e) {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN process_status TEXT DEFAULT 'waiting'"); } catch(e) {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN material_status TEXT DEFAULT 'sent'"); } catch(e) {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN process_status TEXT DEFAULT 'waiting'"); } catch(e) {}
 
 // ── 발송처리 시점 기록 ──
-try { db.exec("ALTER TABLE po_header ADD COLUMN shipped_at TEXT DEFAULT ''"); } catch(e) {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN shipped_at TEXT DEFAULT ''"); } catch(e) {}
 
 // ── 불량 처리 발주 연결 컬럼 추가 ──
-try { db.exec("ALTER TABLE po_header ADD COLUMN defect_id INTEGER DEFAULT NULL"); } catch(e) {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN defect_number TEXT DEFAULT ''"); } catch(e) {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN defect_id INTEGER DEFAULT NULL"); } catch(e) {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN defect_number TEXT DEFAULT ''"); } catch(e) {}
 
 // ── 생산지(origin) 컬럼 추가 (한국/중국/더기프트 분리) ──
-try { db.exec("ALTER TABLE po_header ADD COLUMN origin TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN origin TEXT DEFAULT ''"); } catch(_) {}
 
 // ── 납품 스케줄 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS vendor_shipment_schedule (
+await db.exec(`CREATE TABLE IF NOT EXISTS vendor_shipment_schedule (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   po_id INTEGER NOT NULL,
   po_number TEXT DEFAULT '',
@@ -1000,7 +1009,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS vendor_shipment_schedule (
 )`);
 
 // ── 공정 리드타임 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS process_lead_time (
+await db.exec(`CREATE TABLE IF NOT EXISTS process_lead_time (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   vendor_name TEXT NOT NULL,
   process_type TEXT NOT NULL,
@@ -1012,7 +1021,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS process_lead_time (
 )`);
 
 // ── 리드타임 수정 이력 ──
-db.exec(`CREATE TABLE IF NOT EXISTS lead_time_history (
+await db.exec(`CREATE TABLE IF NOT EXISTS lead_time_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   vendor_name TEXT NOT NULL,
   process_type TEXT NOT NULL,
@@ -1020,10 +1029,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS lead_time_history (
   new_days INTEGER,
   changed_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_lt_hist_vendor ON lead_time_history(vendor_name)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_lt_hist_vendor ON lead_time_history(vendor_name)`);
 
 // ── 거래명세서 테이블 (v2 - 기존 invoice 플로우 대체) ──
-db.exec(`CREATE TABLE IF NOT EXISTS trade_document (
+await db.exec(`CREATE TABLE IF NOT EXISTS trade_document (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   po_id INTEGER NOT NULL,
   po_number TEXT DEFAULT '',
@@ -1043,16 +1052,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS trade_document (
 )`);
 
 // ── 신규 테이블 인덱스 ──
-db.exec(`CREATE INDEX IF NOT EXISTS idx_shipment_po ON vendor_shipment_schedule(po_id)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_shipment_date ON vendor_shipment_schedule(ship_date)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_shipment_status ON vendor_shipment_schedule(status)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_trade_doc_po ON trade_document(po_id)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_trade_doc_status ON trade_document(status)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_trade_doc_vendor ON trade_document(vendor_name)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_lead_time_vendor ON process_lead_time(vendor_name)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_shipment_po ON vendor_shipment_schedule(po_id)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_shipment_date ON vendor_shipment_schedule(ship_date)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_shipment_status ON vendor_shipment_schedule(status)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_trade_doc_po ON trade_document(po_id)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_trade_doc_status ON trade_document(status)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_trade_doc_vendor ON trade_document(vendor_name)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_lead_time_vendor ON process_lead_time(vendor_name)`);
 
 // ── 후공정 단가 마스터 ──
-db.exec(`CREATE TABLE IF NOT EXISTS post_process_price (
+await db.exec(`CREATE TABLE IF NOT EXISTS post_process_price (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   vendor_name TEXT NOT NULL,
   process_type TEXT NOT NULL,
@@ -1067,11 +1076,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS post_process_price (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_price_vendor ON post_process_price(vendor_name)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_price_process ON post_process_price(process_type)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_price_vendor ON post_process_price(vendor_name)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_price_process ON post_process_price(process_type)`);
 
 // ── 후공정 거래 이력 ──
-db.exec(`CREATE TABLE IF NOT EXISTS post_process_history (
+await db.exec(`CREATE TABLE IF NOT EXISTS post_process_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   vendor_name TEXT NOT NULL,
   month TEXT NOT NULL,
@@ -1088,13 +1097,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS post_process_history (
   imported_from TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_hist_vendor ON post_process_history(vendor_name)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_hist_product ON post_process_history(product_code)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_hist_month ON post_process_history(month)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_hist_process ON post_process_history(process_type)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_hist_vendor ON post_process_history(vendor_name)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_hist_product ON post_process_history(product_code)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_hist_month ON post_process_history(month)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_pp_hist_process ON post_process_history(process_type)`);
 
 // ── 제품별 후공정 매핑 ──
-db.exec(`CREATE TABLE IF NOT EXISTS product_process_map (
+await db.exec(`CREATE TABLE IF NOT EXISTS product_process_map (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product_code TEXT NOT NULL,
   process_type TEXT NOT NULL,
@@ -1107,11 +1116,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS product_process_map (
   updated_at TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(product_code, process_type, vendor_name)
 )`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_ppm_product ON product_process_map(product_code)`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_ppm_vendor ON product_process_map(vendor_name)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_ppm_product ON product_process_map(product_code)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_ppm_vendor ON product_process_map(vendor_name)`);
 
 // ── 품목 필드 변경 이력 ──
-db.exec(`CREATE TABLE IF NOT EXISTS product_field_history (
+await db.exec(`CREATE TABLE IF NOT EXISTS product_field_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product_code TEXT NOT NULL,
   field_name TEXT NOT NULL,
@@ -1119,10 +1128,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS product_field_history (
   new_value TEXT DEFAULT '',
   changed_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_pfh_code ON product_field_history(product_code)`);
+await db.exec(`CREATE INDEX IF NOT EXISTS idx_pfh_code ON product_field_history(product_code)`);
 
 // ── 중국 선적 이력 ──
-db.exec(`CREATE TABLE IF NOT EXISTS china_shipment_log (
+await db.exec(`CREATE TABLE IF NOT EXISTS china_shipment_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   shipment_date TEXT DEFAULT '',
   file_name TEXT DEFAULT '',
@@ -1136,12 +1145,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS china_shipment_log (
 )`);
 
 // ── 중국 선적 이력: BL번호/선적일/예상도착일 컬럼 추가 ──
-try { db.exec("ALTER TABLE china_shipment_log ADD COLUMN bl_number TEXT DEFAULT ''"); } catch(_) {}
-try { db.exec("ALTER TABLE china_shipment_log ADD COLUMN ship_date TEXT DEFAULT ''"); } catch(_) {}
-try { db.exec("ALTER TABLE china_shipment_log ADD COLUMN eta_date TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE china_shipment_log ADD COLUMN bl_number TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE china_shipment_log ADD COLUMN ship_date TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE china_shipment_log ADD COLUMN eta_date TEXT DEFAULT ''"); } catch(_) {}
 
 // ── 선적 ↔ PO 아이템 연결 (파셜 입고 추적) ──
-db.exec(`CREATE TABLE IF NOT EXISTS shipment_po_items (
+await db.exec(`CREATE TABLE IF NOT EXISTS shipment_po_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   shipment_id INTEGER NOT NULL,
   po_id INTEGER NOT NULL,
@@ -1155,7 +1164,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS shipment_po_items (
 )`);
 
 // ── 더기프트 포장작업 ──
-db.exec(`CREATE TABLE IF NOT EXISTS gift_assembly (
+await db.exec(`CREATE TABLE IF NOT EXISTS gift_assembly (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   assembly_no TEXT UNIQUE,
   product_code TEXT NOT NULL,
@@ -1171,7 +1180,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS gift_assembly (
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
 
-db.exec(`CREATE TABLE IF NOT EXISTS gift_assembly_materials (
+await db.exec(`CREATE TABLE IF NOT EXISTS gift_assembly_materials (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   assembly_id INTEGER NOT NULL,
   item_code TEXT NOT NULL,
@@ -1183,7 +1192,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS gift_assembly_materials (
 )`);
 
 // ── 거래명세서 파일 관리 ──
-db.exec(`CREATE TABLE IF NOT EXISTS trade_doc_files (
+await db.exec(`CREATE TABLE IF NOT EXISTS trade_doc_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   vendor_name TEXT NOT NULL,
   period TEXT NOT NULL,
@@ -1197,7 +1206,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS trade_doc_files (
 )`);
 
 // ── 활동 로그 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS po_activity_log (
+await db.exec(`CREATE TABLE IF NOT EXISTS po_activity_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   po_id INTEGER NOT NULL,
   po_number TEXT DEFAULT '',
@@ -1213,15 +1222,15 @@ db.exec(`CREATE TABLE IF NOT EXISTS po_activity_log (
   details TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_activity_po ON po_activity_log(po_id)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_activity_date ON po_activity_log(created_at)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_activity_po ON po_activity_log(po_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_activity_date ON po_activity_log(created_at)");
 
 // ── po_items에 ship_date 컬럼 추가 (품목별 출고일) ──
-try { db.exec(`ALTER TABLE po_items ADD COLUMN ship_date TEXT DEFAULT ''`); } catch(e) {}
-try { db.exec(`ALTER TABLE po_items ADD COLUMN os_number TEXT DEFAULT ''`); } catch(e) {}
+try { await db.exec(`ALTER TABLE po_items ADD COLUMN ship_date TEXT DEFAULT ''`); } catch(e) {}
+try { await db.exec(`ALTER TABLE po_items ADD COLUMN os_number TEXT DEFAULT ''`); } catch(e) {}
 
 // ── 불량/품질 관리 ──
-db.exec(`CREATE TABLE IF NOT EXISTS defects (
+await db.exec(`CREATE TABLE IF NOT EXISTS defects (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   defect_number TEXT NOT NULL UNIQUE,
   po_id INTEGER,
@@ -1245,12 +1254,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS defects (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_defect_vendor ON defects(vendor_name)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_defect_product ON defects(product_code)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_defect_status ON defects(status)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_defect_date ON defects(defect_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_defect_vendor ON defects(vendor_name)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_defect_product ON defects(product_code)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_defect_status ON defects(status)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_defect_date ON defects(defect_date)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS defect_logs (
+await db.exec(`CREATE TABLE IF NOT EXISTS defect_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   defect_id INTEGER NOT NULL,
   defect_number TEXT DEFAULT '',
@@ -1262,10 +1271,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS defect_logs (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   FOREIGN KEY (defect_id) REFERENCES defects(id)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_defect_log_defect ON defect_logs(defect_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_defect_log_defect ON defect_logs(defect_id)");
 
 // ── 생산요청 관리 ──
-db.exec(`CREATE TABLE IF NOT EXISTS production_requests (
+await db.exec(`CREATE TABLE IF NOT EXISTS production_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   request_number TEXT NOT NULL UNIQUE,
   product_type TEXT NOT NULL DEFAULT '',
@@ -1288,11 +1297,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS production_requests (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_pr_status ON production_requests(status)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_pr_type ON production_requests(product_type)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_pr_date ON production_requests(created_at)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_pr_status ON production_requests(status)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_pr_type ON production_requests(product_type)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_pr_date ON production_requests(created_at)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS production_request_logs (
+await db.exec(`CREATE TABLE IF NOT EXISTS production_request_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   request_id INTEGER NOT NULL,
   request_number TEXT DEFAULT '',
@@ -1304,10 +1313,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS production_request_logs (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   FOREIGN KEY (request_id) REFERENCES production_requests(id)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_pr_log_req ON production_request_logs(request_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_pr_log_req ON production_request_logs(request_id)");
 
 // ── 제품 스펙 마스터 ──
-db.exec(`CREATE TABLE IF NOT EXISTS product_spec_master (
+await db.exec(`CREATE TABLE IF NOT EXISTS product_spec_master (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product_type TEXT NOT NULL DEFAULT '',
   spec_name TEXT NOT NULL DEFAULT '',
@@ -1327,11 +1336,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS product_spec_master (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_spec_type ON product_spec_master(product_type)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_spec_template ON product_spec_master(is_template)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_spec_type ON product_spec_master(product_type)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_spec_template ON product_spec_master(is_template)");
 
 // ── 수입검사 (Incoming Inspection) ──
-db.exec(`CREATE TABLE IF NOT EXISTS incoming_inspections (
+await db.exec(`CREATE TABLE IF NOT EXISTS incoming_inspections (
   inspection_id INTEGER PRIMARY KEY AUTOINCREMENT,
   po_id INTEGER,
   po_number TEXT DEFAULT '',
@@ -1347,11 +1356,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS incoming_inspections (
   notes TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_insp_po ON incoming_inspections(po_id)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_insp_date ON incoming_inspections(inspection_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_insp_po ON incoming_inspections(po_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_insp_date ON incoming_inspections(inspection_date)");
 
 // ── 부적합 처리 (Non-Conformance Report) ──
-db.exec(`CREATE TABLE IF NOT EXISTS ncr (
+await db.exec(`CREATE TABLE IF NOT EXISTS ncr (
   ncr_id INTEGER PRIMARY KEY AUTOINCREMENT,
   ncr_number TEXT NOT NULL UNIQUE,
   defect_id INTEGER,
@@ -1372,10 +1381,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS ncr (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_ncr_status ON ncr(status)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_ncr_vendor ON ncr(vendor_name)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_ncr_status ON ncr(status)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_ncr_vendor ON ncr(vendor_name)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS ncr_logs (
+await db.exec(`CREATE TABLE IF NOT EXISTS ncr_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ncr_id INTEGER NOT NULL,
   action TEXT NOT NULL,
@@ -1387,7 +1396,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS ncr_logs (
 )`);
 
 // ── 협력사 평가 (Vendor Scorecard) ──
-db.exec(`CREATE TABLE IF NOT EXISTS vendor_scorecard (
+await db.exec(`CREATE TABLE IF NOT EXISTS vendor_scorecard (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   vendor_name TEXT NOT NULL,
   eval_month TEXT NOT NULL,
@@ -1402,10 +1411,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS vendor_scorecard (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(vendor_name, eval_month)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_vs_vendor ON vendor_scorecard(vendor_name)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_vs_vendor ON vendor_scorecard(vendor_name)");
 
 // ── 중국 상품별 단가 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS china_price_tiers (
+await db.exec(`CREATE TABLE IF NOT EXISTS china_price_tiers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product_code TEXT NOT NULL,
   product_type TEXT DEFAULT 'Card',
@@ -1416,10 +1425,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS china_price_tiers (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(product_code, qty_tier)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_cpt_product ON china_price_tiers(product_code)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_cpt_product ON china_price_tiers(product_code)");
 
 // ── 인증/권한 테이블 (S1) ─────────────────────────────────────────
-db.exec(`CREATE TABLE IF NOT EXISTS users (
+await db.exec(`CREATE TABLE IF NOT EXISTS users (
   user_id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL DEFAULT '',
@@ -1434,50 +1443,50 @@ db.exec(`CREATE TABLE IF NOT EXISTS users (
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
 // google_id, profile_picture, permissions 컬럼 마이그레이션
-try { db.exec("ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE users ADD COLUMN profile_picture TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE users ADD COLUMN favorites TEXT DEFAULT '[]'"); } catch {}
-try { db.exec("ALTER TABLE vendors ADD COLUMN email_cc TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE product_post_vendor ADD COLUMN step_order INTEGER DEFAULT 1"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN process_step INTEGER DEFAULT 0"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN parent_po_id INTEGER DEFAULT NULL"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN process_chain TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE users ADD COLUMN google_id TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE users ADD COLUMN profile_picture TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE users ADD COLUMN favorites TEXT DEFAULT '[]'"); } catch {}
+try { await db.exec("ALTER TABLE vendors ADD COLUMN email_cc TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE product_post_vendor ADD COLUMN step_order INTEGER DEFAULT 1"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN process_step INTEGER DEFAULT 0"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN parent_po_id INTEGER DEFAULT NULL"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN process_chain TEXT DEFAULT ''"); } catch {}
 // ±5% tolerance + force-approve columns
-try { db.exec("ALTER TABLE po_header ADD COLUMN tolerance_pct REAL DEFAULT 5.0"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN force_completed INTEGER DEFAULT 0"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN force_completed_by TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN force_completed_at TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN tolerance_pct REAL DEFAULT 5.0"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN force_completed INTEGER DEFAULT 0"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN force_completed_by TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN force_completed_at TEXT DEFAULT ''"); } catch {}
 // 제지사→후공정 2-stage flow columns
-try { db.exec("ALTER TABLE po_header ADD COLUMN material_vendor_name TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN process_vendor_name TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN material_send_date TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN material_confirmed_at TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE po_header ADD COLUMN process_email_sent INTEGER DEFAULT 0"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN material_vendor_name TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN process_vendor_name TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN material_send_date TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN material_confirmed_at TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE po_header ADD COLUMN process_email_sent INTEGER DEFAULT 0"); } catch {}
 // 거래처 입고일 확정
-try { db.exec("ALTER TABLE po_header ADD COLUMN vendor_confirmed_date TEXT DEFAULT ''"); } catch {} // 거래처가 확정한 입고일
-try { db.exec("ALTER TABLE po_header ADD COLUMN vendor_confirmed_at TEXT DEFAULT ''"); } catch {} // 확정 시각
+try { await db.exec("ALTER TABLE po_header ADD COLUMN vendor_confirmed_date TEXT DEFAULT ''"); } catch {} // 거래처가 확정한 입고일
+try { await db.exec("ALTER TABLE po_header ADD COLUMN vendor_confirmed_at TEXT DEFAULT ''"); } catch {} // 확정 시각
 // 중국 신제품/리오더 구분
-try { db.exec("ALTER TABLE po_header ADD COLUMN order_type TEXT DEFAULT ''"); } catch {} // new/reorder
+try { await db.exec("ALTER TABLE po_header ADD COLUMN order_type TEXT DEFAULT ''"); } catch {} // new/reorder
 // 더기프트 출고 트래킹
-try { db.exec("ALTER TABLE gift_assembly ADD COLUMN delivery_status TEXT DEFAULT ''"); } catch {} // packed/shipped/delivered
-try { db.exec("ALTER TABLE gift_assembly ADD COLUMN tracking_number TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE gift_assembly ADD COLUMN carrier TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE gift_assembly ADD COLUMN shipped_date TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE gift_assembly ADD COLUMN delivered_date TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE gift_assembly ADD COLUMN delivery_address TEXT DEFAULT ''"); } catch {}
-try { db.exec("ALTER TABLE gift_assembly ADD COLUMN recipient_name TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE gift_assembly ADD COLUMN delivery_status TEXT DEFAULT ''"); } catch {} // packed/shipped/delivered
+try { await db.exec("ALTER TABLE gift_assembly ADD COLUMN tracking_number TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE gift_assembly ADD COLUMN carrier TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE gift_assembly ADD COLUMN shipped_date TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE gift_assembly ADD COLUMN delivered_date TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE gift_assembly ADD COLUMN delivery_address TEXT DEFAULT ''"); } catch {}
+try { await db.exec("ALTER TABLE gift_assembly ADD COLUMN recipient_name TEXT DEFAULT ''"); } catch {}
 
 // ── po_header.origin 빈 값 backfill (품목 → products.origin 매핑) ──
 try {
-  const emptyOriginPOs = db.prepare("SELECT po_id FROM po_header WHERE origin='' OR origin IS NULL").all();
+  const emptyOriginPOs = await db.prepare("SELECT po_id FROM po_header WHERE origin='' OR origin IS NULL").all();
   let backfilled = 0;
   for (const po of emptyOriginPOs) {
-    const item = db.prepare("SELECT pi.product_code FROM po_items pi WHERE pi.po_id=? LIMIT 1").get(po.po_id);
+    const item = await db.prepare("SELECT pi.product_code FROM po_items pi WHERE pi.po_id=? LIMIT 1").get(po.po_id);
     if (item) {
-      const prod = db.prepare("SELECT origin FROM products WHERE product_code=?").get(item.product_code);
+      const prod = await db.prepare("SELECT origin FROM products WHERE product_code=?").get(item.product_code);
       if (prod && prod.origin) {
-        db.prepare("UPDATE po_header SET origin=? WHERE po_id=?").run(prod.origin, po.po_id);
+        await db.prepare("UPDATE po_header SET origin=? WHERE po_id=?").run(prod.origin, po.po_id);
         backfilled++;
       }
     }
@@ -1486,7 +1495,7 @@ try {
 } catch (e) { console.warn('origin backfill 실패:', e.message); }
 
 // ── 업무관리 ──────────────────────────────────────────────────────
-db.exec(`CREATE TABLE IF NOT EXISTS tasks (
+await db.exec(`CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_number TEXT NOT NULL UNIQUE,
   title TEXT NOT NULL,
@@ -1505,12 +1514,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_task_status ON tasks(status)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_task_due ON tasks(due_date)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_task_assignee ON tasks(assignee)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_task_category ON tasks(category)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_task_status ON tasks(status)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_task_due ON tasks(due_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_task_assignee ON tasks(assignee)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_task_category ON tasks(category)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS task_comments (
+await db.exec(`CREATE TABLE IF NOT EXISTS task_comments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL,
   author TEXT DEFAULT '',
@@ -1518,10 +1527,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS task_comments (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   FOREIGN KEY (task_id) REFERENCES tasks(id)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_tc_task ON task_comments(task_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_tc_task ON task_comments(task_id)");
 
 // ── 업무 단계 (Workflow Steps) ──
-db.exec(`CREATE TABLE IF NOT EXISTS task_steps (
+await db.exec(`CREATE TABLE IF NOT EXISTS task_steps (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL,
   step_order INTEGER NOT NULL DEFAULT 0,
@@ -1533,13 +1542,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS task_steps (
   note TEXT DEFAULT '',
   FOREIGN KEY (task_id) REFERENCES tasks(id)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_ts_task ON task_steps(task_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_ts_task ON task_steps(task_id)");
 
 // ── tasks 테이블에 template_id 컬럼 추가 ──
-try { db.exec("ALTER TABLE tasks ADD COLUMN template_id TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE tasks ADD COLUMN template_id TEXT DEFAULT ''"); } catch(_) {}
 
 // ── 부속품 마스터 ──
-db.exec(`CREATE TABLE IF NOT EXISTS accessories (
+await db.exec(`CREATE TABLE IF NOT EXISTS accessories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   acc_code TEXT DEFAULT '',
   acc_name TEXT NOT NULL,
@@ -1553,10 +1562,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS accessories (
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
 
-try { db.exec("ALTER TABLE accessories ADD COLUMN origin TEXT DEFAULT '한국'"); } catch(_) {}
+try { await db.exec("ALTER TABLE accessories ADD COLUMN origin TEXT DEFAULT '한국'"); } catch(_) {}
 
 // ── 제품↔부속품 연결 ──
-db.exec(`CREATE TABLE IF NOT EXISTS product_accessories (
+await db.exec(`CREATE TABLE IF NOT EXISTS product_accessories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product_code TEXT NOT NULL,
   acc_id INTEGER NOT NULL,
@@ -1564,7 +1573,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS product_accessories (
   UNIQUE(product_code, acc_id)
 )`);
 
-db.exec(`CREATE TABLE IF NOT EXISTS po_drafts (
+await db.exec(`CREATE TABLE IF NOT EXISTS po_drafts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   po_number TEXT NOT NULL,
   po_date TEXT,
@@ -1588,18 +1597,18 @@ db.exec(`CREATE TABLE IF NOT EXISTS po_drafts (
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
 
-try { db.exec("ALTER TABLE vendor_notes ADD COLUMN status TEXT DEFAULT 'open'"); } catch(_) {}
+try { await db.exec("ALTER TABLE vendor_notes ADD COLUMN status TEXT DEFAULT 'open'"); } catch(_) {}
 
-db.exec(`CREATE TABLE IF NOT EXISTS note_comments (
+await db.exec(`CREATE TABLE IF NOT EXISTS note_comments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   note_id INTEGER NOT NULL,
   author TEXT DEFAULT '',
   content TEXT NOT NULL,
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_nc_note ON note_comments(note_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_nc_note ON note_comments(note_id)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS reports (
+await db.exec(`CREATE TABLE IF NOT EXISTS reports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL,
   subtitle TEXT DEFAULT '',
@@ -1669,9 +1678,9 @@ const TASK_TEMPLATES = {
 };
 
 // password_hash NOT NULL 제거 불가능하므로 기본값 허용
-try { db.exec("UPDATE users SET password_hash = '' WHERE password_hash IS NULL"); } catch {}
+try { await db.exec("UPDATE users SET password_hash = '' WHERE password_hash IS NULL"); } catch {}
 
-db.exec(`CREATE TABLE IF NOT EXISTS audit_log (
+await db.exec(`CREATE TABLE IF NOT EXISTS audit_log (
   log_id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
   username TEXT DEFAULT '',
@@ -1682,10 +1691,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS audit_log (
   ip_address TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS error_logs (
+await db.exec(`CREATE TABLE IF NOT EXISTS error_logs (
   error_id INTEGER PRIMARY KEY AUTOINCREMENT,
   level TEXT DEFAULT 'error',
   message TEXT NOT NULL,
@@ -1695,10 +1704,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS error_logs (
   user_id INTEGER,
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_error_created ON error_logs(created_at)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_error_created ON error_logs(created_at)");
 
 // ── 더기프트 세트 생산재고 ─────────────────────────────────────────
-db.exec(`CREATE TABLE IF NOT EXISTS gift_sets (
+await db.exec(`CREATE TABLE IF NOT EXISTS gift_sets (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   set_code      TEXT NOT NULL UNIQUE,
   set_name      TEXT NOT NULL,
@@ -1709,12 +1718,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS gift_sets (
   created_at    TEXT DEFAULT (datetime('now','localtime')),
   updated_at    TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_gs_code ON gift_sets(set_code)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_gs_code ON gift_sets(set_code)");
 
 // xerp_code 컬럼 추가 (출고재고 XERP 연동용)
-try { db.exec("ALTER TABLE gift_sets ADD COLUMN xerp_code TEXT DEFAULT ''"); } catch(e) { /* 이미 존재 */ }
+try { await db.exec("ALTER TABLE gift_sets ADD COLUMN xerp_code TEXT DEFAULT ''"); } catch(e) { /* 이미 존재 */ }
 
-db.exec(`CREATE TABLE IF NOT EXISTS gift_set_bom (
+await db.exec(`CREATE TABLE IF NOT EXISTS gift_set_bom (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   set_id        INTEGER NOT NULL,
   item_type     TEXT NOT NULL,
@@ -1724,9 +1733,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS gift_set_bom (
   unit          TEXT DEFAULT 'EA',
   UNIQUE(set_id, item_type, item_code)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_gsb_set ON gift_set_bom(set_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_gsb_set ON gift_set_bom(set_id)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS gift_set_transactions (
+await db.exec(`CREATE TABLE IF NOT EXISTS gift_set_transactions (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   set_id     INTEGER NOT NULL,
   tx_type    TEXT NOT NULL,
@@ -1735,11 +1744,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS gift_set_transactions (
   memo       TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_gst_set ON gift_set_transactions(set_id)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_gst_created ON gift_set_transactions(created_at)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_gst_set ON gift_set_transactions(set_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_gst_created ON gift_set_transactions(created_at)");
 
 // ── 더기프트 출고 스케줄 (출고예정 관리) ──
-db.exec(`CREATE TABLE IF NOT EXISTS gift_shipment_schedule (
+await db.exec(`CREATE TABLE IF NOT EXISTS gift_shipment_schedule (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   set_id        INTEGER NOT NULL,
   set_code      TEXT DEFAULT '',
@@ -1755,9 +1764,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS gift_shipment_schedule (
   created_at    TEXT DEFAULT (datetime('now','localtime')),
   updated_at    TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_gss_set ON gift_shipment_schedule(set_id)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_gss_date ON gift_shipment_schedule(ship_date)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_gss_status ON gift_shipment_schedule(status)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_gss_set ON gift_shipment_schedule(set_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_gss_date ON gift_shipment_schedule(ship_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_gss_status ON gift_shipment_schedule(status)");
 
 // ── 더기프트 품목 자동 등록 (gift_sets + BOM → products) ──
 try {
@@ -1778,7 +1787,7 @@ try {
 } catch(e) { console.warn('더기프트 품목 자동등록 실패:', e.message); }
 
 // ── 매출관리 캐시 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS sales_daily_cache (
+await db.exec(`CREATE TABLE IF NOT EXISTS sales_daily_cache (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   sale_date       TEXT NOT NULL,
   source          TEXT NOT NULL,
@@ -1792,10 +1801,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS sales_daily_cache (
   cached_at       TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(sale_date, source, channel)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_sdc_date ON sales_daily_cache(sale_date)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_sdc_source ON sales_daily_cache(source)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_sdc_date ON sales_daily_cache(sale_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_sdc_source ON sales_daily_cache(source)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS sales_monthly_cache (
+await db.exec(`CREATE TABLE IF NOT EXISTS sales_monthly_cache (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   sale_month      TEXT NOT NULL,
   source          TEXT NOT NULL,
@@ -1809,9 +1818,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS sales_monthly_cache (
   cached_at       TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(sale_month, source, channel)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_smc_month ON sales_monthly_cache(sale_month)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_smc_month ON sales_monthly_cache(sale_month)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS sales_product_cache (
+await db.exec(`CREATE TABLE IF NOT EXISTS sales_product_cache (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   sale_month      TEXT NOT NULL,
   source          TEXT NOT NULL,
@@ -1824,19 +1833,19 @@ db.exec(`CREATE TABLE IF NOT EXISTS sales_product_cache (
   cached_at       TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(sale_month, source, product_code)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_spc_month ON sales_product_cache(sale_month)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_spc_product ON sales_product_cache(product_code)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_spc_month ON sales_product_cache(sale_month)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_spc_product ON sales_product_cache(product_code)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS sales_settings (
+await db.exec(`CREATE TABLE IF NOT EXISTS sales_settings (
   key             TEXT PRIMARY KEY,
   value           TEXT NOT NULL,
   updated_at      TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("INSERT OR IGNORE INTO sales_settings (key, value) VALUES ('default_range_days', '30')");
-db.exec("INSERT OR IGNORE INTO sales_settings (key, value) VALUES ('cache_ttl_minutes', '30')");
+await db.exec("INSERT OR IGNORE INTO sales_settings (key, value) VALUES ('default_range_days', '30')");
+await db.exec("INSERT OR IGNORE INTO sales_settings (key, value) VALUES ('cache_ttl_minutes', '30')");
 
 // ── 다중 창고 재고 관리 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS warehouses (
+await db.exec(`CREATE TABLE IF NOT EXISTS warehouses (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   code        TEXT NOT NULL UNIQUE,
   name        TEXT NOT NULL,
@@ -1848,7 +1857,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS warehouses (
   updated_at  TEXT DEFAULT (datetime('now','localtime'))
 )`);
 
-db.exec(`CREATE TABLE IF NOT EXISTS warehouse_inventory (
+await db.exec(`CREATE TABLE IF NOT EXISTS warehouse_inventory (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   warehouse_id  INTEGER NOT NULL,
   product_code  TEXT NOT NULL,
@@ -1858,10 +1867,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS warehouse_inventory (
   updated_at    TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(warehouse_id, product_code)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_wi_wh ON warehouse_inventory(warehouse_id)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_wi_pc ON warehouse_inventory(product_code)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_wi_wh ON warehouse_inventory(warehouse_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_wi_pc ON warehouse_inventory(product_code)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS warehouse_transfers (
+await db.exec(`CREATE TABLE IF NOT EXISTS warehouse_transfers (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   from_warehouse  INTEGER NOT NULL,
   to_warehouse    INTEGER NOT NULL,
@@ -1872,11 +1881,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS warehouse_transfers (
   memo            TEXT DEFAULT '',
   created_at      TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_wt_from ON warehouse_transfers(from_warehouse)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_wt_to ON warehouse_transfers(to_warehouse)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_wt_created ON warehouse_transfers(created_at)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_wt_from ON warehouse_transfers(from_warehouse)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_wt_to ON warehouse_transfers(to_warehouse)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_wt_created ON warehouse_transfers(created_at)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS warehouse_adjustments (
+await db.exec(`CREATE TABLE IF NOT EXISTS warehouse_adjustments (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   warehouse_id  INTEGER NOT NULL,
   product_code  TEXT NOT NULL,
@@ -1889,22 +1898,22 @@ db.exec(`CREATE TABLE IF NOT EXISTS warehouse_adjustments (
   operator      TEXT DEFAULT '',
   created_at    TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_wa_wh ON warehouse_adjustments(warehouse_id)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_wa_created ON warehouse_adjustments(created_at)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_wa_wh ON warehouse_adjustments(warehouse_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_wa_created ON warehouse_adjustments(created_at)");
 
 // 기본 창고 초기화 (처음 실행 시)
-const whCount = db.prepare("SELECT COUNT(*) as cnt FROM warehouses").get();
+const whCount = await db.prepare("SELECT COUNT(*) as cnt FROM warehouses").get();
 if (whCount.cnt === 0) {
   const insertWh = db.prepare("INSERT INTO warehouses (code, name, location, description, is_default) VALUES (?, ?, ?, ?, ?)");
-  insertWh.run('WH-HQ', '본사창고', '본사', 'XERP 연동 기본 창고', 1);
-  insertWh.run('WH-02', '제2창고', '', '', 0);
-  insertWh.run('WH-03', '제3창고', '', '', 0);
-  insertWh.run('WH-04', '제4창고', '', '', 0);
+  await insertWh.run('WH-HQ', '본사창고', '본사', 'XERP 연동 기본 창고', 1);
+  await insertWh.run('WH-02', '제2창고', '', '', 0);
+  await insertWh.run('WH-03', '제3창고', '', '', 0);
+  await insertWh.run('WH-04', '제4창고', '', '', 0);
   console.log('[DB] 기본 창고 4개 초기화 완료');
 }
 
 // ── 공지/게시판 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS notices (
+await db.exec(`CREATE TABLE IF NOT EXISTS notices (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   title       TEXT NOT NULL,
   content     TEXT DEFAULT '',
@@ -1920,20 +1929,20 @@ db.exec(`CREATE TABLE IF NOT EXISTS notices (
   created_at  TEXT DEFAULT (datetime('now','localtime')),
   updated_at  TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_notices_status ON notices(status, created_at)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_notices_popup ON notices(is_popup, popup_start, popup_end)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_notices_status ON notices(status, created_at)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_notices_popup ON notices(is_popup, popup_start, popup_end)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS notice_reads (
+await db.exec(`CREATE TABLE IF NOT EXISTS notice_reads (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   notice_id  INTEGER NOT NULL,
   user_id    INTEGER NOT NULL,
   read_at    TEXT DEFAULT (datetime('now','localtime')),
   popup_dismissed INTEGER DEFAULT 0
 )`);
-db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_nr_unique ON notice_reads(notice_id, user_id)");
+await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_nr_unique ON notice_reads(notice_id, user_id)");
 
 // ── 회계 모듈 SQLite 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS gl_account_map (
+await db.exec(`CREATE TABLE IF NOT EXISTS gl_account_map (
   acc_code    TEXT PRIMARY KEY,
   acc_name    TEXT NOT NULL DEFAULT '',
   acc_type    TEXT NOT NULL DEFAULT '',
@@ -1944,7 +1953,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS gl_account_map (
   is_active   INTEGER DEFAULT 1,
   updated_at  TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS gl_balance_cache (
+await db.exec(`CREATE TABLE IF NOT EXISTS gl_balance_cache (
   acc_code   TEXT NOT NULL,
   year_month TEXT NOT NULL,
   opening_dr REAL DEFAULT 0, opening_cr REAL DEFAULT 0,
@@ -1953,12 +1962,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS gl_balance_cache (
   cached_at  TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(acc_code, year_month)
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS accounting_settings (
+await db.exec(`CREATE TABLE IF NOT EXISTS accounting_settings (
   key        TEXT PRIMARY KEY,
   value      TEXT NOT NULL DEFAULT '',
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS cs_code_cache (
+await db.exec(`CREATE TABLE IF NOT EXISTS cs_code_cache (
   cs_code   TEXT PRIMARY KEY,
   cs_name   TEXT DEFAULT '',
   cached_at TEXT DEFAULT (datetime('now','localtime'))
@@ -2051,7 +2060,7 @@ function classifyAccount(code) {
 }
 
 // ── 작업지시 SQLite 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS work_orders (
+await db.exec(`CREATE TABLE IF NOT EXISTS work_orders (
   wo_id       INTEGER PRIMARY KEY AUTOINCREMENT,
   wo_number   TEXT UNIQUE NOT NULL,
   request_id  INTEGER,
@@ -2078,7 +2087,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS work_orders (
   created_at  TEXT DEFAULT (datetime('now','localtime')),
   updated_at  TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS work_order_logs (
+await db.exec(`CREATE TABLE IF NOT EXISTS work_order_logs (
   log_id      INTEGER PRIMARY KEY AUTOINCREMENT,
   wo_id       INTEGER NOT NULL,
   wo_number   TEXT,
@@ -2092,7 +2101,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS work_order_logs (
 )`);
 
 // ── 홈택스 세금계산서 업로드 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS hometax_invoices (
+await db.exec(`CREATE TABLE IF NOT EXISTS hometax_invoices (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   invoice_no    TEXT DEFAULT '',
   invoice_date  TEXT NOT NULL DEFAULT '',
@@ -2110,11 +2119,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS hometax_invoices (
   uploaded_at   TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(invoice_no, invoice_date, cs_reg_no, supply_amt)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_hometax_date ON hometax_invoices(invoice_date)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_hometax_arap ON hometax_invoices(ar_ap, invoice_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_hometax_date ON hometax_invoices(invoice_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_hometax_arap ON hometax_invoices(ar_ap, invoice_date)");
 
 // ── 로트/배치 추적 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS batch_master (
+await db.exec(`CREATE TABLE IF NOT EXISTS batch_master (
   batch_id        INTEGER PRIMARY KEY AUTOINCREMENT,
   batch_number    TEXT NOT NULL DEFAULT '',
   product_code    TEXT NOT NULL DEFAULT '',
@@ -2135,12 +2144,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS batch_master (
   updated_at      TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(batch_number, product_code)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_batch_product ON batch_master(product_code)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_batch_status ON batch_master(quality_status)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_batch_date ON batch_master(received_date)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_batch_warehouse ON batch_master(warehouse)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_batch_product ON batch_master(product_code)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_batch_status ON batch_master(quality_status)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_batch_date ON batch_master(received_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_batch_warehouse ON batch_master(warehouse)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS batch_transactions (
+await db.exec(`CREATE TABLE IF NOT EXISTS batch_transactions (
   txn_id          INTEGER PRIMARY KEY AUTOINCREMENT,
   batch_id        INTEGER NOT NULL,
   batch_number    TEXT DEFAULT '',
@@ -2157,11 +2166,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS batch_transactions (
   notes           TEXT DEFAULT '',
   created_at      TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_btxn_batch ON batch_transactions(batch_id)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_btxn_date ON batch_transactions(txn_date)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_btxn_type ON batch_transactions(txn_type)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_btxn_batch ON batch_transactions(batch_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_btxn_date ON batch_transactions(txn_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_btxn_type ON batch_transactions(txn_type)");
 
-db.exec(`CREATE TABLE IF NOT EXISTS batch_inspections (
+await db.exec(`CREATE TABLE IF NOT EXISTS batch_inspections (
   insp_id         INTEGER PRIMARY KEY AUTOINCREMENT,
   batch_id        INTEGER NOT NULL,
   batch_number    TEXT DEFAULT '',
@@ -2177,11 +2186,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS batch_inspections (
   created_by      TEXT DEFAULT '',
   created_at      TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_binsp_batch ON batch_inspections(batch_id)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_binsp_date ON batch_inspections(insp_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_binsp_batch ON batch_inspections(batch_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_binsp_date ON batch_inspections(insp_date)");
 
 // ── 원재료 단가 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS material_prices (
+await db.exec(`CREATE TABLE IF NOT EXISTS material_prices (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   product_code    TEXT NOT NULL DEFAULT '',
   product_name    TEXT DEFAULT '',
@@ -2198,21 +2207,21 @@ db.exec(`CREATE TABLE IF NOT EXISTS material_prices (
   updated_at      TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(product_code, vendor_name, apply_month)
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_matprice_code ON material_prices(product_code)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_matprice_vendor ON material_prices(vendor_name)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_matprice_month ON material_prices(apply_month)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_matprice_code ON material_prices(product_code)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_matprice_vendor ON material_prices(vendor_name)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_matprice_month ON material_prices(apply_month)");
 
 // ── Phase 5: 알림센터 ──
-db.exec(`CREATE TABLE IF NOT EXISTS notifications (
+await db.exec(`CREATE TABLE IF NOT EXISTS notifications (
   id INTEGER PRIMARY KEY, user_id INTEGER, type TEXT NOT NULL DEFAULT 'system',
   title TEXT NOT NULL DEFAULT '', message TEXT DEFAULT '', link TEXT DEFAULT '',
   is_read INTEGER DEFAULT 0, is_email_sent INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_noti_user ON notifications(user_id, is_read)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_noti_user ON notifications(user_id, is_read)");
 
 // ── Phase 1: 전자결재 ──
-db.exec(`CREATE TABLE IF NOT EXISTS approvals (
+await db.exec(`CREATE TABLE IF NOT EXISTS approvals (
   id INTEGER PRIMARY KEY, approval_no TEXT UNIQUE, doc_type TEXT NOT NULL DEFAULT 'general',
   doc_ref TEXT DEFAULT '', title TEXT NOT NULL DEFAULT '', content TEXT DEFAULT '',
   amount REAL DEFAULT 0, status TEXT DEFAULT 'draft',
@@ -2221,7 +2230,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS approvals (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS approval_lines (
+await db.exec(`CREATE TABLE IF NOT EXISTS approval_lines (
   id INTEGER PRIMARY KEY, approval_id INTEGER NOT NULL, step_order INTEGER NOT NULL,
   approver_id INTEGER, approver_name TEXT DEFAULT '',
   role TEXT DEFAULT 'approver', status TEXT DEFAULT 'pending',
@@ -2230,12 +2239,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS approval_lines (
 )`);
 
 // ── 동기화 메타 ──
-db.exec(`CREATE TABLE IF NOT EXISTS sync_meta (
+await db.exec(`CREATE TABLE IF NOT EXISTS sync_meta (
   key TEXT PRIMARY KEY, last_sync TEXT, record_count INTEGER DEFAULT 0, status TEXT DEFAULT 'ok', message TEXT DEFAULT ''
 )`);
 
 // ── Phase 2: 수주관리 ──
-db.exec(`CREATE TABLE IF NOT EXISTS sales_orders (
+await db.exec(`CREATE TABLE IF NOT EXISTS sales_orders (
   id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, order_type TEXT DEFAULT 'quote',
   status TEXT DEFAULT 'draft', customer_name TEXT NOT NULL DEFAULT '',
   customer_contact TEXT DEFAULT '', customer_tel TEXT DEFAULT '',
@@ -2247,17 +2256,17 @@ db.exec(`CREATE TABLE IF NOT EXISTS sales_orders (
   updated_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
 // source 컬럼 마이그레이션 (기존 테이블에 컬럼 없을 수 있음)
-try { db.exec("ALTER TABLE sales_orders ADD COLUMN source TEXT DEFAULT 'manual'"); } catch(_){}
-try { db.exec("ALTER TABLE sales_orders ADD COLUMN external_id TEXT DEFAULT ''"); } catch(_){}
-db.exec(`CREATE TABLE IF NOT EXISTS sales_order_items (
+try { await db.exec("ALTER TABLE sales_orders ADD COLUMN source TEXT DEFAULT 'manual'"); } catch(_){}
+try { await db.exec("ALTER TABLE sales_orders ADD COLUMN external_id TEXT DEFAULT ''"); } catch(_){}
+await db.exec(`CREATE TABLE IF NOT EXISTS sales_order_items (
   id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL,
   product_code TEXT DEFAULT '', product_name TEXT DEFAULT '', spec TEXT DEFAULT '',
   unit_price REAL DEFAULT 0, qty INTEGER DEFAULT 0, amount REAL DEFAULT 0, notes TEXT DEFAULT ''
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_sales_order_items_order_id ON sales_order_items(order_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_sales_order_items_order_id ON sales_order_items(order_id)");
 
 // ── Phase 4: 예산관리 ──
-db.exec(`CREATE TABLE IF NOT EXISTS budgets (
+await db.exec(`CREATE TABLE IF NOT EXISTS budgets (
   id INTEGER PRIMARY KEY, year TEXT NOT NULL, month TEXT NOT NULL,
   acc_code TEXT DEFAULT '', acc_name TEXT DEFAULT '',
   budget_type TEXT DEFAULT 'expense', budget_amount REAL DEFAULT 0,
@@ -2266,7 +2275,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS budgets (
   updated_at TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(year, month, acc_code)
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS daily_cash (
+await db.exec(`CREATE TABLE IF NOT EXISTS daily_cash (
   id INTEGER PRIMARY KEY, cash_date TEXT NOT NULL,
   acc_code TEXT DEFAULT '', acc_name TEXT DEFAULT '',
   inflow REAL DEFAULT 0, outflow REAL DEFAULT 0, balance REAL DEFAULT 0,
@@ -2276,7 +2285,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS daily_cash (
 )`);
 
 // ── 수동 분개 (Manual Journal Entries) ──
-db.exec(`CREATE TABLE IF NOT EXISTS journal_entries (
+await db.exec(`CREATE TABLE IF NOT EXISTS journal_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   entry_no TEXT UNIQUE,
   entry_date TEXT NOT NULL,
@@ -2286,7 +2295,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS journal_entries (
   created_by TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS journal_entry_lines (
+await db.exec(`CREATE TABLE IF NOT EXISTS journal_entry_lines (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   entry_id INTEGER NOT NULL,
   line_no INTEGER DEFAULT 1,
@@ -2296,11 +2305,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS journal_entry_lines (
   credit REAL DEFAULT 0,
   description TEXT DEFAULT ''
 )`);
-db.exec("CREATE INDEX IF NOT EXISTS idx_je_date ON journal_entries(entry_date)");
-db.exec("CREATE INDEX IF NOT EXISTS idx_jel_entry ON journal_entry_lines(entry_id)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_je_date ON journal_entries(entry_date)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_jel_entry ON journal_entry_lines(entry_id)");
 
 // ── Phase 6: 생산실적 ──
-db.exec(`CREATE TABLE IF NOT EXISTS work_order_results (
+await db.exec(`CREATE TABLE IF NOT EXISTS work_order_results (
   id INTEGER PRIMARY KEY, work_order_id INTEGER NOT NULL,
   result_date TEXT NOT NULL, good_qty INTEGER DEFAULT 0, defect_qty INTEGER DEFAULT 0,
   worker_name TEXT DEFAULT '', work_hours REAL DEFAULT 0, notes TEXT DEFAULT '',
@@ -2310,7 +2319,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS work_order_results (
 // ── Phase 1-6 확장 테이블 ──
 
 // 안전재고 규칙
-db.exec(`CREATE TABLE IF NOT EXISTS safety_stock_rules (
+await db.exec(`CREATE TABLE IF NOT EXISTS safety_stock_rules (
   id INTEGER PRIMARY KEY, product_code TEXT NOT NULL UNIQUE,
   product_name TEXT DEFAULT '', min_qty INTEGER DEFAULT 0,
   reorder_qty INTEGER DEFAULT 0, reorder_point INTEGER DEFAULT 0,
@@ -2320,14 +2329,14 @@ db.exec(`CREATE TABLE IF NOT EXISTS safety_stock_rules (
 )`);
 
 // 재고실사
-db.exec(`CREATE TABLE IF NOT EXISTS cycle_count_plans (
+await db.exec(`CREATE TABLE IF NOT EXISTS cycle_count_plans (
   id INTEGER PRIMARY KEY, plan_no TEXT UNIQUE,
   plan_date TEXT NOT NULL, warehouse TEXT DEFAULT '',
   status TEXT DEFAULT 'planned', note TEXT DEFAULT '',
   created_by TEXT DEFAULT '', completed_at TEXT,
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS cycle_count_items (
+await db.exec(`CREATE TABLE IF NOT EXISTS cycle_count_items (
   id INTEGER PRIMARY KEY, plan_id INTEGER NOT NULL,
   product_code TEXT NOT NULL, product_name TEXT DEFAULT '',
   system_qty INTEGER DEFAULT 0, counted_qty INTEGER,
@@ -2337,7 +2346,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS cycle_count_items (
 )`);
 
 // 제조원가
-db.exec(`CREATE TABLE IF NOT EXISTS mfg_cost_cards (
+await db.exec(`CREATE TABLE IF NOT EXISTS mfg_cost_cards (
   id INTEGER PRIMARY KEY, product_code TEXT NOT NULL,
   product_name TEXT DEFAULT '', calc_date TEXT NOT NULL,
   material_cost REAL DEFAULT 0, labor_cost REAL DEFAULT 0,
@@ -2348,7 +2357,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS mfg_cost_cards (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(product_code, calc_date)
 )`);
-db.exec(`CREATE TABLE IF NOT EXISTS cost_rates (
+await db.exec(`CREATE TABLE IF NOT EXISTS cost_rates (
   id INTEGER PRIMARY KEY, rate_type TEXT NOT NULL,
   rate_key TEXT NOT NULL, rate_value REAL DEFAULT 0,
   unit TEXT DEFAULT '', effective_from TEXT,
@@ -2358,12 +2367,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS cost_rates (
 )`);
 // 기본 노무비/경비 시드
 try {
-  db.prepare("INSERT OR IGNORE INTO cost_rates (rate_type,rate_key,rate_value,unit,notes) VALUES (?,?,?,?,?)").run('labor','default',25000,'원/시간','기본 노무비 단가');
-  db.prepare("INSERT OR IGNORE INTO cost_rates (rate_type,rate_key,rate_value,unit,notes) VALUES (?,?,?,?,?)").run('overhead','rate',15,'%','제조경비 비율 (재료비+노무비 대비)');
+  await db.prepare("INSERT OR IGNORE INTO cost_rates (rate_type,rate_key,rate_value,unit,notes) VALUES (?,?,?,?,?)").run('labor','default',25000,'원/시간','기본 노무비 단가');
+  await db.prepare("INSERT OR IGNORE INTO cost_rates (rate_type,rate_key,rate_value,unit,notes) VALUES (?,?,?,?,?)").run('overhead','rate',15,'%','제조경비 비율 (재료비+노무비 대비)');
 } catch(_){}
 
 // RBAC 권한
-db.exec(`CREATE TABLE IF NOT EXISTS role_permissions (
+await db.exec(`CREATE TABLE IF NOT EXISTS role_permissions (
   id INTEGER PRIMARY KEY, role TEXT NOT NULL,
   permission TEXT NOT NULL, resource TEXT DEFAULT '*',
   granted INTEGER DEFAULT 1,
@@ -2372,21 +2381,21 @@ db.exec(`CREATE TABLE IF NOT EXISTS role_permissions (
 )`);
 // 기본 권한 시드
 try {
-  const seedPerms = db.transaction(() => {
+  const seedPerms = db.transaction(async () => {
     const ins = db.prepare("INSERT OR IGNORE INTO role_permissions (role,permission,resource) VALUES (?,?,?)");
-    ['admin'].forEach(r => ins.run(r, '*', '*'));
-    ['purchase'].forEach(r => { ['read','write'].forEach(p => ['po','vendor','receipt','inventory','auto-order'].forEach(res => ins.run(r,p,res))); ins.run(r,'read','dashboard'); });
-    ['sales'].forEach(r => { ['read','write'].forEach(p => ['sales-order','customer-orders','shipping'].forEach(res => ins.run(r,p,res))); ins.run(r,'read','dashboard'); ins.run(r,'read','inventory'); });
-    ['production'].forEach(r => { ['read','write'].forEach(p => ['work-order','production-req','bom','equipment','process-routing'].forEach(res => ins.run(r,p,res))); ins.run(r,'read','dashboard'); ins.run(r,'read','inventory'); });
-    ['accounting'].forEach(r => { ['read','write'].forEach(p => ['journal','budget','tax-invoice','ar-ap','mfg-cost'].forEach(res => ins.run(r,p,res))); ins.run(r,'read','dashboard'); });
-    ['executive'].forEach(r => { ins.run(r,'read','*'); });
-    ['viewer'].forEach(r => { ins.run(r,'read','*'); });
+    await ins.run('admin', '*', '*');
+    for (const p of ['read','write']) { for (const res of ['po','vendor','receipt','inventory','auto-order']) { await ins.run('purchase',p,res); } } await ins.run('purchase','read','dashboard');
+    for (const p of ['read','write']) { for (const res of ['sales-order','customer-orders','shipping']) { await ins.run('sales',p,res); } } await ins.run('sales','read','dashboard'); await ins.run('sales','read','inventory');
+    for (const p of ['read','write']) { for (const res of ['work-order','production-req','bom','equipment','process-routing']) { await ins.run('production',p,res); } } await ins.run('production','read','dashboard'); await ins.run('production','read','inventory');
+    for (const p of ['read','write']) { for (const res of ['journal','budget','tax-invoice','ar-ap','mfg-cost']) { await ins.run('accounting',p,res); } } await ins.run('accounting','read','dashboard');
+    await ins.run('executive','read','*');
+    await ins.run('viewer','read','*');
   });
-  seedPerms();
+  await seedPerms();
 } catch(_){}
 
 // 공정 라우팅
-db.exec(`CREATE TABLE IF NOT EXISTS process_routing (
+await db.exec(`CREATE TABLE IF NOT EXISTS process_routing (
   id INTEGER PRIMARY KEY, product_code TEXT NOT NULL,
   step_no INTEGER NOT NULL, process_name TEXT NOT NULL,
   process_type TEXT DEFAULT 'internal',
@@ -2397,7 +2406,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS process_routing (
 )`);
 
 // 공정별 실적
-db.exec(`CREATE TABLE IF NOT EXISTS process_results (
+await db.exec(`CREATE TABLE IF NOT EXISTS process_results (
   id INTEGER PRIMARY KEY, wo_id INTEGER NOT NULL,
   routing_id INTEGER, step_no INTEGER NOT NULL,
   process_name TEXT NOT NULL, equipment_id INTEGER,
@@ -2409,7 +2418,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS process_results (
 )`);
 
 // 설비 마스터
-db.exec(`CREATE TABLE IF NOT EXISTS equipment (
+await db.exec(`CREATE TABLE IF NOT EXISTS equipment (
   id INTEGER PRIMARY KEY, eq_code TEXT UNIQUE NOT NULL,
   eq_name TEXT NOT NULL, eq_type TEXT DEFAULT '',
   location TEXT DEFAULT '', status TEXT DEFAULT 'active',
@@ -2421,7 +2430,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS equipment (
 )`);
 
 // 설비 로그 (가동/비가동/정비)
-db.exec(`CREATE TABLE IF NOT EXISTS equipment_logs (
+await db.exec(`CREATE TABLE IF NOT EXISTS equipment_logs (
   id INTEGER PRIMARY KEY, equipment_id INTEGER NOT NULL,
   log_date TEXT NOT NULL, log_type TEXT NOT NULL,
   start_time TEXT, end_time TEXT,
@@ -2431,9 +2440,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS equipment_logs (
 )`);
 
 // 알림 생성 헬퍼
-function createNotification(userId, type, title, message, link) {
+async function createNotification(userId, type, title, message, link) {
   try {
-    db.prepare("INSERT INTO notifications (user_id, type, title, message, link) VALUES (?,?,?,?,?)").run(userId, type, title, message || '', link || '');
+    await db.prepare("INSERT INTO notifications (user_id, type, title, message, link) VALUES (?,?,?,?,?)").run(userId, type, title, message || '', link || '');
   } catch(e) { console.error('알림 생성 실패:', e.message); }
 }
 
@@ -2451,21 +2460,21 @@ const JWT_EXPIRES = '24h';
 
 // 마스터 관리자 계정 (seungchan.back@barunn.net)
 const masterEmail = 'seungchan.back@barunn.net';
-const masterUser = db.prepare("SELECT user_id FROM users WHERE email = ?").get(masterEmail);
+const masterUser = await db.prepare("SELECT user_id FROM users WHERE email = ?").get(masterEmail);
 if (!masterUser) {
   const hash = bcrypt.hashSync('1234', 10);
-  const oldAdmin = db.prepare("SELECT user_id FROM users WHERE username = 'admin'").get();
+  const oldAdmin = await db.prepare("SELECT user_id FROM users WHERE username = 'admin'").get();
   if (oldAdmin) {
-    db.prepare("UPDATE users SET username = ?, email = ?, password_hash = ?, display_name = ?, role = 'admin' WHERE user_id = ?")
+    await db.prepare("UPDATE users SET username = ?, email = ?, password_hash = ?, display_name = ?, role = 'admin' WHERE user_id = ?")
       .run('seungchan.back', masterEmail, hash, '백승찬', oldAdmin.user_id);
   } else {
-    db.prepare("INSERT INTO users (username, password_hash, display_name, role, email) VALUES (?, ?, ?, ?, ?)")
+    await db.prepare("INSERT INTO users (username, password_hash, display_name, role, email) VALUES (?, ?, ?, ?, ?)")
       .run('seungchan.back', hash, '백승찬', 'admin', masterEmail);
   }
   console.log('✅ 마스터 계정: seungchan.back@barunn.net / 1234');
 } else {
   // 이미 존재하면 admin 역할만 보장 (비밀번호는 유지)
-  db.prepare("UPDATE users SET role = 'admin' WHERE user_id = ?").run(masterUser.user_id);
+  await db.prepare("UPDATE users SET role = 'admin' WHERE user_id = ?").run(masterUser.user_id);
 }
 
 // JWT 유틸
@@ -2490,17 +2499,17 @@ function extractToken(req) {
 }
 
 // 감사 로그 기록
-function auditLog(userId, username, action, resource, resourceId, details, ip) {
+async function auditLog(userId, username, action, resource, resourceId, details, ip) {
   try {
-    db.prepare("INSERT INTO audit_log (user_id, username, action, resource, resource_id, details, ip_address) VALUES (?,?,?,?,?,?,?)")
+    await db.prepare("INSERT INTO audit_log (user_id, username, action, resource, resource_id, details, ip_address) VALUES (?,?,?,?,?,?,?)")
       .run(userId || 0, username || '', action, resource || '', String(resourceId || ''), details || '', ip || '');
   } catch (e) { console.error('감사 로그 기록 실패:', e.message); }
 }
 
 // 에러 로그 기록
-function logError(level, message, stack, url, method, userId) {
+async function logError(level, message, stack, url, method, userId) {
   try {
-    db.prepare("INSERT INTO error_logs (level, message, stack, url, method, user_id) VALUES (?,?,?,?,?,?)")
+    await db.prepare("INSERT INTO error_logs (level, message, stack, url, method, user_id) VALUES (?,?,?,?,?,?)")
       .run(level, message, stack || '', url || '', method || '', userId || null);
   } catch (e) { console.error('에러 로그 기록 실패:', e.message); }
 }
@@ -2624,7 +2633,7 @@ function hasPermission(role, page, userPermissions) {
 // (handleRequest 내에서 처리)
 
 // ── 메뉴 활성화/비활성화 설정 테이블 ──
-db.exec(`CREATE TABLE IF NOT EXISTS menu_settings (
+await db.exec(`CREATE TABLE IF NOT EXISTS menu_settings (
   page_id    TEXT PRIMARY KEY,
   is_enabled INTEGER DEFAULT 1,
   sort_order INTEGER DEFAULT 0,
@@ -2632,55 +2641,24 @@ db.exec(`CREATE TABLE IF NOT EXISTS menu_settings (
 )`);
 // 기본값: 모든 페이지 활성화 (dashboard, settings는 항상 활성)
 try {
-  const existing = db.prepare('SELECT page_id FROM menu_settings').all().map(r => r.page_id);
+  const existingRows = await db.prepare('SELECT page_id FROM menu_settings').all();
+  const existing = existingRows.map(r => r.page_id);
   const insertStmt = db.prepare('INSERT OR IGNORE INTO menu_settings (page_id, is_enabled, sort_order) VALUES (?, 1, ?)');
-  ALL_PAGES.forEach((p, idx) => {
-    if (!existing.includes(p.id)) insertStmt.run(p.id, idx);
-  });
+  for (let idx = 0; idx < ALL_PAGES.length; idx++) {
+    const p = ALL_PAGES[idx];
+    if (!existing.includes(p.id)) await insertStmt.run(p.id, idx);
+  }
 } catch (_) {}
 
-// ── DB 자동 백업 ──────────────────────────────────────────────────
-const BACKUP_DIR = path.join(DATA_DIR, 'backups');
-fs.mkdirSync(BACKUP_DIR, { recursive: true });
-
-function backupDatabase() {
-  const now = new Date();
-  const stamp = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const backupPath = path.join(BACKUP_DIR, `orders_${stamp}.db`);
-  try {
-    if (fs.existsSync(backupPath)) return; // 오늘 이미 백업됨
-    db.backup(backupPath).then(() => {
-      console.log(`✅ DB 백업 완료: ${backupPath}`);
-      // 7일 이전 백업 삭제
-      const files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('orders_') && f.endsWith('.db'));
-      const cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      files.forEach(f => {
-        const dateStr = f.match(/orders_(\d{8})\.db/);
-        if (dateStr) {
-          const y = dateStr[1].slice(0, 4), m = dateStr[1].slice(4, 6), d = dateStr[1].slice(6, 8);
-          if (new Date(`${y}-${m}-${d}`) < cutoff) {
-            fs.unlinkSync(path.join(BACKUP_DIR, f));
-            console.log(`🗑️ 오래된 백업 삭제: ${f}`);
-          }
-        }
-      });
-    }).catch(e => console.error('DB 백업 실패:', e.message));
-  } catch (e) { console.error('DB 백업 실패:', e.message); }
-}
-
-// 서버 시작 시 즉시 백업 + 매일 자정 백업
-backupDatabase();
-setInterval(() => {
-  const now = new Date();
-  if (now.getHours() === 0 && now.getMinutes() < 5) backupDatabase();
-}, 5 * 60 * 1000);
+// ── DB 자동 백업 (PostgreSQL은 pg_dump 등 외부 도구 사용) ──
+// SQLite 백업 코드 제거됨 — PostgreSQL은 별도 백업 정책 적용
 
 // 초기 필수발주 품목 4건
 const aoInit = db.prepare('INSERT OR IGNORE INTO auto_order_items (product_code, min_stock, order_qty) VALUES (?, ?, ?)');
-aoInit.run('BE004', 0, 0);
-aoInit.run('BE005', 0, 0);
-aoInit.run('2010wh_n', 0, 0);
-aoInit.run('BE042', 0, 0);
+await aoInit.run('BE004', 0, 0);
+await aoInit.run('BE005', 0, 0);
+await aoInit.run('2010wh_n', 0, 0);
+await aoInit.run('BE042', 0, 0);
 
 // ── Uploads directory ───────────────────────────────────────────────
 const UPLOAD_ROOT = path.join(UPLOAD_DIR, 'invoices');
@@ -2775,13 +2753,13 @@ function parseMultipart(buf, boundary) {
 }
 
 // ── PO number generator ─────────────────────────────────────────────
-function generatePoNumber() {
+async function generatePoNumber() {
   const today = new Date();
   const ymd = today.getFullYear().toString()
     + String(today.getMonth() + 1).padStart(2, '0')
     + String(today.getDate()).padStart(2, '0');
   const prefix = `PO-${ymd}-`;
-  const row = db.prepare(`SELECT po_number FROM po_header WHERE po_number LIKE ? ORDER BY po_number DESC LIMIT 1`).get(prefix + '%');
+  const row = await db.prepare(`SELECT po_number FROM po_header WHERE po_number LIKE ? ORDER BY po_number DESC LIMIT 1`).get(prefix + '%');
   let seq = 1;
   if (row) {
     const last = parseInt(row.po_number.split('-')[2], 10);
@@ -2874,13 +2852,13 @@ http.createServer(async (req, res) => {
 // 미처리 예외/프라미스 거부 핸들러
 process.on('uncaughtException', (e) => {
   console.error('Uncaught Exception:', e);
-  logError('fatal', e.message, e.stack);
+  try { logError('fatal', e.message, e.stack); } catch(_) {}
 });
 process.on('unhandledRejection', (reason) => {
   const msg = reason instanceof Error ? reason.message : String(reason);
   const stack = reason instanceof Error ? reason.stack : '';
   console.error('Unhandled Rejection:', msg);
-  logError('error', msg, stack);
+  try { logError('error', msg, stack); } catch(_) {}
 });
 
 async function handleRequest(req, res) {
@@ -2903,8 +2881,8 @@ async function handleRequest(req, res) {
   // GET /api/health — 시스템 헬스체크 (최상위 배치 — Docker 배포 안정성)
   if ((pathname === '/api/health' || pathname === '/health') && method === 'GET') {
     const health = { status: 'ok', timestamp: new Date().toISOString(), checks: {} };
-    try { db.prepare('SELECT 1').get(); health.checks.sqlite = 'ok'; }
-    catch (e) { health.checks.sqlite = 'error: ' + e.message; health.status = 'degraded'; }
+    try { await db.prepare('SELECT 1').get(); health.checks.postgresql = 'ok'; }
+    catch (e) { health.checks.postgresql = 'error: ' + e.message; health.status = 'degraded'; }
     try {
       if (xerpPool && xerpPool.connected) { health.checks.xerp = 'ok'; }
       else if (xerpReconnectAttempts > 0) { health.checks.xerp = `reconnecting (attempt #${xerpReconnectAttempts})`; }
@@ -2912,11 +2890,7 @@ async function handleRequest(req, res) {
     } catch (e) { health.checks.xerp = 'error'; health.status = 'degraded'; }
     health.checks.smtp = smtpTransporter ? 'configured' : 'not configured';
     health.checks.google_sheet = gAccessToken ? 'ok' : (gRefreshToken ? 'token expired' : 'not configured');
-    try {
-      const backups = fs.readdirSync(BACKUP_DIR).filter(f => f.endsWith('.db'));
-      health.checks.backup = `${backups.length} backups (latest: ${backups.sort().pop() || 'none'})`;
-    } catch { health.checks.backup = 'error'; }
-    try { health.checks.db_size = `${(fs.statSync(DB_PATH).size / 1024 / 1024).toFixed(1)} MB`; } catch {}
+    health.checks.backup = 'PostgreSQL (외부 백업 정책 적용)';
     ok(res, health);
     return;
   }
@@ -2931,7 +2905,7 @@ async function handleRequest(req, res) {
     const remoteAddr = req.socket.remoteAddress || '';
     const isLocal = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
     if (!isLocal) { fail(res, 403, '로컬에서만 사용 가능합니다'); return; }
-    const user = db.prepare("SELECT user_id, username, display_name, role, email, permissions, favorites FROM users WHERE role = 'admin' AND is_active = 1 LIMIT 1").get();
+    const user = await db.prepare("SELECT user_id, username, display_name, role, email, permissions, favorites FROM users WHERE role = 'admin' AND is_active = 1 LIMIT 1").get();
     if (!user) { fail(res, 404, '관리자 계정이 없습니다'); return; }
     const token = signToken(user);
     let favs = []; try { favs = JSON.parse(user.favorites || '[]'); } catch {}
@@ -2945,14 +2919,14 @@ async function handleRequest(req, res) {
     const { username, password } = body;
     if (!username || !password) { fail(res, 400, '이메일(또는 아이디)과 비밀번호를 입력하세요'); return; }
     // 이메일 또는 username으로 로그인 가능
-    const user = db.prepare("SELECT * FROM users WHERE (username = ? OR email = ?) AND is_active = 1").get(username, username);
+    const user = await db.prepare("SELECT * FROM users WHERE (username = ? OR email = ?) AND is_active = 1").get(username, username);
     if (!user || !bcrypt.compareSync(password, user.password_hash)) {
       auditLog(null, username, 'login_failed', 'auth', '', '로그인 실패', clientIP);
       fail(res, 401, '아이디 또는 비밀번호가 일치하지 않습니다');
       return;
     }
     const token = signToken(user);
-    db.prepare("UPDATE users SET last_login = datetime('now','localtime') WHERE user_id = ?").run(user.user_id);
+    await db.prepare("UPDATE users SET last_login = datetime('now','localtime') WHERE user_id = ?").run(user.user_id);
     auditLog(user.user_id, user.username, 'login', 'auth', '', '로그인 성공', clientIP);
     ok(res, {
       token, user: { user_id: user.user_id, username: user.username, display_name: user.display_name, role: user.role, email: user.email }
@@ -2996,7 +2970,7 @@ async function handleRequest(req, res) {
         return;
       }
       // 기존 사용자 찾기 (google_id 또는 email)
-      let user = db.prepare("SELECT * FROM users WHERE google_id = ? OR email = ?").get(googleId, email);
+      let user = await db.prepare("SELECT * FROM users WHERE google_id = ? OR email = ?").get(googleId, email);
       if (user && !user.is_active) {
         fail(res, 403, '비활성화된 계정입니다. 관리자에게 문의하세요.');
         return;
@@ -3007,22 +2981,22 @@ async function handleRequest(req, res) {
         // username 충돌 방지
         let finalUsername = username;
         let suffix = 1;
-        while (db.prepare("SELECT user_id FROM users WHERE username = ?").get(finalUsername)) {
+        while (await db.prepare("SELECT user_id FROM users WHERE username = ?").get(finalUsername)) {
           finalUsername = username + suffix++;
         }
-        const result = db.prepare("INSERT INTO users (username, password_hash, display_name, role, email, google_id, profile_picture) VALUES (?,?,?,?,?,?,?)")
+        const result = await db.prepare("INSERT INTO users (username, password_hash, display_name, role, email, google_id, profile_picture) VALUES (?,?,?,?,?,?,?)")
           .run(finalUsername, '', name || email.split('@')[0], 'viewer', email, googleId, picture || '');
-        user = db.prepare("SELECT * FROM users WHERE user_id = ?").get(result.lastInsertRowid);
+        user = await db.prepare("SELECT * FROM users WHERE user_id = ?").get(result.lastInsertRowid);
         auditLog(user.user_id, finalUsername, 'google_register', 'auth', user.user_id, `Google 자동 등록: ${email}`, clientIP);
         console.log(`✅ Google 신규 사용자 등록: ${email} (${finalUsername})`);
       } else {
         // 기존 사용자 → google_id, profile_picture 업데이트
-        db.prepare("UPDATE users SET google_id = ?, profile_picture = ?, display_name = CASE WHEN display_name = '' OR display_name = username THEN ? ELSE display_name END WHERE user_id = ?")
+        await db.prepare("UPDATE users SET google_id = ?, profile_picture = ?, display_name = CASE WHEN display_name = '' OR display_name = username THEN ? ELSE display_name END WHERE user_id = ?")
           .run(googleId, picture || '', name || user.display_name, user.user_id);
       }
       // JWT 발급
       const token = signToken(user);
-      db.prepare("UPDATE users SET last_login = datetime('now','localtime') WHERE user_id = ?").run(user.user_id);
+      await db.prepare("UPDATE users SET last_login = datetime('now','localtime') WHERE user_id = ?").run(user.user_id);
       auditLog(user.user_id, user.username, 'google_login', 'auth', '', `Google 로그인: ${email}`, clientIP);
       ok(res, {
         token,
@@ -3058,20 +3032,20 @@ async function handleRequest(req, res) {
       return;
     }
     // 중복 검사
-    const exists = db.prepare("SELECT user_id FROM users WHERE email = ?").get(email);
+    const exists = await db.prepare("SELECT user_id FROM users WHERE email = ?").get(email);
     if (exists) { fail(res, 409, '이미 등록된 이메일입니다. 로그인해주세요.'); return; }
     const username = email.split('@')[0];
     let finalUsername = username;
     let suffix = 1;
-    while (db.prepare("SELECT user_id FROM users WHERE username = ?").get(finalUsername)) {
+    while (await db.prepare("SELECT user_id FROM users WHERE username = ?").get(finalUsername)) {
       finalUsername = username + suffix++;
     }
     const hash = bcrypt.hashSync(password, 10);
-    const result = db.prepare("INSERT INTO users (username, password_hash, display_name, role, email) VALUES (?,?,?,?,?)")
+    const result = await db.prepare("INSERT INTO users (username, password_hash, display_name, role, email) VALUES (?,?,?,?,?)")
       .run(finalUsername, hash, display_name || username, 'viewer', email);
-    const user = db.prepare("SELECT * FROM users WHERE user_id = ?").get(result.lastInsertRowid);
+    const user = await db.prepare("SELECT * FROM users WHERE user_id = ?").get(result.lastInsertRowid);
     const token = signToken(user);
-    db.prepare("UPDATE users SET last_login = datetime('now','localtime') WHERE user_id = ?").run(user.user_id);
+    await db.prepare("UPDATE users SET last_login = datetime('now','localtime') WHERE user_id = ?").run(user.user_id);
     auditLog(user.user_id, finalUsername, 'register', 'auth', user.user_id, `회원가입: ${email}`, clientIP);
     console.log(`✅ 신규 가입: ${email} (${finalUsername})`);
     ok(res, {
@@ -3086,7 +3060,7 @@ async function handleRequest(req, res) {
     const token = extractToken(req);
     const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
-    const user = db.prepare("SELECT user_id, username, display_name, role, email, permissions, favorites, last_login FROM users WHERE user_id = ?").get(decoded.userId);
+    const user = await db.prepare("SELECT user_id, username, display_name, role, email, permissions, favorites, last_login FROM users WHERE user_id = ?").get(decoded.userId);
     if (!user) { fail(res, 401, '사용자를 찾을 수 없습니다'); return; }
     const userPerms = user.permissions ? JSON.parse(user.permissions) : [];
     const effectivePerms = user.role === 'admin' ? ['*'] : (userPerms.length > 0 ? userPerms : (ROLE_PERMISSIONS[user.role] || []));
@@ -3094,7 +3068,7 @@ async function handleRequest(req, res) {
     // ���뉴 활성화 상태 포함
     let menuEnabled = {};
     try {
-      const ms = db.prepare('SELECT page_id, is_enabled FROM menu_settings').all();
+      const ms = await db.prepare('SELECT page_id, is_enabled FROM menu_settings').all();
       ms.forEach(r => { menuEnabled[r.page_id] = r.is_enabled; });
     } catch (_) {}
     ok(res, { user: { ...user, permissions: undefined, favorites: undefined }, permissions: effectivePerms, favorites: favs, menuEnabled });
@@ -3112,7 +3086,7 @@ async function handleRequest(req, res) {
     const token = extractToken(req);
     const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
-    const rows = db.prepare('SELECT page_id, is_enabled, sort_order FROM menu_settings ORDER BY sort_order').all();
+    const rows = await db.prepare('SELECT page_id, is_enabled, sort_order FROM menu_settings ORDER BY sort_order').all();
     const map = {};
     rows.forEach(r => { map[r.page_id] = { is_enabled: r.is_enabled, sort_order: r.sort_order }; });
     ok(res, map);
@@ -3122,20 +3096,20 @@ async function handleRequest(req, res) {
     const token = extractToken(req);
     const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
-    const user = db.prepare("SELECT role FROM users WHERE user_id = ?").get(decoded.userId);
+    const user = await db.prepare("SELECT role FROM users WHERE user_id = ?").get(decoded.userId);
     if (!user || user.role !== 'admin') { fail(res, 403, '관리자만 메뉴 설정을 변경할 수 있습니다'); return; }
     const body = await readJSON(req);
     // body: { settings: { page_id: { is_enabled: 0|1, sort_order?: N }, ... } }
     const upsert = db.prepare(`INSERT INTO menu_settings (page_id, is_enabled, sort_order, updated_at) VALUES (?, ?, ?, datetime('now','localtime'))
       ON CONFLICT(page_id) DO UPDATE SET is_enabled=excluded.is_enabled, sort_order=excluded.sort_order, updated_at=excluded.updated_at`);
     const PROTECTED = ['dashboard', 'settings']; // 항상 활성��
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       for (const [pageId, cfg] of Object.entries(body.settings || {})) {
         const enabled = PROTECTED.includes(pageId) ? 1 : (cfg.is_enabled ? 1 : 0);
-        upsert.run(pageId, enabled, cfg.sort_order || 0);
+        await upsert.run(pageId, enabled, cfg.sort_order || 0);
       }
     });
-    tx();
+    await tx();
     ok(res, { message: '메뉴 설정이 저장되었��니다' });
     return;
   }
@@ -3146,12 +3120,12 @@ async function handleRequest(req, res) {
     const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
     const body = await readJSON(req);
-    const user = db.prepare("SELECT * FROM users WHERE user_id = ?").get(decoded.userId);
+    const user = await db.prepare("SELECT * FROM users WHERE user_id = ?").get(decoded.userId);
     if (!user) { fail(res, 404, '사용자 없음'); return; }
     if (!bcrypt.compareSync(body.current_password, user.password_hash)) { fail(res, 400, '현재 비밀번호가 일치하지 않습니다'); return; }
     if (!body.new_password || body.new_password.length < 4) { fail(res, 400, '새 비밀번호는 4자 이상이어야 합니다'); return; }
     const hash = bcrypt.hashSync(body.new_password, 10);
-    db.prepare("UPDATE users SET password_hash = ?, updated_at = datetime('now','localtime') WHERE user_id = ?").run(hash, decoded.userId);
+    await db.prepare("UPDATE users SET password_hash = ?, updated_at = datetime('now','localtime') WHERE user_id = ?").run(hash, decoded.userId);
     auditLog(decoded.userId, decoded.username, 'password_change', 'auth', decoded.userId, '비밀번호 변경', clientIP);
     ok(res, { message: '비밀번호가 변경되었습니다' });
     return;
@@ -3162,7 +3136,7 @@ async function handleRequest(req, res) {
     const token = extractToken(req);
     const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
-    const row = db.prepare("SELECT favorites FROM users WHERE user_id = ?").get(decoded.userId);
+    const row = await db.prepare("SELECT favorites FROM users WHERE user_id = ?").get(decoded.userId);
     let favs = [];
     try { favs = JSON.parse(row?.favorites || '[]'); } catch {}
     ok(res, favs);
@@ -3176,7 +3150,7 @@ async function handleRequest(req, res) {
     if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
     const body = await readJSON(req);
     const favs = Array.isArray(body.favorites) ? body.favorites : [];
-    db.prepare("UPDATE users SET favorites = ? WHERE user_id = ?").run(JSON.stringify(favs), decoded.userId);
+    await db.prepare("UPDATE users SET favorites = ? WHERE user_id = ?").run(JSON.stringify(favs), decoded.userId);
     ok(res, { message: '즐겨찾기 저장 완료', favorites: favs });
     return;
   }
@@ -3186,7 +3160,7 @@ async function handleRequest(req, res) {
     const token = extractToken(req);
     const decoded = token ? verifyToken(token) : null;
     if (!decoded || decoded.role !== 'admin') { fail(res, 403, '관리자 권한이 필요합니다'); return; }
-    const users = db.prepare("SELECT user_id, username, display_name, role, email, permissions, is_active, last_login, created_at FROM users ORDER BY user_id").all();
+    const users = await db.prepare("SELECT user_id, username, display_name, role, email, permissions, is_active, last_login, created_at FROM users ORDER BY user_id").all();
     ok(res, users);
     return;
   }
@@ -3198,10 +3172,10 @@ async function handleRequest(req, res) {
     if (!decoded || decoded.role !== 'admin') { fail(res, 403, '관리자 권한이 필요합니다'); return; }
     const body = await readJSON(req);
     if (!body.username || !body.password) { fail(res, 400, '아이디와 비밀번호 필수'); return; }
-    const exists = db.prepare("SELECT user_id FROM users WHERE username = ?").get(body.username);
+    const exists = await db.prepare("SELECT user_id FROM users WHERE username = ?").get(body.username);
     if (exists) { fail(res, 409, '이미 존재하는 아이디입니다'); return; }
     const hash = bcrypt.hashSync(body.password, 10);
-    const result = db.prepare("INSERT INTO users (username, password_hash, display_name, role, email) VALUES (?,?,?,?,?)")
+    const result = await db.prepare("INSERT INTO users (username, password_hash, display_name, role, email) VALUES (?,?,?,?,?)")
       .run(body.username, hash, body.display_name || body.username, body.role || 'viewer', body.email || '');
     auditLog(decoded.userId, decoded.username, 'user_create', 'users', result.lastInsertRowid, `사용자 생성: ${body.username} (${body.role || 'viewer'})`, clientIP);
     ok(res, { user_id: result.lastInsertRowid, username: body.username });
@@ -3227,7 +3201,7 @@ async function handleRequest(req, res) {
     if (sets.length === 0) { fail(res, 400, '변경할 항목이 없습니다'); return; }
     sets.push("updated_at=datetime('now','localtime')");
     params.push(uid);
-    db.prepare(`UPDATE users SET ${sets.join(',')} WHERE user_id=?`).run(...params);
+    await db.prepare(`UPDATE users SET ${sets.join(',')} WHERE user_id=?`).run(...params);
     auditLog(decoded.userId, decoded.username, 'user_update', 'users', uid, `사용자 수정: ${JSON.stringify(body)}`, clientIP);
     ok(res, { updated: uid });
     return;
@@ -3258,8 +3232,8 @@ async function handleRequest(req, res) {
     if (search) { where.push("(details LIKE ? OR username LIKE ? OR resource_id LIKE ?)"); params.push('%'+search+'%','%'+search+'%','%'+search+'%'); }
 
     const whereClause = where.length ? ' WHERE ' + where.join(' AND ') : '';
-    const total = db.prepare("SELECT COUNT(*) as cnt FROM audit_log" + whereClause).get(...params).cnt;
-    const rows = db.prepare("SELECT * FROM audit_log" + whereClause + " ORDER BY created_at DESC LIMIT ? OFFSET ?").all(...params, limit, offset);
+    const total = (await db.prepare("SELECT COUNT(*) as cnt FROM audit_log" + whereClause).get(...params)).cnt;
+    const rows = await db.prepare("SELECT * FROM audit_log" + whereClause + " ORDER BY created_at DESC LIMIT ? OFFSET ?").all(...params, limit, offset);
 
     ok(res, { rows, total, limit, offset });
     return;
@@ -3273,14 +3247,14 @@ async function handleRequest(req, res) {
     const days = parseInt(parsed.searchParams.get('days') || '30');
     const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 
-    const totalLogs = db.prepare("SELECT COUNT(*) as cnt FROM audit_log WHERE created_at >= ?").get(since).cnt;
-    const byAction = db.prepare("SELECT action, COUNT(*) as cnt FROM audit_log WHERE created_at >= ? GROUP BY action ORDER BY cnt DESC").all(since);
-    const byUser = db.prepare("SELECT username, COUNT(*) as cnt FROM audit_log WHERE created_at >= ? GROUP BY username ORDER BY cnt DESC LIMIT 20").all(since);
-    const byResource = db.prepare("SELECT resource, COUNT(*) as cnt FROM audit_log WHERE created_at >= ? GROUP BY resource ORDER BY cnt DESC").all(since);
-    const byDay = db.prepare("SELECT DATE(created_at) as day, COUNT(*) as cnt FROM audit_log WHERE created_at >= ? GROUP BY DATE(created_at) ORDER BY day DESC LIMIT ?").all(since, days);
-    const loginFailed = db.prepare("SELECT COUNT(*) as cnt FROM audit_log WHERE action='login_failed' AND created_at >= ?").get(since).cnt;
-    const uniqueUsers = db.prepare("SELECT COUNT(DISTINCT username) as cnt FROM audit_log WHERE created_at >= ? AND action IN ('login','google_login')").get(since).cnt;
-    const recentActions = db.prepare("SELECT action, COUNT(*) as cnt FROM audit_log WHERE created_at >= datetime('now','-1 hour','localtime') GROUP BY action ORDER BY cnt DESC").all();
+    const totalLogs = (await db.prepare("SELECT COUNT(*) as cnt FROM audit_log WHERE created_at >= ?").get(since)).cnt;
+    const byAction = await db.prepare("SELECT action, COUNT(*) as cnt FROM audit_log WHERE created_at >= ? GROUP BY action ORDER BY cnt DESC").all(since);
+    const byUser = await db.prepare("SELECT username, COUNT(*) as cnt FROM audit_log WHERE created_at >= ? GROUP BY username ORDER BY cnt DESC LIMIT 20").all(since);
+    const byResource = await db.prepare("SELECT resource, COUNT(*) as cnt FROM audit_log WHERE created_at >= ? GROUP BY resource ORDER BY cnt DESC").all(since);
+    const byDay = await db.prepare("SELECT DATE(created_at) as day, COUNT(*) as cnt FROM audit_log WHERE created_at >= ? GROUP BY DATE(created_at) ORDER BY day DESC LIMIT ?").all(since, days);
+    const loginFailed = (await db.prepare("SELECT COUNT(*) as cnt FROM audit_log WHERE action='login_failed' AND created_at >= ?").get(since)).cnt;
+    const uniqueUsers = (await db.prepare("SELECT COUNT(DISTINCT username) as cnt FROM audit_log WHERE created_at >= ? AND action IN ('login','google_login')").get(since)).cnt;
+    const recentActions = await db.prepare("SELECT action, COUNT(*) as cnt FROM audit_log WHERE created_at >= datetime('now','-1 hour','localtime') GROUP BY action ORDER BY cnt DESC").all();
 
     ok(res, { total: totalLogs, login_failed: loginFailed, unique_users: uniqueUsers, by_action: byAction, by_user: byUser, by_resource: byResource, by_day: byDay, recent_hour: recentActions, days });
     return;
@@ -3291,9 +3265,9 @@ async function handleRequest(req, res) {
     const token = extractToken(req);
     const decoded = token ? verifyToken(token) : null;
     if (!decoded || decoded.role !== 'admin') { fail(res, 403, '관리자 권한이 필요합니다'); return; }
-    const actions = db.prepare("SELECT DISTINCT action FROM audit_log ORDER BY action").all();
-    const resources = db.prepare("SELECT DISTINCT resource FROM audit_log ORDER BY resource").all();
-    const users = db.prepare("SELECT DISTINCT username FROM audit_log WHERE username IS NOT NULL ORDER BY username").all();
+    const actions = await db.prepare("SELECT DISTINCT action FROM audit_log ORDER BY action").all();
+    const resources = await db.prepare("SELECT DISTINCT resource FROM audit_log ORDER BY resource").all();
+    const users = await db.prepare("SELECT DISTINCT username FROM audit_log WHERE username IS NOT NULL ORDER BY username").all();
     ok(res, { actions: actions.map(a => a.action), resources: resources.map(r => r.resource), users: users.map(u => u.username) });
     return;
   }
@@ -3312,8 +3286,8 @@ async function handleRequest(req, res) {
     if (level) { where.push("level = ?"); params.push(level); }
     if (search) { where.push("(message LIKE ? OR url LIKE ?)"); params.push('%'+search+'%','%'+search+'%'); }
     const whereClause = where.length ? ' WHERE ' + where.join(' AND ') : '';
-    const total = db.prepare("SELECT COUNT(*) as cnt FROM error_logs" + whereClause).get(...params).cnt;
-    const rows = db.prepare("SELECT * FROM error_logs" + whereClause + " ORDER BY created_at DESC LIMIT ? OFFSET ?").all(...params, limit, offset);
+    const total = (await db.prepare("SELECT COUNT(*) as cnt FROM error_logs" + whereClause).get(...params)).cnt;
+    const rows = await db.prepare("SELECT * FROM error_logs" + whereClause + " ORDER BY created_at DESC LIMIT ? OFFSET ?").all(...params, limit, offset);
     ok(res, { rows, total, limit, offset });
     return;
   }
@@ -3391,7 +3365,7 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/vendors' && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM vendors ORDER BY name').all();
+    const rows = await db.prepare('SELECT * FROM vendors ORDER BY name').all();
     ok(res, rows);
     return;
   }
@@ -3399,7 +3373,7 @@ async function handleRequest(req, res) {
   if (pathname === '/api/vendors' && method === 'POST') {
     const body = await readJSON(req);
     const stmt = db.prepare(`INSERT INTO vendors (vendor_code, name, type, contact, phone, email, email_cc, kakao, memo) VALUES (@vendor_code, @name, @type, @contact, @phone, @email, @email_cc, @kakao, @memo)`);
-    const info = stmt.run({
+    const info = await stmt.run({
       vendor_code: body.vendor_code || '',
       name: body.name || '',
       type: body.type || '',
@@ -3419,10 +3393,10 @@ async function handleRequest(req, res) {
     const vendors = await readJSON(req);
     if (!Array.isArray(vendors)) { fail(res, 400, 'Expected array'); return; }
     const stmt = db.prepare(`INSERT OR IGNORE INTO vendors (name, type, contact, phone, email, kakao, memo) VALUES (@name, @type, @contact, @phone, @email, @kakao, @memo)`);
-    const tx = db.transaction((list) => {
+    const tx = db.transaction(async (list) => {
       let count = 0;
       for (const v of list) {
-        const info = stmt.run({
+        const info = await stmt.run({
           name: v.name || '',
           type: v.type || '',
           contact: v.contact || '',
@@ -3455,7 +3429,7 @@ async function handleRequest(req, res) {
     }
     if (fields.length === 0) { fail(res, 400, 'No fields to update'); return; }
     fields.push(`updated_at = datetime('now','localtime')`);
-    db.prepare(`UPDATE vendors SET ${fields.join(', ')} WHERE vendor_id = @id`).run(params);
+    await db.prepare(`UPDATE vendors SET ${fields.join(', ')} WHERE vendor_id = @id`).run(params);
     if (currentUser) auditLog(currentUser.userId, currentUser.username, 'vendor_update', 'vendors', id, `거래처 수정: ${body.name || id}`, clientIP);
     ok(res, { vendor_id: id });
     return;
@@ -3465,7 +3439,7 @@ async function handleRequest(req, res) {
   const vendorDel = pathname.match(/^\/api\/vendors\/(\d+)$/);
   if (vendorDel && method === 'DELETE') {
     const id = parseInt(vendorDel[1]);
-    db.prepare('DELETE FROM vendors WHERE vendor_id = ?').run(id);
+    await db.prepare('DELETE FROM vendors WHERE vendor_id = ?').run(id);
     if (currentUser) auditLog(currentUser.userId, currentUser.username, 'vendor_delete', 'vendors', id, `거래처 삭제`, clientIP);
     ok(res, { deleted: id });
     return;
@@ -3476,7 +3450,7 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/products' && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM products ORDER BY origin, product_code').all();
+    const rows = await db.prepare('SELECT * FROM products ORDER BY origin, product_code').all();
     ok(res, rows);
     return;
   }
@@ -3485,7 +3459,7 @@ async function handleRequest(req, res) {
     const b = await readJSON(req);
     if (!b.product_code) { fail(res, 400, 'product_code required'); return; }
     try {
-      const info = db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      const info = await db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
         b.product_code, b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
         b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||''
       );
@@ -3500,7 +3474,7 @@ async function handleRequest(req, res) {
   if (prodPut && method === 'PUT') {
     const id = parseInt(prodPut[1]);
     const b = await readJSON(req);
-    db.prepare(`UPDATE products SET product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, updated_at=datetime('now','localtime') WHERE id=?`).run(
+    await db.prepare(`UPDATE products SET product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, updated_at=datetime('now','localtime') WHERE id=?`).run(
       b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
       b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', id
     );
@@ -3511,7 +3485,7 @@ async function handleRequest(req, res) {
   const prodDel = pathname.match(/^\/api\/products\/(\d+)$/);
   if (prodDel && method === 'DELETE') {
     const id = parseInt(prodDel[1]);
-    db.prepare('DELETE FROM products WHERE id = ?').run(id);
+    await db.prepare('DELETE FROM products WHERE id = ?').run(id);
     ok(res, { deleted: id });
     return;
   }
@@ -3534,11 +3508,11 @@ async function handleRequest(req, res) {
         memo=excluded.memo, updated_at=datetime('now','localtime')`);
 
     let inserted = 0, updated = 0;
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       for (const it of items) {
         if (!it.product_code) continue;
-        const existing = db.prepare('SELECT id FROM products WHERE product_code=?').get(it.product_code);
-        upsert.run(
+        const existing = await db.prepare('SELECT id FROM products WHERE product_code=?').get(it.product_code);
+        await upsert.run(
           it.product_code, it.product_name||'', it.brand||'', it.origin||'한국',
           it.material_code||'', it.material_name||'', it.cut_spec||'', it.jopan||'',
           it.paper_maker||'', it.memo||''
@@ -3546,7 +3520,7 @@ async function handleRequest(req, res) {
         if (existing) updated++; else inserted++;
       }
     });
-    tx();
+    await tx();
     ok(res, { inserted, updated, total: inserted + updated });
     return;
   }
@@ -3559,12 +3533,12 @@ async function handleRequest(req, res) {
     const allowed = ['cut_spec','jopan','paper_maker','material_name','material_code','post_vendor'];
     if (!allowed.includes(body.field)) { fail(res, 400, '허용되지 않는 필드'); return; }
     // 이전 값 조회 후 이력 저장
-    const prev = db.prepare(`SELECT ${body.field} as val FROM products WHERE product_code=?`).get(code);
+    const prev = await db.prepare(`SELECT ${body.field} as val FROM products WHERE product_code=?`).get(code);
     const oldVal = prev ? (prev.val || '') : '';
     if (String(oldVal) !== String(body.value)) {
-      db.prepare('INSERT INTO product_field_history (product_code, field_name, old_value, new_value) VALUES (?,?,?,?)').run(code, body.field, String(oldVal), String(body.value));
+      await db.prepare('INSERT INTO product_field_history (product_code, field_name, old_value, new_value) VALUES (?,?,?,?)').run(code, body.field, String(oldVal), String(body.value));
     }
-    db.prepare(`UPDATE products SET ${body.field}=?, updated_at=datetime('now','localtime') WHERE product_code=?`).run(body.value, code);
+    await db.prepare(`UPDATE products SET ${body.field}=?, updated_at=datetime('now','localtime') WHERE product_code=?`).run(body.value, code);
     ok(res, { updated: code, field: body.field });
     return;
   }
@@ -3574,7 +3548,7 @@ async function handleRequest(req, res) {
   if (postVendorMatch && method === 'PATCH') {
     const code = decodeURIComponent(postVendorMatch[1]);
     const body = await readJSON(req);
-    db.prepare("UPDATE products SET post_vendor=?, updated_at=datetime('now','localtime') WHERE product_code=?").run(body.post_vendor || '', code);
+    await db.prepare("UPDATE products SET post_vendor=?, updated_at=datetime('now','localtime') WHERE product_code=?").run(body.post_vendor || '', code);
     // 캐시 무효화
     xerpInventoryCacheTime = 0;
     ok(res, { ok: true, code, post_vendor: body.post_vendor });
@@ -3585,7 +3559,7 @@ async function handleRequest(req, res) {
   const prodHistMatch = pathname.match(/^\/api\/products\/(.+)\/history$/);
   if (prodHistMatch && method === 'GET') {
     const code = decodeURIComponent(prodHistMatch[1]);
-    const rows = db.prepare('SELECT * FROM product_field_history WHERE product_code=? ORDER BY changed_at DESC LIMIT 50').all(code);
+    const rows = await db.prepare('SELECT * FROM product_field_history WHERE product_code=? ORDER BY changed_at DESC LIMIT 50').all(code);
     ok(res, rows);
     return;
   }
@@ -3595,7 +3569,7 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/product-post-vendor' && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM product_post_vendor ORDER BY product_code, step_order, process_type').all();
+    const rows = await db.prepare('SELECT * FROM product_post_vendor ORDER BY product_code, step_order, process_type').all();
     ok(res, rows);
     return;
   }
@@ -3607,14 +3581,14 @@ async function handleRequest(req, res) {
     const upsert = db.prepare(`INSERT INTO product_post_vendor (product_code, process_type, vendor_name, step_order, updated_at)
       VALUES (?, ?, ?, ?, datetime('now','localtime'))
       ON CONFLICT(product_code, process_type) DO UPDATE SET vendor_name=excluded.vendor_name, step_order=excluded.step_order, updated_at=datetime('now','localtime')`);
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       for (const m of mappings) {
         if (m.product_code && m.process_type && m.vendor_name) {
-          upsert.run(m.product_code, m.process_type, m.vendor_name, m.step_order || 1);
+          await upsert.run(m.product_code, m.process_type, m.vendor_name, m.step_order || 1);
         }
       }
     });
-    tx();
+    await tx();
     ok(res, { ok: true, saved: mappings.length });
     return;
   }
@@ -3644,7 +3618,7 @@ async function handleRequest(req, res) {
       // 품목관리 DB에서 등록된 제품코드 리스트 로드 (법인별 필터)
       // DD는 inactive 품목도 포함 (DD 동기화 시 is_display='F'인 제품은 inactive로 등록됨)
       const statusFilter = company === 'dd' ? "status IN ('active','inactive')" : "status = 'active'";
-      const registeredProducts = db.prepare(`SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products WHERE ${statusFilter} AND ${originFilter}`).all();
+      const registeredProducts = await db.prepare(`SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products WHERE ${statusFilter} AND ${originFilter}`).all();
       if (!registeredProducts.length) {
         ok(res, { products: [], updated: new Date().toISOString(), count: 0, message: '품목관리에 등록된 제품이 없습니다. 먼저 품목을 등록해주세요.' });
         return;
@@ -3698,7 +3672,7 @@ async function handleRequest(req, res) {
         const bar1Pool = new sql.ConnectionPool({ ...xerpConfig, database: 'bar_shop1' });
         await bar1Pool.connect();
         const nameResult = await bar1Pool.request().query(`SELECT Card_Code, Card_Name FROM S2_Card WHERE RTRIM(Card_Code) IN (${safeCodeList})`);
-        nameResult.recordset.forEach(r => { itemNames[(r.Card_Code || '').trim().toUpperCase()] = (r.Card_Name || '').trim(); });
+        nameResult.recordset.forEach(async r => { itemNames[(r.Card_Code || '').trim().toUpperCase()] = (r.Card_Name || '').trim(); });
         await bar1Pool.close();
       } catch (e) { console.warn('품목명 로드 실패:', e.message); }
 
@@ -3832,7 +3806,7 @@ async function handleRequest(req, res) {
       const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
 
       // 등록 제품만 조회 (속도 최적화)
-      const registeredProducts = db.prepare("SELECT product_code FROM products WHERE status = 'active'").all();
+      const registeredProducts = await db.prepare("SELECT product_code FROM products WHERE status = 'active'").all();
       const registeredCodes = new Set(registeredProducts.map(r => r.product_code));
       const safeCodeList = registeredProducts.map(p => p.product_code).filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).map(c => `'${c}'`).join(',');
       if (!safeCodeList) { ok(res, {}); return; }
@@ -3975,7 +3949,7 @@ async function handleRequest(req, res) {
 
   // GET /api/china-price-tiers — 전체 단가 조회
   if (pathname === '/api/china-price-tiers' && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM china_price_tiers ORDER BY product_code, qty_tier').all();
+    const rows = await db.prepare('SELECT * FROM china_price_tiers ORDER BY product_code, qty_tier').all();
     // product_code별로 그룹핑
     const map = {};
     for (const r of rows) {
@@ -3990,10 +3964,10 @@ async function handleRequest(req, res) {
   const cptMatch = pathname.match(/^\/api\/china-price-tiers\/(.+)$/);
   if (cptMatch && method === 'GET') {
     const code = decodeURIComponent(cptMatch[1]);
-    const rows = db.prepare('SELECT * FROM china_price_tiers WHERE product_code=? ORDER BY qty_tier').all(code);
+    const rows = await db.prepare('SELECT * FROM china_price_tiers WHERE product_code=? ORDER BY qty_tier').all(code);
     if (!rows.length) {
       // 대소문자 무시 재시도
-      const rows2 = db.prepare('SELECT * FROM china_price_tiers WHERE UPPER(product_code)=UPPER(?) ORDER BY qty_tier').all(code);
+      const rows2 = await db.prepare('SELECT * FROM china_price_tiers WHERE UPPER(product_code)=UPPER(?) ORDER BY qty_tier').all(code);
       ok(res, { product_code: code, tiers: rows2.map(r => ({ qty: r.qty_tier, price: r.unit_price })) });
     } else {
       ok(res, { product_code: code, tiers: rows.map(r => ({ qty: r.qty_tier, price: r.unit_price })) });
@@ -4007,10 +3981,10 @@ async function handleRequest(req, res) {
     const items = b.items || [];
     if (!items.length) { fail(res, 400, 'items 배열 필요'); return; }
     const insert = db.prepare('INSERT OR REPLACE INTO china_price_tiers (product_code, product_type, qty_tier, unit_price, currency, effective_date) VALUES (?,?,?,?,?,?)');
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       let cnt = 0;
       for (const item of items) {
-        insert.run(item.product_code, item.product_type || 'Card', item.qty_tier, item.unit_price, item.currency || 'KRW', item.effective_date || '2025-05-01');
+        await insert.run(item.product_code, item.product_type || 'Card', item.qty_tier, item.unit_price, item.currency || 'KRW', item.effective_date || '2025-05-01');
         cnt++;
       }
       return cnt;
@@ -4029,7 +4003,7 @@ async function handleRequest(req, res) {
     const leadTimeDays = parseInt(parsed.searchParams.get('leadtime')) || 50; // 중국 기본 50일
     const boxLimit = parseInt(parsed.searchParams.get('boxlimit')) || 500; // 선적 상자 제한
 
-    const tiers = db.prepare('SELECT qty_tier, unit_price FROM china_price_tiers WHERE UPPER(product_code)=UPPER(?) ORDER BY qty_tier').all(code);
+    const tiers = await db.prepare('SELECT qty_tier, unit_price FROM china_price_tiers WHERE UPPER(product_code)=UPPER(?) ORDER BY qty_tier').all(code);
     if (!tiers.length) { ok(res, { code, tiers: [], optimal: null, message: '단가 데이터 없음' }); return; }
 
     // 목표재고 = 월출고량에 따라 차등 (많으면 3개월, 적으면 2개월)
@@ -4084,7 +4058,7 @@ async function handleRequest(req, res) {
 
   // GET /api/auto-order
   if (pathname === '/api/auto-order' && method === 'GET') {
-    const rows = db.prepare(`SELECT a.*, COALESCE(p.origin,'') as origin FROM auto_order_items a LEFT JOIN products p ON a.product_code=p.product_code ORDER BY a.id`).all();
+    const rows = await db.prepare(`SELECT a.*, COALESCE(p.origin,'') as origin FROM auto_order_items a LEFT JOIN products p ON a.product_code=p.product_code ORDER BY a.id`).all();
     ok(res, rows);
     return;
   }
@@ -4094,9 +4068,9 @@ async function handleRequest(req, res) {
     const q = (parsed.searchParams.get('q') || '').trim();
     if (!q) { ok(res, []); return; }
     // products DB에서 검색
-    const dbRows = db.prepare(`SELECT product_code, product_name, brand, origin FROM products WHERE product_code LIKE ? OR product_name LIKE ? LIMIT 20`).all(`%${q}%`, `%${q}%`);
+    const dbRows = await db.prepare(`SELECT product_code, product_name, brand, origin FROM products WHERE product_code LIKE ? OR product_name LIKE ? LIMIT 20`).all(`%${q}%`, `%${q}%`);
     // 이미 등록된 품목 체크
-    const existingCodes = new Set(db.prepare('SELECT product_code FROM auto_order_items').all().map(r => r.product_code));
+    const existingCodes = new Set((await db.prepare('SELECT product_code FROM auto_order_items').all()).map(r => r.product_code));
     const results = dbRows.map(r => ({ ...r, already_added: existingCodes.has(r.product_code) }));
     // XERP 캐시에서도 검색
     if (xerpInventoryCache && xerpInventoryCache.products) {
@@ -4120,7 +4094,7 @@ async function handleRequest(req, res) {
     // origin 자동 판별: products DB → XERP 캐시 → 기본값
     let origin = b.origin || '';
     if (!origin) {
-      const prod = db.prepare('SELECT origin FROM products WHERE product_code=?').get(b.product_code);
+      const prod = await db.prepare('SELECT origin FROM products WHERE product_code=?').get(b.product_code);
       if (prod) origin = prod.origin || '';
     }
     if (!origin && xerpInventoryCache && xerpInventoryCache.products) {
@@ -4129,12 +4103,12 @@ async function handleRequest(req, res) {
     }
     if (!origin) origin = '한국'; // 기본값
     // products 테이블에 origin 없으면 업데이트
-    const existProd = db.prepare('SELECT id, origin FROM products WHERE product_code=?').get(b.product_code);
+    const existProd = await db.prepare('SELECT id, origin FROM products WHERE product_code=?').get(b.product_code);
     if (existProd && !existProd.origin) {
-      db.prepare('UPDATE products SET origin=? WHERE id=?').run(origin, existProd.id);
+      await db.prepare('UPDATE products SET origin=? WHERE id=?').run(origin, existProd.id);
     }
     try {
-      const info = db.prepare('INSERT INTO auto_order_items (product_code, min_stock, order_qty, vendor_name) VALUES (?,?,?,?)').run(
+      const info = await db.prepare('INSERT INTO auto_order_items (product_code, min_stock, order_qty, vendor_name) VALUES (?,?,?,?)').run(
         b.product_code, b.min_stock || 0, b.order_qty || 0, b.vendor_name || ''
       );
       ok(res, { id: info.lastInsertRowid, origin });
@@ -4149,9 +4123,9 @@ async function handleRequest(req, res) {
   if (aoUpdate && method === 'PUT') {
     const id = parseInt(aoUpdate[1]);
     const b = await readJSON(req);
-    const existing = db.prepare('SELECT * FROM auto_order_items WHERE id=?').get(id);
+    const existing = await db.prepare('SELECT * FROM auto_order_items WHERE id=?').get(id);
     if (!existing) { fail(res, 404, 'not found'); return; }
-    db.prepare('UPDATE auto_order_items SET min_stock=?, order_qty=?, vendor_name=?, enabled=? WHERE id=?').run(
+    await db.prepare('UPDATE auto_order_items SET min_stock=?, order_qty=?, vendor_name=?, enabled=? WHERE id=?').run(
       b.min_stock !== undefined ? b.min_stock : existing.min_stock,
       b.order_qty !== undefined ? b.order_qty : existing.order_qty,
       b.vendor_name !== undefined ? b.vendor_name : existing.vendor_name,
@@ -4165,7 +4139,7 @@ async function handleRequest(req, res) {
   // DELETE /api/auto-order/:id
   if (aoUpdate && method === 'DELETE') {
     const id = parseInt(aoUpdate[1]);
-    db.prepare('DELETE FROM auto_order_items WHERE id=?').run(id);
+    await db.prepare('DELETE FROM auto_order_items WHERE id=?').run(id);
     ok(res, { deleted: true });
     return;
   }
@@ -4175,7 +4149,7 @@ async function handleRequest(req, res) {
     const b = await readJSON(req);
     const origin = b.origin || '중국';
     // products DB에서 해당 origin 품목 가져오기
-    const prodsByOrigin = db.prepare('SELECT product_code FROM products WHERE origin=?').all(origin);
+    const prodsByOrigin = await db.prepare('SELECT product_code FROM products WHERE origin=?').all(origin);
     // XERP 재고에서도 (생산지가 있는 경우)
     const xerpCodes = new Set();
     let inv = xerpInventoryCache && xerpInventoryCache.products ? xerpInventoryCache.products : [];
@@ -4187,31 +4161,31 @@ async function handleRequest(req, res) {
     const invCodes = new Set(inv.map(p => p['제품코드'] || ''));
     const targetCodes = new Set([...prodsByOrigin.map(p => p.product_code).filter(c => invCodes.has(c)), ...xerpCodes]);
 
-    const existing = new Set(db.prepare('SELECT product_code FROM auto_order_items').all().map(r => r.product_code));
+    const existing = new Set((await db.prepare('SELECT product_code FROM auto_order_items').all()).map(r => r.product_code));
     const insert = db.prepare('INSERT OR IGNORE INTO auto_order_items (product_code, min_stock, order_qty, vendor_name, enabled) VALUES (?,?,?,?,1)');
     let added = 0, skipped = 0;
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       for (const code of targetCodes) {
         if (!code) continue;
         if (existing.has(code)) { skipped++; continue; }
-        insert.run(code, 0, 0, '');
+        await insert.run(code, 0, 0, '');
         added++;
       }
     });
-    tx();
+    await tx();
     ok(res, { added, skipped, origin, total: targetCodes.size });
     return;
   }
 
   // ── 전략발주 최적수량 계산 공통 함수 ──
-  function calculateOptimalOrder(productCode, invData, origin) {
+  async function calculateOptimalOrder(productCode, invData, origin) {
     const avail = typeof invData['가용재고'] === 'number' ? invData['가용재고'] : 0;
     const daily = invData['_xerpDaily'] || 0;
     const monthly = invData['_xerpMonthly'] || (invData._xerpTotal3m ? Math.round(invData._xerpTotal3m / 3) : 0);
     if (monthly <= 0) return { skip: true, reason: '월출고량 없음' };
 
     // 1. 리드타임 결정: 품목별 > 생산지별 기본값 (중국 50일)
-    const prod = db.prepare('SELECT lead_time_days FROM products WHERE product_code=?').get(productCode);
+    const prod = await db.prepare('SELECT lead_time_days FROM products WHERE product_code=?').get(productCode);
     const leadDays = (prod && prod.lead_time_days > 0) ? prod.lead_time_days : (ORIGIN_LEAD_TIME[origin] || 7);
 
     // 2. 리드타임 동안 소진량
@@ -4230,7 +4204,7 @@ async function handleRequest(req, res) {
     const remainDays = daily > 0 ? Math.round(avail / daily) : 9999;
 
     // 6. 단가 구간 최적화 (china_price_tiers가 있는 경우)
-    const tiers = db.prepare('SELECT qty_tier, unit_price FROM china_price_tiers WHERE UPPER(product_code)=UPPER(?) ORDER BY qty_tier').all(productCode);
+    const tiers = await db.prepare('SELECT qty_tier, unit_price FROM china_price_tiers WHERE UPPER(product_code)=UPPER(?) ORDER BY qty_tier').all(productCode);
     let orderQty, unitPrice = 0, tierAnalysis = [];
 
     if (tiers.length && origin === '중국') {
@@ -4298,7 +4272,7 @@ async function handleRequest(req, res) {
 
   // POST /api/auto-order/check — 자동발주 실행
   if (pathname === '/api/auto-order/check' && method === 'POST') {
-    const items = db.prepare('SELECT * FROM auto_order_items WHERE enabled=1').all();
+    const items = await db.prepare('SELECT * FROM auto_order_items WHERE enabled=1').all();
     // XERP 캐시 또는 API에서 재고+출고 데이터 로드
     let inv = [];
     if (xerpInventoryCache && xerpInventoryCache.products) {
@@ -4360,7 +4334,7 @@ async function handleRequest(req, res) {
       const vendor = item.vendor_name || '';
       if (vendor && !isUrgent) {
         if (!(vendor in weeklyVendorCount)) {
-          weeklyVendorCount[vendor] = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date>=? AND status!='cancelled' AND status!='취소'`).get(vendor, mondayStr).cnt;
+          weeklyVendorCount[vendor] = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date>=? AND status!='cancelled' AND status!='취소'`).get(vendor, mondayStr)).cnt;
         }
         if (weeklyVendorCount[vendor] >= 6) {
           skipped.push({ product_code: item.product_code, reason: `${vendor} 주간 한도 초과 (${weeklyVendorCount[vendor]}/6건)` });
@@ -4369,7 +4343,7 @@ async function handleRequest(req, res) {
       }
 
       // 미완료 PO가 있는 품목 스킵 (중복발주 방지)
-      const pendingPO = db.prepare(`
+      const pendingPO = await db.prepare(`
         SELECT h.po_number, h.status FROM po_header h
         JOIN po_items i ON i.po_id = h.po_id
         WHERE i.product_code = ? AND h.status IN ('draft','발송','확인','수령중','OS등록대기')
@@ -4379,7 +4353,7 @@ async function handleRequest(req, res) {
       // 거래처 결정: auto_order_items.vendor_name > products.paper_maker 매핑
       let resolvedVendor = vendor;
       if (!resolvedVendor) {
-        const prodInfo = db.prepare('SELECT paper_maker FROM products WHERE product_code=?').get(item.product_code);
+        const prodInfo = await db.prepare('SELECT paper_maker FROM products WHERE product_code=?').get(item.product_code);
         if (prodInfo && prodInfo.paper_maker) {
           resolvedVendor = resolveVendor(prodInfo.paper_maker) || '';
         }
@@ -4388,19 +4362,19 @@ async function handleRequest(req, res) {
       // PO 생성
       const poNumber = generatePoNumber();
       // origin 결정
-      const _aoOriginProd = db.prepare('SELECT origin FROM products WHERE product_code=?').get(item.product_code);
+      const _aoOriginProd = await db.prepare('SELECT origin FROM products WHERE product_code=?').get(item.product_code);
       const _aoOrigin = (_aoOriginProd && _aoOriginProd.origin) || '한국';
-      const tx = db.transaction(() => {
-        const hdr = db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, po_date) VALUES (?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(
+      const tx = db.transaction(async () => {
+        const hdr = await db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, po_date) VALUES (?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(
           poNumber, '자동발주', resolvedVendor, 'draft', orderQty, '필수 자동발주', _aoOrigin
         );
-        db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?,?,?,?,?,?,?)').run(
+        await db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?,?,?,?,?,?,?)').run(
           hdr.lastInsertRowid, item.product_code, p['브랜드'] || '', '', orderQty, '', '자동발주'
         );
-        db.prepare('UPDATE auto_order_items SET last_ordered_at=? WHERE id=?').run(new Date().toISOString(), item.id);
+        await db.prepare('UPDATE auto_order_items SET last_ordered_at=? WHERE id=?').run(new Date().toISOString(), item.id);
         // auto_order_items에 vendor_name도 업데이트 (다음번부터 사용)
         if (resolvedVendor && !vendor) {
-          db.prepare('UPDATE auto_order_items SET vendor_name=? WHERE id=?').run(resolvedVendor, item.id);
+          await db.prepare('UPDATE auto_order_items SET vendor_name=? WHERE id=?').run(resolvedVendor, item.id);
         }
         return { po_id: hdr.lastInsertRowid, po_number: poNumber };
       });
@@ -4410,13 +4384,13 @@ async function handleRequest(req, res) {
       // 거래처 이메일이 있으면 자동 발송
       let emailSent = false;
       if (resolvedVendor) {
-        const vendorInfo = db.prepare('SELECT * FROM vendors WHERE name=?').get(resolvedVendor);
+        const vendorInfo = await db.prepare('SELECT * FROM vendors WHERE name=?').get(resolvedVendor);
         if (vendorInfo && vendorInfo.email) {
           try {
-            const po = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(result.po_id);
-            const poItems = db.prepare('SELECT * FROM po_items WHERE po_id=?').all(result.po_id);
+            const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(result.po_id);
+            const poItems = await db.prepare('SELECT * FROM po_items WHERE po_id=?').all(result.po_id);
             await sendPOEmail(po, poItems, vendorInfo.email, vendorInfo.name, false, vendorInfo.email_cc || '');
-            db.prepare("UPDATE po_header SET status='sent' WHERE po_id=?").run(result.po_id);
+            await db.prepare("UPDATE po_header SET status='sent' WHERE po_id=?").run(result.po_id);
             emailSent = true;
           } catch (emailErr) {
             console.warn(`자동발주 이메일 실패 (${item.product_code}):`, emailErr.message);
@@ -4458,7 +4432,7 @@ async function handleRequest(req, res) {
 
   // GET /api/china-shipment/logs — 선적 이력 조회
   if (pathname === '/api/china-shipment/logs' && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM china_shipment_log ORDER BY created_at DESC LIMIT 50').all();
+    const rows = await db.prepare('SELECT * FROM china_shipment_log ORDER BY created_at DESC LIMIT 50').all();
     ok(res, rows);
     return;
   }
@@ -4466,7 +4440,7 @@ async function handleRequest(req, res) {
   // GET /api/china-shipment/logs/:id — 특정 선적 상세
   const csDetailMatch = pathname.match(/^\/api\/china-shipment\/logs\/(\d+)$/);
   if (csDetailMatch && method === 'GET') {
-    const row = db.prepare('SELECT * FROM china_shipment_log WHERE id=?').get(csDetailMatch[1]);
+    const row = await db.prepare('SELECT * FROM china_shipment_log WHERE id=?').get(csDetailMatch[1]);
     ok(res, row || null);
     return;
   }
@@ -4482,7 +4456,7 @@ async function handleRequest(req, res) {
       d.setDate(d.getDate() + 50);
       eta_date = d.toISOString().slice(0, 10);
     }
-    const result = db.prepare(`INSERT INTO china_shipment_log (shipment_date, file_name, total_boxes, total_items, target_boxes, items_json, notes, status, bl_number, ship_date, eta_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+    const result = await db.prepare(`INSERT INTO china_shipment_log (shipment_date, file_name, total_boxes, total_items, target_boxes, items_json, notes, status, bl_number, ship_date, eta_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
       shipment_date || new Date().toISOString().slice(0,10),
       file_name || '',
       total_boxes || 0,
@@ -4503,7 +4477,7 @@ async function handleRequest(req, res) {
   const csStatusMatch = pathname.match(/^\/api\/china-shipment\/logs\/(\d+)\/status$/);
   if (csStatusMatch && method === 'PUT') {
     const body = await readJSON(req);
-    db.prepare('UPDATE china_shipment_log SET status=? WHERE id=?').run(body.status, csStatusMatch[1]);
+    await db.prepare('UPDATE china_shipment_log SET status=? WHERE id=?').run(body.status, csStatusMatch[1]);
     ok(res, { updated: true });
     return;
   }
@@ -4511,7 +4485,7 @@ async function handleRequest(req, res) {
   // DELETE /api/china-shipment/logs/:id — 선적 이력 삭제
   const csDelMatch = pathname.match(/^\/api\/china-shipment\/logs\/(\d+)$/);
   if (csDelMatch && method === 'DELETE') {
-    db.prepare('DELETE FROM china_shipment_log WHERE id=?').run(csDelMatch[1]);
+    await db.prepare('DELETE FROM china_shipment_log WHERE id=?').run(csDelMatch[1]);
     ok(res, { deleted: true });
     return;
   }
@@ -4538,7 +4512,7 @@ async function handleRequest(req, res) {
     }
     if (updates.length > 0) {
       params.push(id);
-      db.prepare(`UPDATE china_shipment_log SET ${updates.join(',')} WHERE id=?`).run(...params);
+      await db.prepare(`UPDATE china_shipment_log SET ${updates.join(',')} WHERE id=?`).run(...params);
     }
     ok(res, { updated: true });
     return;
@@ -4553,11 +4527,11 @@ async function handleRequest(req, res) {
     const origins = ['한국', '중국', '더기프트'];
     const result = {};
     for (const org of origins) {
-      const total = db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=?").get(org);
-      const byStatus = db.prepare("SELECT status, COUNT(*) AS c FROM po_header WHERE origin=? GROUP BY status").all(org);
-      const partial = db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=? AND status='partial'").get(org);
-      const overdue = db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=? AND status NOT IN ('received','cancelled','completed') AND expected_date < date('now','localtime') AND expected_date != ''").get(org);
-      const recentPo = db.prepare("SELECT po_id, po_number, vendor_name, status, expected_date, po_date, total_qty FROM po_header WHERE origin=? ORDER BY created_at DESC LIMIT 5").all(org);
+      const total = await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=?").get(org);
+      const byStatus = await db.prepare("SELECT status, COUNT(*) AS c FROM po_header WHERE origin=? GROUP BY status").all(org);
+      const partial = await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=? AND status='partial'").get(org);
+      const overdue = await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=? AND status NOT IN ('received','cancelled','completed') AND expected_date < date('now','localtime') AND expected_date != ''").get(org);
+      const recentPo = await db.prepare("SELECT po_id, po_number, vendor_name, status, expected_date, po_date, total_qty FROM po_header WHERE origin=? ORDER BY created_at DESC LIMIT 5").all(org);
       // 입고율 (전체 아이템 기준)
       const rcvRate = db.prepare(`
         SELECT COALESCE(SUM(i.received_qty),0) AS received, COALESCE(SUM(i.ordered_qty),0) AS ordered
@@ -4573,9 +4547,9 @@ async function handleRequest(req, res) {
       };
     }
     // 중국 선적 현황
-    const shipments = db.prepare("SELECT * FROM china_shipment_log WHERE status NOT IN ('completed','cancelled') ORDER BY eta_date ASC LIMIT 10").all();
+    const shipments = await db.prepare("SELECT * FROM china_shipment_log WHERE status NOT IN ('completed','cancelled') ORDER BY eta_date ASC LIMIT 10").all();
     // 더기프트 포장 현황
-    const assemblies = db.prepare("SELECT * FROM gift_assembly WHERE status NOT IN ('completed','cancelled') ORDER BY created_at DESC LIMIT 10").all();
+    const assemblies = await db.prepare("SELECT * FROM gift_assembly WHERE status NOT IN ('completed','cancelled') ORDER BY created_at DESC LIMIT 10").all();
     ok(res, { origins: result, shipments, assemblies }); return;
   }
 
@@ -4589,7 +4563,7 @@ async function handleRequest(req, res) {
     if (origin) { where += " AND h.origin=?"; params.push(origin); }
     if (status) { where += " AND h.status=?"; params.push(status); }
     else { where += " AND h.status NOT IN ('cancelled','draft')"; }
-    const rows = db.prepare(`
+    const rows = await db.prepare(`
       SELECT h.po_id, h.po_number, h.origin, h.vendor_name, h.status, h.po_date, h.expected_date,
              h.po_type, h.material_status, h.process_status, h.process_step, h.notes,
              i.item_id, i.product_code, i.brand, i.process_type, i.ordered_qty, i.received_qty, i.spec
@@ -4624,20 +4598,20 @@ async function handleRequest(req, res) {
     if (!body.po_id) { fail(res, 400, 'po_id required'); return; }
     const items = body.items || []; // [{po_item_id, product_code, received_qty, defect_qty, notes}]
     if (!items.length) { fail(res, 400, 'items required'); return; }
-    const tx = db.transaction(() => {
-      const rInfo = db.prepare("INSERT INTO receipts (po_id, receipt_date, received_by, notes) VALUES (?, ?, ?, ?)").run(
+    const tx = db.transaction(async () => {
+      const rInfo = await db.prepare("INSERT INTO receipts (po_id, receipt_date, received_by, notes) VALUES (?, ?, ?, ?)").run(
         body.po_id, body.receipt_date || new Date().toISOString().slice(0,10), body.received_by || '', body.notes || '');
       const receiptId = rInfo.lastInsertRowid;
       const riStmt = db.prepare("INSERT INTO receipt_items (receipt_id, po_item_id, product_code, received_qty, defect_qty, notes) VALUES (?,?,?,?,?,?)");
       const updItem = db.prepare("UPDATE po_items SET received_qty = received_qty + ? WHERE item_id = ?");
       for (const it of items) {
-        riStmt.run(receiptId, it.po_item_id || null, it.product_code || '', it.received_qty || 0, it.defect_qty || 0, it.notes || '');
-        if (it.po_item_id && it.received_qty) updItem.run(it.received_qty, it.po_item_id);
+        await riStmt.run(receiptId, it.po_item_id || null, it.product_code || '', it.received_qty || 0, it.defect_qty || 0, it.notes || '');
+        if (it.po_item_id && it.received_qty) await updItem.run(it.received_qty, it.po_item_id);
       }
       // PO 상태 자동 갱신 (±tolerance% 허용 로직)
-      const poHeader = db.prepare('SELECT tolerance_pct, origin FROM po_header WHERE po_id=?').get(body.po_id);
+      const poHeader = await db.prepare('SELECT tolerance_pct, origin FROM po_header WHERE po_id=?').get(body.po_id);
       const tolerancePct = poHeader?.tolerance_pct || 5.0;
-      const poItems = db.prepare('SELECT ordered_qty, received_qty FROM po_items WHERE po_id=?').all(body.po_id);
+      const poItems = await db.prepare('SELECT ordered_qty, received_qty FROM po_items WHERE po_id=?').all(body.po_id);
       const totalOrdered = poItems.reduce((s, pi) => s + pi.ordered_qty, 0);
       const totalReceived = poItems.reduce((s, pi) => s + pi.received_qty, 0);
       const lowerBound = totalOrdered * (1 - tolerancePct / 100); // e.g. 9,500 for 10,000 @ 5%
@@ -4647,18 +4621,18 @@ async function handleRequest(req, res) {
       const anyDone = poItems.some(pi => pi.received_qty > 0);
       let autoCompleted = false;
       if (allExact || (withinTolerance && totalReceived >= lowerBound)) {
-        db.prepare("UPDATE po_header SET status='received', updated_at=datetime('now','localtime') WHERE po_id=?").run(body.po_id);
+        await db.prepare("UPDATE po_header SET status='received', updated_at=datetime('now','localtime') WHERE po_id=?").run(body.po_id);
         autoCompleted = true;
         if (withinTolerance && !allExact) {
-          db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
+          await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
             body.po_id, 'auto_complete_tolerance', 'system',
             `±${tolerancePct}% 허용범위 자동완료 (발주:${totalOrdered}, 입고:${totalReceived}, 범위:${Math.round(lowerBound)}~${Math.round(upperBound)})`);
         }
       } else if (anyDone) {
-        db.prepare("UPDATE po_header SET status='partial', updated_at=datetime('now','localtime') WHERE po_id=?").run(body.po_id);
+        await db.prepare("UPDATE po_header SET status='partial', updated_at=datetime('now','localtime') WHERE po_id=?").run(body.po_id);
       }
       // 입고 활동 로그
-      db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
+      await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
         body.po_id, 'receive', body.received_by || 'system',
         JSON.stringify(items.map(i => ({ code: i.product_code, qty: i.received_qty })))
       );
@@ -4666,14 +4640,14 @@ async function handleRequest(req, res) {
       if (body.shipment_id) {
         const spStmt = db.prepare("INSERT OR REPLACE INTO shipment_po_items (shipment_id, po_id, po_item_id, product_code, shipped_qty, received_qty) VALUES (?,?,?,?,?,?)");
         for (const it of items) {
-          spStmt.run(body.shipment_id, body.po_id, it.po_item_id || null, it.product_code || '', it.shipped_qty || it.received_qty, it.received_qty || 0);
+          await spStmt.run(body.shipment_id, body.po_id, it.po_item_id || null, it.product_code || '', it.shipped_qty || it.received_qty, it.received_qty || 0);
         }
       }
       return receiptId;
     });
     const receiptId = tx();
     // 알림
-    const po = db.prepare("SELECT po_number, origin, vendor_name FROM po_header WHERE po_id=?").get(body.po_id);
+    const po = await db.prepare("SELECT po_number, origin, vendor_name FROM po_header WHERE po_id=?").get(body.po_id);
     if (po) createNotification(null, 'po', `입고완료: ${po.po_number}`, `${po.vendor_name} - ${items.length}건 입고`, 'procurement');
     // 자동 전표 생성 훅 (입고→매입전표)
     if (global._hookReceiveJournal) {
@@ -4687,7 +4661,7 @@ async function handleRequest(req, res) {
   const rcvHistMatch = pathname.match(/^\/api\/procurement\/receive-history\/(\d+)$/);
   if (rcvHistMatch && method === 'GET') {
     const poId = rcvHistMatch[1];
-    const receipts = db.prepare(`
+    const receipts = await db.prepare(`
       SELECT r.receipt_id, r.receipt_date, r.received_by, r.notes AS receipt_notes,
              ri.product_code, ri.received_qty, ri.defect_qty, ri.notes AS item_notes
       FROM receipts r JOIN receipt_items ri ON r.receipt_id = ri.receipt_id
@@ -4703,19 +4677,19 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     if (!body.shipment_id || !body.items?.length) { fail(res, 400, 'shipment_id + items required'); return; }
     const stmt = db.prepare("INSERT OR REPLACE INTO shipment_po_items (shipment_id, po_id, po_item_id, product_code, product_name, shipped_qty, notes) VALUES (?,?,?,?,?,?,?)");
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       for (const it of body.items) {
-        stmt.run(body.shipment_id, it.po_id, it.po_item_id || null, it.product_code || '', it.product_name || '', it.shipped_qty || 0, it.notes || '');
+        await stmt.run(body.shipment_id, it.po_id, it.po_item_id || null, it.product_code || '', it.product_name || '', it.shipped_qty || 0, it.notes || '');
       }
     });
-    tx();
+    await tx();
     ok(res, { linked: body.items.length }); return;
   }
 
   // GET /api/procurement/shipment-items/:shipmentId — 선적에 포함된 PO 아이템
   const shipItemsMatch = pathname.match(/^\/api\/procurement\/shipment-items\/(\d+)$/);
   if (shipItemsMatch && method === 'GET') {
-    const rows = db.prepare(`
+    const rows = await db.prepare(`
       SELECT s.*, h.po_number, h.vendor_name, h.origin
       FROM shipment_po_items s
       JOIN po_header h ON h.po_id = s.po_id
@@ -4728,9 +4702,9 @@ async function handleRequest(req, res) {
 
   // GET /api/procurement/assembly — 포장작업 목록
   if (pathname === '/api/procurement/assembly' && method === 'GET') {
-    const rows = db.prepare("SELECT * FROM gift_assembly ORDER BY created_at DESC").all();
+    const rows = await db.prepare("SELECT * FROM gift_assembly ORDER BY created_at DESC").all();
     for (const r of rows) {
-      r.materials = db.prepare("SELECT * FROM gift_assembly_materials WHERE assembly_id=?").all(r.id);
+      r.materials = await db.prepare("SELECT * FROM gift_assembly_materials WHERE assembly_id=?").all(r.id);
     }
     ok(res, rows); return;
   }
@@ -4740,13 +4714,13 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     if (!body.product_code || !body.target_qty) { fail(res, 400, 'product_code + target_qty required'); return; }
     const no = 'GA-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.random()).slice(2,5);
-    const info = db.prepare("INSERT INTO gift_assembly (assembly_no, product_code, product_name, target_qty, assembly_date, worker_name, notes) VALUES (?,?,?,?,?,?,?)").run(
+    const info = await db.prepare("INSERT INTO gift_assembly (assembly_no, product_code, product_name, target_qty, assembly_date, worker_name, notes) VALUES (?,?,?,?,?,?,?)").run(
       no, body.product_code, body.product_name || '', body.target_qty, body.assembly_date || new Date().toISOString().slice(0,10), body.worker_name || '', body.notes || '');
     const asmId = info.lastInsertRowid;
     // 자재 등록
     if (body.materials?.length) {
       const stmt = db.prepare("INSERT INTO gift_assembly_materials (assembly_id, item_code, item_name, required_qty) VALUES (?,?,?,?)");
-      for (const m of body.materials) stmt.run(asmId, m.item_code, m.item_name || '', m.required_qty || 0);
+      for (const m of body.materials) await stmt.run(asmId, m.item_code, m.item_name || '', m.required_qty || 0);
     }
     ok(res, { id: asmId, assembly_no: no }); return;
   }
@@ -4756,14 +4730,14 @@ async function handleRequest(req, res) {
   if (asmCompleteMatch && method === 'POST') {
     const body = await readJSON(req);
     const id = asmCompleteMatch[1];
-    db.prepare("UPDATE gift_assembly SET status='completed', completed_qty=?, completed_date=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?").run(body.completed_qty || 0, id);
-    const asm = db.prepare("SELECT * FROM gift_assembly WHERE id=?").get(id);
+    await db.prepare("UPDATE gift_assembly SET status='completed', completed_qty=?, completed_date=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?").run(body.completed_qty || 0, id);
+    const asm = await db.prepare("SELECT * FROM gift_assembly WHERE id=?").get(id);
     if (asm) {
       createNotification(null, 'po', `포장완료: ${asm.assembly_no}`, `${asm.product_name} ${body.completed_qty}개 포장 완료`, 'procurement');
       // 생산재고 연동: gift_sets에 매칭되는 세트가 있으면 assembly 트랜잭션 기록
-      const matchedSet = db.prepare("SELECT id, set_name FROM gift_sets WHERE set_code=? OR set_name=?").get(asm.product_code, asm.product_name);
+      const matchedSet = await db.prepare("SELECT id, set_name FROM gift_sets WHERE set_code=? OR set_name=?").get(asm.product_code, asm.product_name);
       if (matchedSet) {
-        db.prepare("INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)").run(
+        await db.prepare("INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)").run(
           matchedSet.id, 'assembly', body.completed_qty || 0, asm.worker_name || '', `포장작업 연동: ${asm.assembly_no}`);
       }
     }
@@ -4774,14 +4748,14 @@ async function handleRequest(req, res) {
   if (pathname === '/api/procurement/force-complete' && method === 'POST') {
     const body = await readJSON(req);
     if (!body.po_id) { fail(res, 400, 'po_id required'); return; }
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(body.po_id);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(body.po_id);
     if (!po) { fail(res, 404, 'PO not found'); return; }
-    const poItems = db.prepare('SELECT ordered_qty, received_qty FROM po_items WHERE po_id=?').all(body.po_id);
+    const poItems = await db.prepare('SELECT ordered_qty, received_qty FROM po_items WHERE po_id=?').all(body.po_id);
     const totalOrdered = poItems.reduce((s, pi) => s + pi.ordered_qty, 0);
     const totalReceived = poItems.reduce((s, pi) => s + pi.received_qty, 0);
-    db.prepare("UPDATE po_header SET status='received', force_completed=1, force_completed_by=?, force_completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE po_id=?")
+    await db.prepare("UPDATE po_header SET status='received', force_completed=1, force_completed_by=?, force_completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE po_id=?")
       .run(body.completed_by || 'admin', body.po_id);
-    db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
+    await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
       body.po_id, 'force_complete', body.completed_by || 'admin',
       `강제완료 (발주:${totalOrdered}, 입고:${totalReceived}, 사유:${body.reason || '관리자 승인'})`);
     createNotification(null, 'po', `강제완료: ${po.po_number}`, `${po.vendor_name} - 관리자 강제완료 (${totalReceived}/${totalOrdered})`, 'procurement');
@@ -4792,20 +4766,20 @@ async function handleRequest(req, res) {
   if (pathname === '/api/procurement/confirm-material-date' && method === 'POST') {
     const body = await readJSON(req);
     if (!body.po_id || !body.material_send_date) { fail(res, 400, 'po_id + material_send_date required'); return; }
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(body.po_id);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(body.po_id);
     if (!po) { fail(res, 404, 'PO not found'); return; }
-    db.prepare("UPDATE po_header SET material_send_date=?, material_confirmed_at=datetime('now','localtime'), material_status='confirmed', updated_at=datetime('now','localtime') WHERE po_id=?")
+    await db.prepare("UPDATE po_header SET material_send_date=?, material_confirmed_at=datetime('now','localtime'), material_status='confirmed', updated_at=datetime('now','localtime') WHERE po_id=?")
       .run(body.material_send_date, body.po_id);
-    db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
+    await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
       body.po_id, 'material_date_confirmed', body.actor || 'vendor',
       `자재 출고일 확정: ${body.material_send_date}`);
     // 후공정 업체에 이메일 자동 발송
     let emailResult = null;
     const processVendor = po.process_vendor_name || '';
     if (processVendor) {
-      const vendor = db.prepare('SELECT * FROM vendors WHERE name=?').get(processVendor);
+      const vendor = await db.prepare('SELECT * FROM vendors WHERE name=?').get(processVendor);
       if (vendor && vendor.email && smtpTransporter) {
-        const items = db.prepare('SELECT * FROM po_items WHERE po_id=?').all(body.po_id);
+        const items = await db.prepare('SELECT * FROM po_items WHERE po_id=?').all(body.po_id);
         const itemsList = items.map(i => `<tr><td>${i.product_code}</td><td>${i.brand||''}</td><td>${i.ordered_qty}</td><td>${i.spec||''}</td></tr>`).join('');
         const html = `<h3>바른컴퍼니 - 자재 출고 안내</h3>
           <p>발주번호: <b>${po.po_number}</b></p>
@@ -4814,7 +4788,7 @@ async function handleRequest(req, res) {
           <p>작업 일정 확인 부탁드립니다.</p>`;
         try {
           await smtpTransporter.sendMail({ from: `바른컴퍼니 <${SMTP_FROM}>`, to: vendor.email, cc: vendor.email_cc || undefined, subject: `[바른컴퍼니] 자재 출고 안내 - ${po.po_number}`, html });
-          db.prepare("UPDATE po_header SET process_email_sent=1 WHERE po_id=?").run(body.po_id);
+          await db.prepare("UPDATE po_header SET process_email_sent=1 WHERE po_id=?").run(body.po_id);
           emailResult = { sent: true, to: vendor.email };
         } catch(e) { emailResult = { sent: false, error: e.message }; }
       }
@@ -4827,11 +4801,11 @@ async function handleRequest(req, res) {
   if (pathname === '/api/procurement/confirm-delivery-date' && method === 'POST') {
     const body = await readJSON(req);
     if (!body.po_id || !body.confirmed_date) { fail(res, 400, 'po_id + confirmed_date required'); return; }
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(body.po_id);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(body.po_id);
     if (!po) { fail(res, 404, 'PO not found'); return; }
-    db.prepare("UPDATE po_header SET vendor_confirmed_date=?, vendor_confirmed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE po_id=?")
+    await db.prepare("UPDATE po_header SET vendor_confirmed_date=?, vendor_confirmed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE po_id=?")
       .run(body.confirmed_date, body.po_id);
-    db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
+    await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
       body.po_id, 'delivery_date_confirmed', body.actor || 'vendor',
       `입고일 확정: ${body.confirmed_date}`);
     createNotification(null, 'po', `입고일 확정: ${po.po_number}`, `${po.vendor_name} → ${body.confirmed_date} 입고 확정`, 'procurement');
@@ -4846,15 +4820,15 @@ async function handleRequest(req, res) {
     }
     const poNum = 'PO-KR-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.random()).slice(2,5);
     const totalQty = body.items.reduce((s, i) => s + (i.ordered_qty || 0), 0);
-    const info = db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status, expected_date, total_qty, notes, origin, po_date, tolerance_pct) VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?)`)
+    const info = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status, expected_date, total_qty, notes, origin, po_date, tolerance_pct) VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?)`)
       .run(poNum, '후공정', body.material_vendor, body.material_vendor, body.process_vendor, 'sent', body.expected_date || '', totalQty, body.notes || '', '한국', body.tolerance_pct || 5.0);
     const poId = info.lastInsertRowid;
     const stmt = db.prepare("INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec) VALUES (?,?,?,?,?,?)");
-    for (const it of body.items) stmt.run(poId, it.product_code, it.brand || '', it.process_type || '', it.ordered_qty || 0, it.spec || '');
+    for (const it of body.items) await stmt.run(poId, it.product_code, it.brand || '', it.process_type || '', it.ordered_qty || 0, it.spec || '');
     // 거래명세서 자동 생성
-    db.prepare("INSERT INTO trade_document (po_id, po_number, vendor_name, vendor_type, items_json, status) VALUES (?,?,?,?,?,'sent')")
+    await db.prepare("INSERT INTO trade_document (po_id, po_number, vendor_name, vendor_type, items_json, status) VALUES (?,?,?,?,?,'sent')")
       .run(poId, poNum, body.material_vendor, 'material', JSON.stringify(body.items));
-    db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
+    await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
       poId, 'created', body.actor || 'system', `한국 후공정 PO 생성 (원재료:${body.material_vendor}, 후공정:${body.process_vendor})`);
     ok(res, { po_id: poId, po_number: poNum }); return;
   }
@@ -4864,9 +4838,9 @@ async function handleRequest(req, res) {
   if (asmShipMatch && method === 'POST') {
     const body = await readJSON(req);
     const id = asmShipMatch[1];
-    db.prepare(`UPDATE gift_assembly SET delivery_status=?, tracking_number=?, carrier=?, shipped_date=?, delivery_address=?, recipient_name=?, updated_at=datetime('now','localtime') WHERE id=?`)
+    await db.prepare(`UPDATE gift_assembly SET delivery_status=?, tracking_number=?, carrier=?, shipped_date=?, delivery_address=?, recipient_name=?, updated_at=datetime('now','localtime') WHERE id=?`)
       .run(body.delivery_status || 'shipped', body.tracking_number || '', body.carrier || '', body.shipped_date || new Date().toISOString().slice(0,10), body.delivery_address || '', body.recipient_name || '', id);
-    const asm = db.prepare("SELECT * FROM gift_assembly WHERE id=?").get(id);
+    const asm = await db.prepare("SELECT * FROM gift_assembly WHERE id=?").get(id);
     if (asm) createNotification(null, 'po', `출고: ${asm.assembly_no}`, `${asm.product_name} 출고 (${body.carrier||''} ${body.tracking_number||''})`, 'procurement');
     ok(res, { shipped: true }); return;
   }
@@ -4875,7 +4849,7 @@ async function handleRequest(req, res) {
   const asmDeliverMatch = pathname.match(/^\/api\/procurement\/assembly\/(\d+)\/deliver$/);
   if (asmDeliverMatch && method === 'POST') {
     const id = asmDeliverMatch[1];
-    db.prepare("UPDATE gift_assembly SET delivery_status='delivered', delivered_date=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?").run(id);
+    await db.prepare("UPDATE gift_assembly SET delivery_status='delivered', delivered_date=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?").run(id);
     ok(res, { delivered: true }); return;
   }
 
@@ -4883,25 +4857,25 @@ async function handleRequest(req, res) {
   const koreaDetailMatch = pathname.match(/^\/api\/procurement\/korea-detail\/(\d+)$/);
   if (koreaDetailMatch && method === 'GET') {
     const poId = koreaDetailMatch[1];
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(poId);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(poId);
     if (!po) { fail(res, 404, 'PO not found'); return; }
-    const items = db.prepare('SELECT * FROM po_items WHERE po_id=?').all(poId);
+    const items = await db.prepare('SELECT * FROM po_items WHERE po_id=?').all(poId);
     const totalOrdered = items.reduce((s, i) => s + i.ordered_qty, 0);
     const totalReceived = items.reduce((s, i) => s + i.received_qty, 0);
     const tolerancePct = po.tolerance_pct || 5;
     const lowerBound = Math.round(totalOrdered * (1 - tolerancePct / 100));
     const upperBound = Math.round(totalOrdered * (1 + tolerancePct / 100));
     const needsForceApprove = totalReceived > 0 && totalReceived < lowerBound && po.status !== 'received';
-    const tradeDocs = db.prepare('SELECT * FROM trade_document WHERE po_id=? ORDER BY created_at DESC').all(poId);
-    const logs = db.prepare('SELECT * FROM po_activity_log WHERE po_id=? ORDER BY id DESC LIMIT 20').all(poId);
+    const tradeDocs = await db.prepare('SELECT * FROM trade_document WHERE po_id=? ORDER BY created_at DESC').all(poId);
+    const logs = await db.prepare('SELECT * FROM po_activity_log WHERE po_id=? ORDER BY id DESC LIMIT 20').all(poId);
     ok(res, { po, items, totalOrdered, totalReceived, tolerancePct, lowerBound, upperBound, needsForceApprove, tradeDocs, logs }); return;
   }
 
   // GET /api/procurement/china-shipments — 중국 합선적 현황 (여러 PO 합선적)
   if (pathname === '/api/procurement/china-shipments' && method === 'GET') {
-    const shipments = db.prepare(`SELECT * FROM china_shipment_log ORDER BY created_at DESC LIMIT 50`).all();
+    const shipments = await db.prepare(`SELECT * FROM china_shipment_log ORDER BY created_at DESC LIMIT 50`).all();
     for (const s of shipments) {
-      s.po_items = db.prepare(`SELECT sp.*, h.po_number, h.vendor_name, h.order_type FROM shipment_po_items sp JOIN po_header h ON h.po_id=sp.po_id WHERE sp.shipment_id=?`).all(s.id);
+      s.po_items = await db.prepare(`SELECT sp.*, h.po_number, h.vendor_name, h.order_type FROM shipment_po_items sp JOIN po_header h ON h.po_id=sp.po_id WHERE sp.shipment_id=?`).all(s.id);
     }
     ok(res, shipments); return;
   }
@@ -4911,16 +4885,16 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     if (!body.shipment_id || !body.po_items?.length) { fail(res, 400, 'shipment_id + po_items required'); return; }
     const stmt = db.prepare("INSERT OR REPLACE INTO shipment_po_items (shipment_id, po_id, po_item_id, product_code, product_name, shipped_qty, notes) VALUES (?,?,?,?,?,?,?)");
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       for (const it of body.po_items) {
-        stmt.run(body.shipment_id, it.po_id, it.po_item_id || null, it.product_code || '', it.product_name || '', it.shipped_qty || 0, it.notes || '');
+        await stmt.run(body.shipment_id, it.po_id, it.po_item_id || null, it.product_code || '', it.product_name || '', it.shipped_qty || 0, it.notes || '');
       }
     });
-    tx();
+    await tx();
     // 연결된 PO들 선적 상태 업데이트
     const poIds = [...new Set(body.po_items.map(i => i.po_id))];
     for (const pid of poIds) {
-      db.prepare("UPDATE po_header SET status='shipped', process_status='shipped', updated_at=datetime('now','localtime') WHERE po_id=? AND status NOT IN ('received','cancelled')").run(pid);
+      await db.prepare("UPDATE po_header SET status='shipped', process_status='shipped', updated_at=datetime('now','localtime') WHERE po_id=? AND status NOT IN ('received','cancelled')").run(pid);
     }
     ok(res, { linked: body.po_items.length, shipment_id: body.shipment_id }); return;
   }
@@ -4938,7 +4912,7 @@ async function handleRequest(req, res) {
       '더기프트': ['draft','sent','partial','received','포장','출고']
     };
     if (origin && stages[origin]) {
-      const pos = db.prepare(`
+      const pos = await db.prepare(`
         SELECT po_id, po_number, vendor_name, status, material_status, process_status,
                expected_date, po_date, total_qty, notes, process_step,
                material_vendor_name, process_vendor_name, material_send_date,
@@ -4973,7 +4947,7 @@ async function handleRequest(req, res) {
           else po.stage = 'draft';
         }
         // 입고율 + 강제완료 필요 여부
-        const items = db.prepare("SELECT COALESCE(SUM(ordered_qty),0) AS ord, COALESCE(SUM(received_qty),0) AS rcv FROM po_items WHERE po_id=?").get(po.po_id);
+        const items = await db.prepare("SELECT COALESCE(SUM(ordered_qty),0) AS ord, COALESCE(SUM(received_qty),0) AS rcv FROM po_items WHERE po_id=?").get(po.po_id);
         po.progress = items.ord > 0 ? Math.round(items.rcv / items.ord * 100) : 0;
         po.total_ordered = items.ord;
         po.total_received = items.rcv;
@@ -4990,7 +4964,7 @@ async function handleRequest(req, res) {
   if (pathname === '/api/procurement/update-stage' && method === 'POST') {
     const body = await readJSON(req);
     if (!body.po_id || !body.stage) { fail(res, 400, 'po_id + stage required'); return; }
-    const po = db.prepare("SELECT * FROM po_header WHERE po_id=?").get(body.po_id);
+    const po = await db.prepare("SELECT * FROM po_header WHERE po_id=?").get(body.po_id);
     if (!po) { fail(res, 404, 'PO not found'); return; }
     const updates = [];
     const params = [];
@@ -5016,9 +4990,9 @@ async function handleRequest(req, res) {
     }
     updates.push("updated_at=datetime('now','localtime')");
     params.push(body.po_id);
-    db.prepare(`UPDATE po_header SET ${updates.join(',')} WHERE po_id=?`).run(...params);
+    await db.prepare(`UPDATE po_header SET ${updates.join(',')} WHERE po_id=?`).run(...params);
     // Activity log
-    db.prepare("INSERT INTO po_activity_log (po_id, po_number, action, actor, from_status, to_status, details) VALUES (?,?,?,?,?,?,?)").run(
+    await db.prepare("INSERT INTO po_activity_log (po_id, po_number, action, actor, from_status, to_status, details) VALUES (?,?,?,?,?,?,?)").run(
       body.po_id, po.po_number, 'stage_change', body.actor || 'system', po.status, body.stage, body.notes || '');
     ok(res, { updated: true, stage: body.stage }); return;
   }
@@ -5041,22 +5015,22 @@ async function handleRequest(req, res) {
     // vendor_name 파라미터가 있으면 이름으로 정확 매칭, 없으면 이메일로 조회
     let vendor;
     if (vendorNameParam) {
-      vendor = db.prepare('SELECT * FROM vendors WHERE name = ? AND email = ?').get(vendorNameParam, email);
+      vendor = await db.prepare('SELECT * FROM vendors WHERE name = ? AND email = ?').get(vendorNameParam, email);
     }
     if (!vendor) {
-      vendor = db.prepare('SELECT * FROM vendors WHERE email = ?').get(email);
+      vendor = await db.prepare('SELECT * FROM vendors WHERE email = ?').get(email);
     }
     if (!vendor) { fail(res, 404, '등록된 업체가 아닙니다'); return; }
 
     const enToKo = { 'draft':'대기', 'sent':'발송', 'confirmed':'확인', 'partial':'수령중', 'received':'완료', 'cancelled':'취소', 'os_pending':'OS등록대기', 'os_registered':'OS검증대기' };
     const materialStatusKo = { 'sent':'발주완료', 'confirmed':'확인', 'scheduled':'출고예정', 'shipped':'출고완료' };
     const processStatusKo = { 'waiting':'대기', 'sent':'발주완료', 'confirmed':'확인', 'working':'작업중', 'completed':'완료' };
-    const rows = db.prepare('SELECT * FROM po_header WHERE vendor_name = ? ORDER BY po_date DESC, po_id DESC').all(vendor.name);
+    const rows = await db.prepare('SELECT * FROM po_header WHERE vendor_name = ? ORDER BY po_date DESC, po_id DESC').all(vendor.name);
     for (const r of rows) {
       r.status = enToKo[r.status] || r.status;
       r.material_status_label = materialStatusKo[r.material_status] || r.material_status;
       r.process_status_label = processStatusKo[r.process_status] || r.process_status;
-      r.items = db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(r.po_id);
+      r.items = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(r.po_id);
       // product_info 데이터 보강 (원자재코드, 원재료용지명, 절, 조판, 후공정체인)
       const pInfo = getProductInfo();
       const postCols = ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크'];
@@ -5110,10 +5084,10 @@ async function handleRequest(req, res) {
     if (!auth) { fail(res, 403, '인증 실패'); return; }
     const email = auth.email;
     // 이메일로 등록된 업체 확인 (같은 이메일로 여러 업체 가능)
-    const vendorsWithEmail = db.prepare('SELECT * FROM vendors WHERE email = ?').all(email);
+    const vendorsWithEmail = await db.prepare('SELECT * FROM vendors WHERE email = ?').all(email);
     if (!vendorsWithEmail.length) { fail(res, 404, '등록된 업체가 아닙니다'); return; }
 
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(poId);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(poId);
     if (!po) { fail(res, 404, 'PO not found'); return; }
     // PO의 vendor_name과 매칭되는 vendor 찾기
     const vendor = vendorsWithEmail.find(v => v.name === po.vendor_name || v.name.startsWith(po.vendor_name) || po.vendor_name.startsWith(v.name.slice(0,2)));
@@ -5129,13 +5103,13 @@ async function handleRequest(req, res) {
     if (action === 'confirm' && currentStatus === '발송') {
       // 업체가 발주 확인
       const beforeConfirm = { status: po.status, mat: po.material_status, proc: po.process_status };
-      db.prepare(`UPDATE po_header SET status = 'confirmed', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(poId);
+      await db.prepare(`UPDATE po_header SET status = 'confirmed', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(poId);
       // 파이프라인 서브상태 업데이트 (vendor.type 기준)
       if (vendor.type === '후공정') {
-        db.prepare('UPDATE po_header SET process_status=? WHERE po_id=?').run('confirmed', poId);
+        await db.prepare('UPDATE po_header SET process_status=? WHERE po_id=?').run('confirmed', poId);
       } else {
         // 원재료 또는 타입 미설정
-        db.prepare('UPDATE po_header SET material_status=? WHERE po_id=?').run('confirmed', poId);
+        await db.prepare('UPDATE po_header SET material_status=? WHERE po_id=?').run('confirmed', poId);
       }
       logPOActivity(poId, 'vendor_confirm', {
         actor: vendor.name, actor_type: vendor.type,
@@ -5157,7 +5131,7 @@ async function handleRequest(req, res) {
 
         if (nextStepInfo) {
           // 다음 공정 단계가 있음 → 다음 step PO 자동 생성+발송
-          db.prepare(`UPDATE po_header SET status = '확인', process_status='step_done', shipped_at=datetime('now','localtime'), updated_at = datetime('now','localtime') WHERE po_id = ?`).run(poId);
+          await db.prepare(`UPDATE po_header SET status = '확인', process_status='step_done', shipped_at=datetime('now','localtime'), updated_at = datetime('now','localtime') WHERE po_id = ?`).run(poId);
           logPOActivity(poId, 'vendor_ship', {
             actor: vendor.name, actor_type: vendor.type,
             from_status: po.status, to_status: '확인',
@@ -5167,12 +5141,12 @@ async function handleRequest(req, res) {
           });
 
           // 다음 step PO가 이미 대기 중인지 확인
-          const nextPO = db.prepare(`SELECT * FROM po_header WHERE parent_po_id = ? AND process_step = ? AND po_type = '후공정'`).get(po.parent_po_id || poId, currentStep + 1);
+          const nextPO = await db.prepare(`SELECT * FROM po_header WHERE parent_po_id = ? AND process_step = ? AND po_type = '후공정'`).get(po.parent_po_id || poId, currentStep + 1);
           if (nextPO) {
-            const nextVendor = db.prepare('SELECT * FROM vendors WHERE name = ?').get(nextPO.vendor_name);
+            const nextVendor = await db.prepare('SELECT * FROM vendors WHERE name = ?').get(nextPO.vendor_name);
             if (nextVendor && nextVendor.email) {
-              const nextItems = db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(nextPO.po_id);
-              db.prepare(`UPDATE po_header SET status = 'sent', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(nextPO.po_id);
+              const nextItems = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(nextPO.po_id);
+              await db.prepare(`UPDATE po_header SET status = 'sent', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(nextPO.po_id);
               emailResult = await sendPOEmail(nextPO, nextItems, nextVendor.email, nextVendor.name, true, nextVendor.email_cc);
               console.log(`공정체인 Step ${currentStep}→${currentStep+1}: ${nextPO.po_number} → ${nextVendor.name}`);
             }
@@ -5182,7 +5156,7 @@ async function handleRequest(req, res) {
         }
 
         // 마지막 공정 → OS등록대기 상태로, process_status = completed
-        db.prepare(`UPDATE po_header SET status = 'os_pending', process_status='completed', shipped_at=datetime('now','localtime'), updated_at = datetime('now','localtime') WHERE po_id = ?`).run(poId);
+        await db.prepare(`UPDATE po_header SET status = 'os_pending', process_status='completed', shipped_at=datetime('now','localtime'), updated_at = datetime('now','localtime') WHERE po_id = ?`).run(poId);
         logPOActivity(poId, 'vendor_ship', {
           actor: vendor.name, actor_type: vendor.type,
           from_status: po.status, to_status: 'os_pending',
@@ -5195,7 +5169,7 @@ async function handleRequest(req, res) {
 
       } else {
         // 원재료 업체 발송 → material_status = shipped, 같은 날짜 후공정 PO 체인 트리거
-        db.prepare(`UPDATE po_header SET material_status='shipped', shipped_at=datetime('now','localtime'), updated_at = datetime('now','localtime') WHERE po_id = ?`).run(poId);
+        await db.prepare(`UPDATE po_header SET material_status='shipped', shipped_at=datetime('now','localtime'), updated_at = datetime('now','localtime') WHERE po_id = ?`).run(poId);
         logPOActivity(poId, 'vendor_ship', {
           actor: vendor.name, actor_type: vendor.type,
           from_status: po.status, to_status: po.status,
@@ -5204,13 +5178,13 @@ async function handleRequest(req, res) {
           details: `${vendor.name} 원재료 출고`
         });
         // 후공정 PO 찾기 (같은 날짜, 대기 상태, 후공정 타입)
-        const postPOs = db.prepare(`SELECT * FROM po_header WHERE po_date = ? AND status IN ('draft','sent') AND po_type = '후공정'`).all(po.po_date);
+        const postPOs = await db.prepare(`SELECT * FROM po_header WHERE po_date = ? AND status IN ('draft','sent') AND po_type = '후공정'`).all(po.po_date);
         for (const pp of postPOs) {
-          const postVendor = db.prepare('SELECT * FROM vendors WHERE name = ?').get(pp.vendor_name);
+          const postVendor = await db.prepare('SELECT * FROM vendors WHERE name = ?').get(pp.vendor_name);
           if (postVendor && postVendor.email) {
-            const ppItems = db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(pp.po_id);
+            const ppItems = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(pp.po_id);
             // 후공정 PO를 발송 상태로
-            db.prepare(`UPDATE po_header SET status = 'sent', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(pp.po_id);
+            await db.prepare(`UPDATE po_header SET status = 'sent', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(pp.po_id);
             emailResult = await sendPOEmail(pp, ppItems, postVendor.email, postVendor.name, true, postVendor.email_cc);
             console.log(`원재료→후공정 체인: ${pp.po_number} → ${postVendor.name} (${postVendor.email})`);
           }
@@ -5231,10 +5205,10 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const auth = extractVendorAuth(body);
     if (!auth) { fail(res, 403, '인증 실패'); return; }
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(poId);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(poId);
     if (!po) { fail(res, 404, 'PO 없음'); return; }
     // shipped_at 초기화 (발송 처리 전 상태로)
-    db.prepare(`UPDATE po_header SET shipped_at='', updated_at=datetime('now','localtime') WHERE po_id=?`).run(poId);
+    await db.prepare(`UPDATE po_header SET shipped_at='', updated_at=datetime('now','localtime') WHERE po_id=?`).run(poId);
     logPOActivity(poId, 'reset_ship', { actor_type: 'vendor', details: '발송처리 수정 요청' });
     ok(res, { po_id: poId });
     return;
@@ -5244,15 +5218,15 @@ async function handleRequest(req, res) {
   const reorderMatch = pathname.match(/^\/api\/po\/(\d+)\/reorder$/);
   if (reorderMatch && method === 'POST') {
     const oldPoId = parseInt(reorderMatch[1]);
-    const oldPO = db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(oldPoId);
+    const oldPO = await db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(oldPoId);
     if (!oldPO) { fail(res, 404, 'PO not found'); return; }
     if (oldPO.status !== 'cancelled') { fail(res, 400, '취소된 발주만 재발주 가능합니다'); return; }
 
-    const oldItems = db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(oldPoId);
+    const oldItems = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(oldPoId);
     const today = new Date();
     const y = today.getFullYear(), m = String(today.getMonth()+1).padStart(2,'0'), d = String(today.getDate()).padStart(2,'0');
     const dateTag = `${y}${m}${d}`;
-    const todayCount = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE po_number LIKE ?`).get(`PO-${dateTag}-%`).cnt;
+    const todayCount = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE po_number LIKE ?`).get(`PO-${dateTag}-%`)).cnt;
     const poNumber = `PO-${dateTag}-${String(todayCount+1).padStart(3,'0')}`;
 
     // 새 PO 생성
@@ -5266,14 +5240,14 @@ async function handleRequest(req, res) {
     // 품목 복사
     const insItem = db.prepare('INSERT INTO po_items (po_id, product_code, brand, ordered_qty, received_qty, process_type, spec) VALUES (?,?,?,?,0,?,?)');
     for (const it of oldItems) {
-      insItem.run(newPoId, it.product_code, it.brand || '', it.ordered_qty || 0, it.process_type || '', it.spec || '');
+      await insItem.run(newPoId, it.product_code, it.brand || '', it.ordered_qty || 0, it.process_type || '', it.spec || '');
     }
 
     // 이메일 발송
     let emailSent = false;
-    const newPO = db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(newPoId);
-    const newItems = db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(newPoId);
-    const vendor = db.prepare('SELECT * FROM vendors WHERE name = ?').get(newPO.vendor_name);
+    const newPO = await db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(newPoId);
+    const newItems = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(newPoId);
+    const vendor = await db.prepare('SELECT * FROM vendors WHERE name = ?').get(newPO.vendor_name);
     if (vendor && vendor.email) {
       try {
         const isPost = vendor.type === '후공정';
@@ -5305,9 +5279,9 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const { po_id } = body;
     if (!po_id) { fail(res, 400, 'po_id 필수'); return; }
-    db.prepare("UPDATE po_header SET material_status='shipped' WHERE po_id=?").run(po_id);
+    await db.prepare("UPDATE po_header SET material_status='shipped' WHERE po_id=?").run(po_id);
     // 납품 스케줄 상태도 업데이트
-    db.prepare("UPDATE vendor_shipment_schedule SET status='shipped' WHERE po_id=?").run(po_id);
+    await db.prepare("UPDATE vendor_shipment_schedule SET status='shipped' WHERE po_id=?").run(po_id);
     logPOActivity(po_id, 'material_shipped', { actor_type: 'material', to_mat: 'shipped', details: '원재료 출고 완료' });
     ok(res, { po_id, material_status: 'shipped' });
     return;
@@ -5318,20 +5292,20 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const { po_id, ship_date, ship_time, post_vendor_name } = body;
     if (!po_id || !ship_date) { fail(res, 400, '필수 항목 누락'); return; }
-    const po = db.prepare('SELECT po_number, vendor_name FROM po_header WHERE po_id=?').get(po_id);
+    const po = await db.prepare('SELECT po_number, vendor_name FROM po_header WHERE po_id=?').get(po_id);
     if (!po) { fail(res, 404, 'PO 없음'); return; }
-    const postVendor = db.prepare('SELECT email FROM vendors WHERE name=?').get(post_vendor_name || '');
+    const postVendor = await db.prepare('SELECT email FROM vendors WHERE name=?').get(post_vendor_name || '');
     const postEmail = postVendor ? postVendor.email : '';
-    const existing = db.prepare('SELECT id FROM vendor_shipment_schedule WHERE po_id=?').get(po_id);
+    const existing = await db.prepare('SELECT id FROM vendor_shipment_schedule WHERE po_id=?').get(po_id);
     if (existing) {
-      db.prepare(`UPDATE vendor_shipment_schedule SET ship_date=?, ship_time=?, post_vendor_name=?, post_vendor_email=?, updated_at=datetime('now','localtime') WHERE po_id=?`)
+      await db.prepare(`UPDATE vendor_shipment_schedule SET ship_date=?, ship_time=?, post_vendor_name=?, post_vendor_email=?, updated_at=datetime('now','localtime') WHERE po_id=?`)
         .run(ship_date, ship_time || 'AM', post_vendor_name || '', postEmail, po_id);
     } else {
-      db.prepare(`INSERT INTO vendor_shipment_schedule (po_id, po_number, vendor_name, ship_date, ship_time, post_vendor_name, post_vendor_email) VALUES (?,?,?,?,?,?,?)`)
+      await db.prepare(`INSERT INTO vendor_shipment_schedule (po_id, po_number, vendor_name, ship_date, ship_time, post_vendor_name, post_vendor_email) VALUES (?,?,?,?,?,?,?)`)
         .run(po_id, po.po_number, po.vendor_name, ship_date, ship_time || 'AM', post_vendor_name || '', postEmail);
     }
     // 출하 일정 등록 시 원재료 파이프라인 상태를 '출고예정'으로 업데이트
-    db.prepare("UPDATE po_header SET material_status='scheduled' WHERE po_id=?").run(po_id);
+    await db.prepare("UPDATE po_header SET material_status='scheduled' WHERE po_id=?").run(po_id);
     logPOActivity(po_id, 'shipment_scheduled', {
       actor: po.vendor_name, actor_type: 'material',
       to_mat: 'scheduled',
@@ -5349,9 +5323,9 @@ async function handleRequest(req, res) {
     if (body.access && !authItem) { fail(res, 403, '인증 실패'); return; }
     if (!po_id || !ship_date) { fail(res, 400, '필수 항목 누락'); return; }
     if (item_id !== undefined && item_id !== null) {
-      db.prepare('UPDATE po_items SET ship_date=? WHERE po_id=? AND item_id=?').run(ship_date, po_id, item_id);
+      await db.prepare('UPDATE po_items SET ship_date=? WHERE po_id=? AND item_id=?').run(ship_date, po_id, item_id);
     } else {
-      db.prepare('UPDATE po_items SET ship_date=? WHERE po_id=?').run(ship_date, po_id);
+      await db.prepare('UPDATE po_items SET ship_date=? WHERE po_id=?').run(ship_date, po_id);
     }
     ok(res, { saved: true });
     return;
@@ -5365,8 +5339,8 @@ async function handleRequest(req, res) {
     if (body.access && !authDates) { fail(res, 403, '인증 실패'); return; }
     if (!po_id || !Array.isArray(dates)) { fail(res, 400, '필수 항목 누락'); return; }
     const stmt = db.prepare('UPDATE po_items SET ship_date=? WHERE po_id=? AND item_id=?');
-    const tx = db.transaction(() => { for (const d of dates) stmt.run(d.ship_date, po_id, d.item_id); });
-    tx();
+    const tx = db.transaction(async () => { for (const d of dates) await stmt.run(d.ship_date, po_id, d.item_id); });
+    await tx();
     ok(res, { saved: dates.length });
     return;
   }
@@ -5375,10 +5349,10 @@ async function handleRequest(req, res) {
   if (pathname === '/api/vendor-portal/shipment-schedule' && method === 'GET') {
     const poId = parsed.searchParams.get('po_id');
     if (poId) {
-      const schedule = db.prepare('SELECT * FROM vendor_shipment_schedule WHERE po_id=?').get(poId);
+      const schedule = await db.prepare('SELECT * FROM vendor_shipment_schedule WHERE po_id=?').get(poId);
       ok(res, schedule || null);
     } else {
-      const all = db.prepare('SELECT * FROM vendor_shipment_schedule ORDER BY ship_date').all();
+      const all = await db.prepare('SELECT * FROM vendor_shipment_schedule ORDER BY ship_date').all();
       ok(res, all);
     }
     return;
@@ -5403,7 +5377,7 @@ async function handleRequest(req, res) {
       { process_type: '실크', default_days: 3 },
     ];
 
-    const saved = db.prepare('SELECT * FROM process_lead_time WHERE vendor_name=?').all(vendorName);
+    const saved = await db.prepare('SELECT * FROM process_lead_time WHERE vendor_name=?').all(vendorName);
     const savedMap = {};
     for (const row of saved) savedMap[row.process_type] = row;
 
@@ -5417,7 +5391,7 @@ async function handleRequest(req, res) {
       };
     });
     // 수정 이력 (최근 20건)
-    const history = db.prepare('SELECT process_type, old_days, new_days, changed_at FROM lead_time_history WHERE vendor_name=? ORDER BY changed_at DESC LIMIT 20').all(vendorName);
+    const history = await db.prepare('SELECT process_type, old_days, new_days, changed_at FROM lead_time_history WHERE vendor_name=? ORDER BY changed_at DESC LIMIT 20').all(vendorName);
     ok(res, { rows: result, history });
     return;
   }
@@ -5443,22 +5417,22 @@ async function handleRequest(req, res) {
 
     // 변경 전 값 조회 (이력 기록용)
     const prevMap = {};
-    const prevRows = db.prepare('SELECT process_type, adjusted_days, default_days FROM process_lead_time WHERE vendor_name=?').all(vendor_name);
+    const prevRows = await db.prepare('SELECT process_type, adjusted_days, default_days FROM process_lead_time WHERE vendor_name=?').all(vendor_name);
     for (const r of prevRows) prevMap[r.process_type] = r.adjusted_days ?? r.default_days;
 
     const logStmt = db.prepare('INSERT INTO lead_time_history (vendor_name, process_type, old_days, new_days) VALUES (?,?,?,?)');
 
-    const upsertAll = db.transaction((items) => {
+    const upsertAll = db.transaction(async (items) => {
       for (const lt of items) {
         const oldVal = prevMap[lt.process_type] ?? lt.default_days;
         const newVal = lt.adjusted_days ?? lt.default_days;
         if (oldVal !== newVal) {
-          logStmt.run(vendor_name, lt.process_type, oldVal, newVal);
+          await logStmt.run(vendor_name, lt.process_type, oldVal, newVal);
         }
-        upsert.run(vendor_name, lt.process_type, lt.default_days ?? 1, lt.adjusted_days ?? null, lt.adjusted_reason || '');
+        await upsert.run(vendor_name, lt.process_type, lt.default_days ?? 1, lt.adjusted_days ?? null, lt.adjusted_reason || '');
       }
     });
-    upsertAll(lead_times);
+    await upsertAll(lead_times);
 
     console.log(`[vendor-portal/lead-time] ${vendor_name} (${email}) — ${lead_times.length}개 공정 리드타임 저장`);
     ok(res, { ok: true, vendor_name, saved: lead_times.length });
@@ -5471,7 +5445,7 @@ async function handleRequest(req, res) {
     const qsTd = Object.fromEntries(parsed.searchParams);
     const authTd = extractVendorAuth(qsTd);
     if (!authTd) { fail(res, 403, '인증 실패'); return; }
-    const doc = db.prepare('SELECT * FROM trade_document WHERE po_id=? ORDER BY id DESC LIMIT 1').get(poId);
+    const doc = await db.prepare('SELECT * FROM trade_document WHERE po_id=? ORDER BY id DESC LIMIT 1').get(poId);
     if (!doc) { ok(res, null); return; }
     doc.items = JSON.parse(doc.items_json || '[]');
     doc.vendor_modified = doc.vendor_modified_json ? JSON.parse(doc.vendor_modified_json) : null;
@@ -5486,7 +5460,7 @@ async function handleRequest(req, res) {
     const authUtd = extractVendorAuth(body);
     if (!authUtd) { fail(res, 403, '인증 실패'); return; }
     if (!doc_id) { fail(res, 400, 'doc_id 필수'); return; }
-    const doc = db.prepare('SELECT * FROM trade_document WHERE id=?').get(doc_id);
+    const doc = await db.prepare('SELECT * FROM trade_document WHERE id=?').get(doc_id);
     if (!doc) { fail(res, 404, '문서 없음'); return; }
 
     const originalItems = JSON.parse(doc.items_json || '[]');
@@ -5501,7 +5475,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    db.prepare(`UPDATE trade_document SET vendor_modified_json=?, vendor_memo=?, price_diff=?, status='vendor_confirmed', confirmed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?`)
+    await db.prepare(`UPDATE trade_document SET vendor_modified_json=?, vendor_memo=?, price_diff=?, status='vendor_confirmed', confirmed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?`)
       .run(JSON.stringify(modifiedItems), memo || '', hasDiff ? 1 : 0, doc_id);
 
     logPOActivity(doc.po_id, 'trade_doc_updated', {
@@ -5521,10 +5495,10 @@ async function handleRequest(req, res) {
   if (pathname === '/api/process-lead-time' && method === 'GET') {
     const vn = parsed.searchParams.get('vendor_name');
     if (vn) {
-      const rows = db.prepare('SELECT * FROM process_lead_time WHERE vendor_name=?').all(vn);
+      const rows = await db.prepare('SELECT * FROM process_lead_time WHERE vendor_name=?').all(vn);
       ok(res, rows);
     } else {
-      const rows = db.prepare('SELECT * FROM process_lead_time ORDER BY vendor_name, process_type').all();
+      const rows = await db.prepare('SELECT * FROM process_lead_time ORDER BY vendor_name, process_type').all();
       ok(res, rows);
     }
     return;
@@ -5560,7 +5534,7 @@ async function handleRequest(req, res) {
     if (vendor) { sql += ' AND vendor_name=?'; params.push(vendor); }
     if (process) { sql += ' AND process_type=?'; params.push(process); }
     sql += ' ORDER BY process_type, spec_condition, unit_price';
-    ok(res, db.prepare(sql).all(...params));
+    ok(res, await db.prepare(sql).all(...params));
     return;
   }
 
@@ -5590,7 +5564,7 @@ async function handleRequest(req, res) {
     if (month) { sql += ' AND month=?'; params.push(month); }
     if (process) { sql += ' AND process_type=?'; params.push(process); }
     sql += ' ORDER BY month DESC, date DESC LIMIT 500';
-    ok(res, db.prepare(sql).all(...params));
+    ok(res, await db.prepare(sql).all(...params));
     return;
   }
 
@@ -5603,7 +5577,7 @@ async function handleRequest(req, res) {
     if (product) { sql += ' AND product_code=?'; params.push(product); }
     if (vendor) { sql += ' AND vendor_name=?'; params.push(vendor); }
     sql += ' ORDER BY product_code, process_type';
-    ok(res, db.prepare(sql).all(...params));
+    ok(res, await db.prepare(sql).all(...params));
     return;
   }
 
@@ -5615,10 +5589,10 @@ async function handleRequest(req, res) {
     const vendorParam = isAll ? [] : [vendor];
 
     // 월별 총액
-    const monthly = db.prepare(`SELECT month, SUM(amount) as total, COUNT(*) as cnt FROM post_process_history WHERE ${whereVendor} GROUP BY month ORDER BY month`).all(...vendorParam);
+    const monthly = await db.prepare(`SELECT month, SUM(amount) as total, COUNT(*) as cnt FROM post_process_history WHERE ${whereVendor} GROUP BY month ORDER BY month`).all(...vendorParam);
 
     // 공정별 총액
-    const byProcess = db.prepare(`SELECT process_type, SUM(amount) as total, COUNT(*) as cnt, AVG(unit_price) as avg_price FROM post_process_history WHERE ${whereVendor} AND unit_price>0 GROUP BY process_type ORDER BY total DESC`).all(...vendorParam);
+    const byProcess = await db.prepare(`SELECT process_type, SUM(amount) as total, COUNT(*) as cnt, AVG(unit_price) as avg_price FROM post_process_history WHERE ${whereVendor} AND unit_price>0 GROUP BY process_type ORDER BY total DESC`).all(...vendorParam);
 
     // 단가 변동 감지 (같은 제품+공정인데 단가가 다른 경우)
     const priceChanges = db.prepare(`
@@ -5722,7 +5696,7 @@ async function handleRequest(req, res) {
 
     // vendor_gap: 동일 공정에서 업체간 단가 차이 20% 이상
     if (isAll) {
-      const vendorGapRows = db.prepare(`
+      const vendorGapRows = await db.prepare(`
         SELECT process_type, vendor_name, AVG(unit_price) as avg_price
         FROM post_process_history
         WHERE unit_price > 0
@@ -5766,7 +5740,7 @@ async function handleRequest(req, res) {
     if (!productCode) { fail(res, 400, 'product_code 필수'); return; }
 
     // 이 제품의 후공정 이력에서 가장 최근 단가 기반 예상
-    const mapping = db.prepare(
+    const mapping = await db.prepare(
       'SELECT * FROM product_process_map WHERE product_code=? ORDER BY process_type'
     ).all(productCode);
 
@@ -5797,9 +5771,9 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const { po_id, vendor_name, vendor_type, items } = body;
     if (!po_id) { fail(res, 400, 'po_id 필수'); return; }
-    const po = db.prepare('SELECT po_number FROM po_header WHERE po_id=?').get(po_id);
+    const po = await db.prepare('SELECT po_number FROM po_header WHERE po_id=?').get(po_id);
     if (!po) { fail(res, 404, 'PO 없음'); return; }
-    const r = db.prepare(`INSERT INTO trade_document (po_id, po_number, vendor_name, vendor_type, items_json, status) VALUES (?,?,?,?,?,'sent')`)
+    const r = await db.prepare(`INSERT INTO trade_document (po_id, po_number, vendor_name, vendor_type, items_json, status) VALUES (?,?,?,?,?,'sent')`)
       .run(po_id, po.po_number, vendor_name || '', vendor_type || 'material', JSON.stringify(items || []));
     ok(res, { id: r.lastInsertRowid });
     return;
@@ -5814,7 +5788,7 @@ async function handleRequest(req, res) {
     if (parsed.searchParams.get('vendor_name')) { q += ' AND vendor_name=?'; args.push(parsed.searchParams.get('vendor_name')); }
     if (parsed.searchParams.get('po_id')) { q += ' AND po_id=?'; args.push(parsed.searchParams.get('po_id')); }
     q += ' ORDER BY created_at DESC';
-    ok(res, db.prepare(q).all(...args));
+    ok(res, await db.prepare(q).all(...args));
     return;
   }
 
@@ -5822,7 +5796,7 @@ async function handleRequest(req, res) {
   const tradeDocPatch = pathname.match(/^\/api\/trade-document\/(\d+)$/);
   if (tradeDocPatch && method === 'PATCH') {
     const docId = tradeDocPatch[1];
-    const doc = db.prepare('SELECT * FROM trade_document WHERE id=?').get(docId);
+    const doc = await db.prepare('SELECT * FROM trade_document WHERE id=?').get(docId);
     if (!doc) { fail(res, 404, '문서 없음'); return; }
     const body = await readJSON(req);
     const sets = [];
@@ -5841,14 +5815,14 @@ async function handleRequest(req, res) {
     if (sets.length === 0) { fail(res, 400, '수정 항목 없음'); return; }
     sets.push("updated_at=datetime('now','localtime')");
     vals.push(docId);
-    db.prepare(`UPDATE trade_document SET ${sets.join(',')} WHERE id=?`).run(...vals);
+    await db.prepare(`UPDATE trade_document SET ${sets.join(',')} WHERE id=?`).run(...vals);
     ok(res, { id: parseInt(docId) });
     return;
   }
 
   // GET /api/trade-document/review — 검토 대기 목록 (vendor_confirmed)
   if (pathname === '/api/trade-document/review' && method === 'GET') {
-    const docs = db.prepare(`SELECT * FROM trade_document WHERE status='vendor_confirmed' ORDER BY confirmed_at DESC`).all();
+    const docs = await db.prepare(`SELECT * FROM trade_document WHERE status='vendor_confirmed' ORDER BY confirmed_at DESC`).all();
     docs.forEach(d => {
       d.items = JSON.parse(d.items_json || '[]');
       d.vendor_modified = d.vendor_modified_json ? JSON.parse(d.vendor_modified_json) : null;
@@ -5861,7 +5835,7 @@ async function handleRequest(req, res) {
   const approveMatch = pathname.match(/^\/api\/trade-document\/(\d+)\/approve$/);
   if (approveMatch && method === 'POST') {
     const docId = parseInt(approveMatch[1]);
-    const doc = db.prepare('SELECT * FROM trade_document WHERE id=?').get(docId);
+    const doc = await db.prepare('SELECT * FROM trade_document WHERE id=?').get(docId);
     if (!doc) { fail(res, 404, '문서 없음'); return; }
 
     if (doc.price_diff && !doc.vendor_memo) {
@@ -5869,7 +5843,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    db.prepare(`UPDATE trade_document SET status='approved', approved_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?`).run(docId);
+    await db.prepare(`UPDATE trade_document SET status='approved', approved_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?`).run(docId);
 
     logPOActivity(doc.po_id, 'trade_doc_approved', {
       actor_type: 'admin',
@@ -5893,7 +5867,7 @@ async function handleRequest(req, res) {
     if (vendor) { q += ` AND td.vendor_name = ?`; args.push(vendor); }
     q += ` ORDER BY ph.po_date DESC, td.id DESC`;
 
-    const docs = db.prepare(q).all(...args);
+    const docs = await db.prepare(q).all(...args);
 
     // 가격변동 감지를 위해 업체+품목별 가격 이력 구축
     const priceHistory = {}; // { vendor_product: [price1, price2, ...] }
@@ -5957,7 +5931,7 @@ async function handleRequest(req, res) {
     });
 
     // 업체 목록도 함께 반환
-    const vendorList = db.prepare(`SELECT DISTINCT vendor_name FROM trade_document WHERE status IN ('sent','vendor_confirmed','approved') ORDER BY vendor_name`).all().map(r => r.vendor_name);
+    const vendorList = (await db.prepare(`SELECT DISTINCT vendor_name FROM trade_document WHERE status IN ('sent','vendor_confirmed','approved') ORDER BY vendor_name`).all()).map(r => r.vendor_name);
 
     ok(res, { docs: results, vendors: vendorList });
     return;
@@ -5976,7 +5950,7 @@ async function handleRequest(req, res) {
     if (vendor) { q += ` AND td.vendor_name = ?`; args.push(vendor); }
     q += ` ORDER BY td.vendor_name, ph.po_date DESC`;
 
-    const docs = db.prepare(q).all(...args);
+    const docs = await db.prepare(q).all(...args);
     const piMap = getProductInfo();
 
     // CSV 생성 (엑셀 호환)
@@ -6026,30 +6000,30 @@ async function handleRequest(req, res) {
     if (itemOS.length > 0) {
       // 제품별 OS번호 등록
       const stmt = db.prepare('UPDATE po_items SET os_number=? WHERE item_id=? AND po_id=?');
-      const tx = db.transaction(() => {
+      const tx = db.transaction(async () => {
         for (const io of itemOS) {
-          if (io.os_number) stmt.run(io.os_number, io.item_id, poId);
+          if (io.os_number) await stmt.run(io.os_number, io.item_id, poId);
         }
       });
-      tx();
+      await tx();
       // PO 헤더에도 첫 번째 OS번호 기록 (대표값)
       const firstOS = itemOS.find(i => i.os_number)?.os_number || osNumber;
       if (firstOS) {
-        db.prepare(`UPDATE po_header SET os_number = ?, status = 'os_registered', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(firstOS, poId);
+        await db.prepare(`UPDATE po_header SET os_number = ?, status = 'os_registered', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(firstOS, poId);
       }
       logPOActivity(poId, 'os_registered', { actor_type: 'admin', to_status: 'os_registered', details: `제품별 OS번호 등록 (${itemOS.filter(i=>i.os_number).length}건)` });
       ok(res, { ok: true, po_id: poId, item_count: itemOS.filter(i=>i.os_number).length, status: 'os_registered' });
     } else if (osNumber) {
       // PO 전체 OS번호 등록
-      const curPO = db.prepare('SELECT status FROM po_header WHERE po_id=?').get(poId);
+      const curPO = await db.prepare('SELECT status FROM po_header WHERE po_id=?').get(poId);
       const shouldChangeStatus = curPO && curPO.status === 'os_pending';
       if (shouldChangeStatus) {
-        db.prepare(`UPDATE po_header SET os_number = ?, status = 'os_registered', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(osNumber, poId);
+        await db.prepare(`UPDATE po_header SET os_number = ?, status = 'os_registered', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(osNumber, poId);
       } else {
-        db.prepare(`UPDATE po_header SET os_number = ?, updated_at = datetime('now','localtime') WHERE po_id = ?`).run(osNumber, poId);
+        await db.prepare(`UPDATE po_header SET os_number = ?, updated_at = datetime('now','localtime') WHERE po_id = ?`).run(osNumber, poId);
       }
       // 모든 아이템에도 동일 OS번호 적용
-      db.prepare('UPDATE po_items SET os_number=? WHERE po_id=?').run(osNumber, poId);
+      await db.prepare('UPDATE po_items SET os_number=? WHERE po_id=?').run(osNumber, poId);
       const newStatus = shouldChangeStatus ? 'os_registered' : (curPO?.status || 'unknown');
       logPOActivity(poId, 'os_saved', { actor_type: 'admin', details: `OS번호: ${osNumber}` });
       ok(res, { ok: true, po_id: poId, os_number: osNumber, status: newStatus });
@@ -6063,7 +6037,7 @@ async function handleRequest(req, res) {
   const activityMatch = pathname.match(/^\/api\/po\/(\d+)\/activity$/);
   if (activityMatch && method === 'GET') {
     const poId = parseInt(activityMatch[1]);
-    const logs = db.prepare('SELECT * FROM po_activity_log WHERE po_id=? ORDER BY created_at DESC').all(poId);
+    const logs = await db.prepare('SELECT * FROM po_activity_log WHERE po_id=? ORDER BY created_at DESC').all(poId);
     ok(res, logs);
     return;
   }
@@ -6071,7 +6045,7 @@ async function handleRequest(req, res) {
   // GET /api/activity-log — 전체 활동 로그 (최근 100건)
   if (pathname === '/api/activity-log' && method === 'GET') {
     const limit = parseInt(parsed.searchParams.get('limit') || '100');
-    const logs = db.prepare('SELECT * FROM po_activity_log ORDER BY created_at DESC LIMIT ?').all(limit);
+    const logs = await db.prepare('SELECT * FROM po_activity_log ORDER BY created_at DESC LIMIT ?').all(limit);
     ok(res, logs);
     return;
   }
@@ -6079,10 +6053,10 @@ async function handleRequest(req, res) {
   // GET /api/po/os-pending — OS등록 대기 PO 목록 (os_pending + os_registered)
   if (pathname === '/api/po/os-pending' && method === 'GET') {
     const enToKo = { 'draft':'대기', 'sent':'발송', 'confirmed':'확인', 'partial':'수령중', 'received':'완료', 'cancelled':'취소', 'os_pending':'OS등록대기', 'os_registered':'OS검증대기' };
-    const rows = db.prepare(`SELECT * FROM po_header WHERE status IN ('os_pending','os_registered') ORDER BY po_date DESC`).all();
+    const rows = await db.prepare(`SELECT * FROM po_header WHERE status IN ('os_pending','os_registered') ORDER BY po_date DESC`).all();
     for (const r of rows) {
       r.status = enToKo[r.status] || r.status;
-      r.items = db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(r.po_id);
+      r.items = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(r.po_id);
     }
     ok(res, rows);
     return;
@@ -6093,9 +6067,9 @@ async function handleRequest(req, res) {
     if (!await ensureXerpPool()) { fail(res, 503, 'XERP 데이터베이스 미연결 (재연결 시도 중)'); return; }
     try {
       // 1. 모든 PO 가져오기
-      const allPOs = db.prepare(`SELECT * FROM po_header ORDER BY po_date DESC`).all();
+      const allPOs = await db.prepare(`SELECT * FROM po_header ORDER BY po_date DESC`).all();
       const itemStmt = db.prepare('SELECT * FROM po_items WHERE po_id = ?');
-      for (const po of allPOs) po.items = itemStmt.all(po.po_id);
+      for (const po of allPOs) po.items = await itemStmt.all(po.po_id);
 
       // 2. 분류: 진행중 / 완료 / 취소
       const pending = allPOs.filter(p => p.status !== 'received' && p.status !== 'cancelled' && !p.os_number);
@@ -6171,7 +6145,7 @@ async function handleRequest(req, res) {
       }
 
       // 5. os_registered PO 검증 (OS번호 입력됨 → XERP 확인 후 received 또는 os_pending으로)
-      const registeredPOs = db.prepare(
+      const registeredPOs = await db.prepare(
         "SELECT h.*, GROUP_CONCAT(i.product_code) as product_codes FROM po_header h LEFT JOIN po_items i ON h.po_id=i.po_id WHERE h.status='os_registered' GROUP BY h.po_id"
       ).all();
 
@@ -6213,7 +6187,7 @@ async function handleRequest(req, res) {
         for (const rpo of registeredPOs) {
           if (!rpo.os_number) {
             // OS번호 없음 → 다시 os_pending으로
-            db.prepare("UPDATE po_header SET status='os_pending', updated_at=datetime('now','localtime') WHERE po_id=?").run(rpo.po_id);
+            await db.prepare("UPDATE po_header SET status='os_pending', updated_at=datetime('now','localtime') WHERE po_id=?").run(rpo.po_id);
             mismatched.push({ ...rpo, error: 'OS번호가 누락되었습니다' });
             continue;
           }
@@ -6238,11 +6212,11 @@ async function handleRequest(req, res) {
 
           if (hasMatch) {
             // 검증 완료 → received로 자동 완료
-            db.prepare("UPDATE po_header SET status='received', updated_at=datetime('now','localtime') WHERE po_id=?").run(rpo.po_id);
+            await db.prepare("UPDATE po_header SET status='received', updated_at=datetime('now','localtime') WHERE po_id=?").run(rpo.po_id);
             verified.push({ ...rpo, status: 'OS검증대기', xerp_status: '검증완료', auto_completed: true });
           } else {
             // 불일치 → os_pending으로 되돌리고 os_number 초기화
-            db.prepare("UPDATE po_header SET status='os_pending', os_number='', updated_at=datetime('now','localtime') WHERE po_id=?").run(rpo.po_id);
+            await db.prepare("UPDATE po_header SET status='os_pending', os_number='', updated_at=datetime('now','localtime') WHERE po_id=?").run(rpo.po_id);
             mismatched.push({
               ...rpo,
               error: `OS번호와 제품코드가 다릅니다 (OS: ${rpo.os_number}, XERP품목: ${xerpItemCodes.join(',')}, PO원자재: ${materialCodes.join(',')})`
@@ -6286,8 +6260,8 @@ async function handleRequest(req, res) {
     `).all(from, to);
 
     // 납기 준수율 및 평균 리드타임 계산
-    const result = rows.map(r => {
-      const ltRows = db.prepare(`
+    const result = await Promise.all(rows.map(async r => {
+      const ltRows = await db.prepare(`
         SELECT po_date, updated_at, expected_date FROM po_header
         WHERE vendor_name = ? AND po_date >= ? AND po_date <= ?
           AND status IN ('received','os_pending') AND po_date IS NOT NULL AND updated_at IS NOT NULL
@@ -6308,7 +6282,7 @@ async function handleRequest(req, res) {
         avg_lead_time: ltCount > 0 ? Math.round(totalLT / ltCount * 10) / 10 : 0,
         on_time_rate: ltRows.length > 0 ? Math.round(onTimeCount / ltRows.length * 100) : 0
       };
-    });
+    }));
     ok(res, result);
     return;
   }
@@ -6316,7 +6290,7 @@ async function handleRequest(req, res) {
   // GET /api/po/stats — 대시보드 전용 통계
   if (pathname === '/api/po/stats' && method === 'GET') {
     const enToKo = { 'draft':'대기', 'sent':'발송', 'confirmed':'확인', 'partial':'수령중', 'received':'완료', 'cancelled':'취소', 'os_pending':'OS등록대기', 'os_registered':'OS검증대기' };
-    const allPO = db.prepare('SELECT * FROM po_header ORDER BY po_date DESC, po_id DESC').all();
+    const allPO = await db.prepare('SELECT * FROM po_header ORDER BY po_date DESC, po_id DESC').all();
     // 상태 정규화
     for (const r of allPO) r.status = enToKo[r.status] || r.status;
 
@@ -6326,7 +6300,7 @@ async function handleRequest(req, res) {
     for (const r of allPO) { pipeline[r.status] = (pipeline[r.status]||0) + 1; pipelineQty[r.status] = (pipelineQty[r.status]||0) + (r.total_qty||0); }
 
     // 입고율
-    const itemStats = db.prepare('SELECT COALESCE(SUM(ordered_qty),0) as ordered, COALESCE(SUM(received_qty),0) as received FROM po_items').get();
+    const itemStats = await db.prepare('SELECT COALESCE(SUM(ordered_qty),0) as ordered, COALESCE(SUM(received_qty),0) as received FROM po_items').get();
     const totalOrdered = itemStats.ordered;
     const totalReceived = itemStats.received;
     const receiveRate = totalOrdered > 0 ? Math.round(totalReceived / totalOrdered * 1000) / 10 : 0;
@@ -6376,7 +6350,7 @@ async function handleRequest(req, res) {
     if (to) { sql += ' AND po_date <= ?'; params.push(to); }
     if (origin) { sql += ' AND origin = ?'; params.push(origin); }
     sql += ' ORDER BY po_date DESC, po_id DESC';
-    const rows = db.prepare(sql).all(...params);
+    const rows = await db.prepare(sql).all(...params);
     // 상태 영→한 정규화
     const enToKo = { 'draft':'대기', 'sent':'발송', 'confirmed':'확인', 'partial':'수령중', 'received':'완료', 'cancelled':'취소', 'os_pending':'OS등록대기', 'os_registered':'OS검증대기' };
     for (const row of rows) {
@@ -6386,7 +6360,7 @@ async function handleRequest(req, res) {
     if (parsed.searchParams.get('include') === 'items') {
       const itemStmt = db.prepare('SELECT * FROM po_items WHERE po_id = ?');
       for (const row of rows) {
-        row.items = itemStmt.all(row.po_id);
+        row.items = await itemStmt.all(row.po_id);
       }
     }
     ok(res, rows);
@@ -6397,9 +6371,9 @@ async function handleRequest(req, res) {
   const poGet = pathname.match(/^\/api\/po\/(\d+)$/);
   if (poGet && method === 'GET') {
     const id = parseInt(poGet[1]);
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(id);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(id);
     if (!po) { fail(res, 404, 'PO not found'); return; }
-    po.items = db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(id);
+    po.items = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(id);
     ok(res, po);
     return;
   }
@@ -6428,15 +6402,15 @@ async function handleRequest(req, res) {
         const poNumber = generatePoNumber();
         const totalQty = vendorItems.reduce((s, it) => s + (parseInt(it.qty) || 0), 0);
         // origin: 첫 번째 품목의 products.origin 사용
-        const _bulkFirstProd = db.prepare('SELECT origin FROM products WHERE product_code=?').get(vendorItems[0].product_code || '');
+        const _bulkFirstProd = await db.prepare('SELECT origin FROM products WHERE product_code=?').get(vendorItems[0].product_code || '');
         const _bulkOrigin = (_bulkFirstProd && _bulkFirstProd.origin) || '';
-        const tx = db.transaction(() => {
+        const tx = db.transaction(async () => {
           const hdr = db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, material_status, process_status, origin, po_date)
             VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
             poNumber, '원재료', vendorName, 'draft', totalQty, '엑셀 일괄 발주', 'sent', 'waiting', _bulkOrigin, today
           );
           for (const it of vendorItems) {
-            db.prepare('INSERT INTO po_items (po_id, product_code, ordered_qty, notes) VALUES (?,?,?,?)').run(
+            await db.prepare('INSERT INTO po_items (po_id, product_code, ordered_qty, notes) VALUES (?,?,?,?)').run(
               hdr.lastInsertRowid, it.product_code || '', parseInt(it.qty) || 0, '엑셀 일괄'
             );
           }
@@ -6468,19 +6442,19 @@ async function handleRequest(req, res) {
     // vendor_id로 vendor_name 자동 조회
     let vendorName = body.vendor_name || '';
     if (!vendorName && body.vendor_id) {
-      const v = db.prepare('SELECT name FROM vendors WHERE vendor_id = ?').get(body.vendor_id);
+      const v = await db.prepare('SELECT name FROM vendors WHERE vendor_id = ?').get(body.vendor_id);
       if (v) vendorName = v.name;
     }
 
     // origin 결정: body에서 직접 지정 또는 첫 번째 품목의 products.origin 사용
     let poOrigin = body.origin || '';
     if (!poOrigin && items.length) {
-      const firstProd = db.prepare('SELECT origin FROM products WHERE product_code=?').get(items[0].product_code || '');
+      const firstProd = await db.prepare('SELECT origin FROM products WHERE product_code=?').get(items[0].product_code || '');
       if (firstProd && firstProd.origin) poOrigin = firstProd.origin;
     }
 
-    const tx = db.transaction(() => {
-      const info = db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, expected_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, po_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now','localtime'))`).run(
+    const tx = db.transaction(async () => {
+      const info = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, expected_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, po_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now','localtime'))`).run(
         poNumber,
         body.po_type || 'material',
         vendorName,
@@ -6496,7 +6470,7 @@ async function handleRequest(req, res) {
       const poId = info.lastInsertRowid;
       const itemStmt = db.prepare(`INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?, ?, ?, ?, ?, ?, ?)`);
       for (const it of items) {
-        itemStmt.run(poId, it.product_code || '', it.brand || '', it.process_type || '', it.ordered_qty || 0, it.spec || '', it.notes || '');
+        await itemStmt.run(poId, it.product_code || '', it.brand || '', it.process_type || '', it.ordered_qty || 0, it.spec || '', it.notes || '');
       }
       return poId;
     });
@@ -6504,11 +6478,11 @@ async function handleRequest(req, res) {
 
     // 목형비 자동 처리: 신제품 첫 발주 시 notes에 '목형비 포함' 마킹
     for (const item of items) {
-      const prod = db.prepare('SELECT is_new_product, first_order_done, die_cost FROM products WHERE product_code=?').get(item.product_code);
+      const prod = await db.prepare('SELECT is_new_product, first_order_done, die_cost FROM products WHERE product_code=?').get(item.product_code);
       if (prod && prod.is_new_product === 1 && prod.first_order_done === 0) {
-        db.prepare("UPDATE po_items SET notes = CASE WHEN notes='' THEN '목형비 포함' ELSE notes || ' | 목형비 포함' END WHERE po_id=? AND product_code=?")
+        await db.prepare("UPDATE po_items SET notes = CASE WHEN notes='' THEN '목형비 포함' ELSE notes || ' | 목형비 포함' END WHERE po_id=? AND product_code=?")
           .run(poId, item.product_code);
-        db.prepare("UPDATE products SET first_order_done=1 WHERE product_code=?").run(item.product_code);
+        await db.prepare("UPDATE products SET first_order_done=1 WHERE product_code=?").run(item.product_code);
         logPOActivity(poId, 'die_cost_included', {
           actor_type: 'system',
           details: `신제품 최초 발주 → 목형비 포함 마킹: ${item.product_code}`
@@ -6528,7 +6502,7 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const validStatuses = ['draft', 'sent', 'confirmed', 'partial', 'received', 'cancelled', 'os_pending', 'os_registered'];
     if (!validStatuses.includes(body.status)) { fail(res, 400, 'Invalid status. Allowed: ' + validStatuses.join(', ')); return; }
-    db.prepare(`UPDATE po_header SET status = ?, updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.status, id);
+    await db.prepare(`UPDATE po_header SET status = ?, updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.status, id);
     ok(res, { po_id: id, status: body.status });
     return;
   }
@@ -6541,12 +6515,12 @@ async function handleRequest(req, res) {
     const newStatus = body.status;
     const koToEn = { '대기': 'draft', '발송': 'sent', '확인': 'confirmed', '수령중': 'partial', '완료': 'received', '취소': 'cancelled', 'OS등록대기': 'os_pending', 'OS검증대기': 'os_registered' };
     const dbStatus = koToEn[newStatus] || newStatus;
-    const poBeforePatch = db.prepare('SELECT status, material_status, process_status FROM po_header WHERE po_id=?').get(id);
-    db.prepare(`UPDATE po_header SET status = ?, updated_at = datetime('now','localtime') WHERE po_id = ?`).run(dbStatus, id);
+    const poBeforePatch = await db.prepare('SELECT status, material_status, process_status FROM po_header WHERE po_id=?').get(id);
+    await db.prepare(`UPDATE po_header SET status = ?, updated_at = datetime('now','localtime') WHERE po_id = ?`).run(dbStatus, id);
 
     // 발송 시 파이프라인 서브상태 초기화
     if (newStatus === '발송' || dbStatus === 'sent') {
-      db.prepare("UPDATE po_header SET material_status='sent', process_status='waiting' WHERE po_id=?").run(id);
+      await db.prepare("UPDATE po_header SET material_status='sent', process_status='waiting' WHERE po_id=?").run(id);
     }
 
     logPOActivity(id, 'status_change', {
@@ -6561,8 +6535,8 @@ async function handleRequest(req, res) {
     let emailResult = null;
     console.log(`[PATCH] po_id=${id}, newStatus='${newStatus}', dbStatus='${dbStatus}'`);
     if (newStatus === '발송' || dbStatus === 'sent') {
-      const po = db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(id);
-      const items = db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(id);
+      const po = await db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(id);
+      const items = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(id);
 
       // Google Sheet 동기화
       if (items.length) {
@@ -6580,7 +6554,7 @@ async function handleRequest(req, res) {
 
       // 업체 이메일 발송 (후공정은 수동 발송 전까지 이메일 안 보냄 — 원재료 출고 시 자동 발송)
       if (po) {
-        const vendor = db.prepare('SELECT * FROM vendors WHERE name = ?').get(po.vendor_name);
+        const vendor = await db.prepare('SELECT * FROM vendors WHERE name = ?').get(po.vendor_name);
         const isPost = vendor ? vendor.type === '후공정' : (po.po_type === '후공정');
         const forceEmail = body.force_email === true; // 수동 메일보내기
         if (vendor && vendor.email && (!isPost || forceEmail)) {
@@ -6596,8 +6570,8 @@ async function handleRequest(req, res) {
 
       // 발송 시 거래명세서 자동 생성
       if (po) {
-        const poForDoc = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(id);
-        const itemsForDoc = db.prepare('SELECT * FROM po_items WHERE po_id=?').all(id);
+        const poForDoc = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(id);
+        const itemsForDoc = await db.prepare('SELECT * FROM po_items WHERE po_id=?').all(id);
         const piMap = getProductInfo();
         const docItems = itemsForDoc.map(item => {
           const pi = piMap[item.product_code] || {};
@@ -6616,9 +6590,9 @@ async function handleRequest(req, res) {
             last_price: lastPrice
           };
         });
-        const vendorRow = db.prepare('SELECT type FROM vendors WHERE name=?').get(poForDoc.vendor_name);
+        const vendorRow = await db.prepare('SELECT type FROM vendors WHERE name=?').get(poForDoc.vendor_name);
         const vendorType = vendorRow ? vendorRow.type : 'material';
-        db.prepare(`INSERT INTO trade_document (po_id, po_number, vendor_name, vendor_type, items_json, status) VALUES (?,?,?,?,?,'sent')`)
+        await db.prepare(`INSERT INTO trade_document (po_id, po_number, vendor_name, vendor_type, items_json, status) VALUES (?,?,?,?,?,'sent')`)
           .run(id, poForDoc.po_number, poForDoc.vendor_name, vendorType === '후공정' ? 'process' : 'material', JSON.stringify(docItems));
         logPOActivity(id, 'trade_doc_created', { actor_type: 'system', details: '거래명세서 자동 생성' });
       }
@@ -6626,8 +6600,8 @@ async function handleRequest(req, res) {
 
     // 취소 시 Google Sheet에 취소선 + 빨간글씨 적용
     if (newStatus === '취소' || dbStatus === 'cancelled') {
-      const items = db.prepare('SELECT product_code FROM po_items WHERE po_id = ?').all(id);
-      const po = db.prepare('SELECT po_date FROM po_header WHERE po_id = ?').get(id);
+      const items = await db.prepare('SELECT product_code FROM po_items WHERE po_id = ?').all(id);
+      const po = await db.prepare('SELECT po_date FROM po_header WHERE po_id = ?').get(id);
       const codes = items.map(i => i.product_code).filter(Boolean);
       if (codes.length) {
         sheetResult = await cancelInGoogleSheet(codes, po ? po.po_date : '');
@@ -6644,16 +6618,16 @@ async function handleRequest(req, res) {
   const poResend = pathname.match(/^\/api\/po\/(\d+)\/resend$/);
   if (poResend && method === 'POST') {
     const id = parseInt(poResend[1]);
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(id);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id = ?').get(id);
     if (!po) { fail(res, 404, 'PO not found'); return; }
-    const items = db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(id);
-    const vendor = db.prepare('SELECT * FROM vendors WHERE name = ?').get(po.vendor_name);
+    const items = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(id);
+    const vendor = await db.prepare('SELECT * FROM vendors WHERE name = ?').get(po.vendor_name);
     if (!vendor || !vendor.email) { fail(res, 400, '업체 이메일 미등록'); return; }
     try {
       const isPost = po.po_type === '후공정';
       const emailResult = await sendPOEmail(po, items, vendor.email, vendor.name, isPost, vendor.email_cc || '');
       // 활동 로그
-      try { db.prepare('INSERT INTO po_activity_log (po_id, action, details) VALUES (?, ?, ?)').run(id, '이메일 재발송', emailResult.ok ? '성공: ' + vendor.email : '실패: ' + (emailResult.error||'')); } catch(e){}
+      try { await db.prepare('INSERT INTO po_activity_log (po_id, action, details) VALUES (?, ?, ?)').run(id, '이메일 재발송', emailResult.ok ? '성공: ' + vendor.email : '실패: ' + (emailResult.error||'')); } catch(e){}
       ok(res, { email: emailResult });
     } catch(e) {
       ok(res, { email: { ok: false, error: e.message } });
@@ -6665,13 +6639,13 @@ async function handleRequest(req, res) {
   const poDel = pathname.match(/^\/api\/po\/(\d+)$/);
   if (poDel && method === 'DELETE') {
     const id = parseInt(poDel[1]);
-    const po = db.prepare('SELECT po_id, po_number, status FROM po_header WHERE po_id = ?').get(id);
+    const po = await db.prepare('SELECT po_id, po_number, status FROM po_header WHERE po_id = ?').get(id);
     if (!po) { fail(res, 404, 'PO not found'); return; }
-    try { db.prepare('DELETE FROM receipt_items WHERE receipt_id IN (SELECT receipt_id FROM receipts WHERE po_id = ?)').run(id); } catch(_){}
-    try { db.prepare('DELETE FROM receipts WHERE po_id = ?').run(id); } catch(_){}
-    db.prepare('DELETE FROM po_items WHERE po_id = ?').run(id);
-    try { db.prepare('DELETE FROM activity_log WHERE po_id = ?').run(id); } catch(_){}
-    db.prepare('DELETE FROM po_header WHERE po_id = ?').run(id);
+    try { await db.prepare('DELETE FROM receipt_items WHERE receipt_id IN (SELECT receipt_id FROM receipts WHERE po_id = ?)').run(id); } catch(_){}
+    try { await db.prepare('DELETE FROM receipts WHERE po_id = ?').run(id); } catch(_){}
+    await db.prepare('DELETE FROM po_items WHERE po_id = ?').run(id);
+    try { await db.prepare('DELETE FROM activity_log WHERE po_id = ?').run(id); } catch(_){}
+    await db.prepare('DELETE FROM po_header WHERE po_id = ?').run(id);
     console.log(`PO 삭제: ${po.po_number} (ID: ${id}, 상태: ${po.status})`);
     ok(res, { deleted: id, po_number: po.po_number });
     return;
@@ -6682,7 +6656,7 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/receipts' && method === 'GET') {
-    const rows = db.prepare(`
+    const rows = await db.prepare(`
       SELECT r.receipt_id, r.po_id, r.receipt_date, r.received_by, r.notes, r.created_at,
              h.po_number
       FROM receipts r
@@ -6691,7 +6665,7 @@ async function handleRequest(req, res) {
     `).all();
     const itemStmt = db.prepare('SELECT * FROM receipt_items WHERE receipt_id = ?');
     for (const r of rows) {
-      r.items = itemStmt.all(r.receipt_id);
+      r.items = await itemStmt.all(r.receipt_id);
     }
     ok(res, rows);
     return;
@@ -6702,8 +6676,8 @@ async function handleRequest(req, res) {
     if (!body.po_id) { fail(res, 400, 'po_id required'); return; }
     const items = body.items || [];
 
-    const tx = db.transaction(() => {
-      const rInfo = db.prepare(`INSERT INTO receipts (po_id, received_by, notes) VALUES (?, ?, ?)`).run(
+    const tx = db.transaction(async () => {
+      const rInfo = await db.prepare(`INSERT INTO receipts (po_id, received_by, notes) VALUES (?, ?, ?)`).run(
         body.po_id, body.received_by || '', body.notes || ''
       );
       const receiptId = rInfo.lastInsertRowid;
@@ -6712,21 +6686,21 @@ async function handleRequest(req, res) {
       const updatePoItem = db.prepare(`UPDATE po_items SET received_qty = received_qty + ? WHERE item_id = ?`);
 
       for (const it of items) {
-        riStmt.run(receiptId, it.po_item_id || null, it.product_code || '', it.received_qty || 0, it.defect_qty || 0, it.notes || '');
+        await riStmt.run(receiptId, it.po_item_id || null, it.product_code || '', it.received_qty || 0, it.defect_qty || 0, it.notes || '');
         if (it.po_item_id && it.received_qty) {
-          updatePoItem.run(it.received_qty, it.po_item_id);
+          await updatePoItem.run(it.received_qty, it.po_item_id);
         }
       }
 
       // Check if all items fully received → update PO status
-      const poItems = db.prepare('SELECT ordered_qty, received_qty FROM po_items WHERE po_id = ?').all(body.po_id);
+      const poItems = await db.prepare('SELECT ordered_qty, received_qty FROM po_items WHERE po_id = ?').all(body.po_id);
       const allReceived = poItems.length > 0 && poItems.every(pi => pi.received_qty >= pi.ordered_qty);
       const anyReceived = poItems.some(pi => pi.received_qty > 0);
 
       if (allReceived) {
-        db.prepare(`UPDATE po_header SET status = 'received', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
+        await db.prepare(`UPDATE po_header SET status = 'received', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
       } else if (anyReceived) {
-        db.prepare(`UPDATE po_header SET status = 'partial', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
+        await db.prepare(`UPDATE po_header SET status = 'partial', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
       }
 
       return receiptId;
@@ -6745,9 +6719,9 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/invoices' && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM invoices ORDER BY created_at DESC').all();
+    const rows = await db.prepare('SELECT * FROM invoices ORDER BY created_at DESC').all();
     for (const inv of rows) {
-      inv.items = db.prepare('SELECT * FROM invoice_items WHERE invoice_id = ?').all(inv.invoice_id);
+      inv.items = await db.prepare('SELECT * FROM invoice_items WHERE invoice_id = ?').all(inv.invoice_id);
     }
     ok(res, rows);
     return;
@@ -6784,8 +6758,8 @@ async function handleRequest(req, res) {
     let items = [];
     try { if (parts.items) items = JSON.parse(parts.items); } catch(_) {}
 
-    const tx = db.transaction(() => {
-      const info = db.prepare(`INSERT INTO invoices (po_id, vendor_name, invoice_no, invoice_date, amount, file_path, file_name, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    const tx = db.transaction(async () => {
+      const info = await db.prepare(`INSERT INTO invoices (po_id, vendor_name, invoice_no, invoice_date, amount, file_path, file_name, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
         parts.po_id ? parseInt(parts.po_id) : null,
         parts.vendor_name || '',
         parts.invoice_no || '',
@@ -6799,7 +6773,7 @@ async function handleRequest(req, res) {
       if (items.length) {
         const stmt = db.prepare(`INSERT INTO invoice_items (invoice_id, product_code, product_name, qty, unit_price, amount, notes) VALUES (?, ?, ?, ?, ?, ?, ?)`);
         for (const it of items) {
-          stmt.run(invId, it.product_code || '', it.product_name || '', it.qty || 0, it.unit_price || 0, it.amount || 0, it.notes || '');
+          await stmt.run(invId, it.product_code || '', it.product_name || '', it.qty || 0, it.unit_price || 0, it.amount || 0, it.notes || '');
         }
       }
       return invId;
@@ -6813,7 +6787,7 @@ async function handleRequest(req, res) {
   const invFile = pathname.match(/^\/api\/invoices\/(\d+)\/file$/);
   if (invFile && method === 'GET') {
     const id = parseInt(invFile[1]);
-    const inv = db.prepare('SELECT file_path, file_name FROM invoices WHERE invoice_id = ?').get(id);
+    const inv = await db.prepare('SELECT file_path, file_name FROM invoices WHERE invoice_id = ?').get(id);
     if (!inv || !inv.file_path) { fail(res, 404, 'File not found'); return; }
     const fullPath = path.join(UPLOAD_DIR, inv.file_path);
     if (!fs.existsSync(fullPath)) { fail(res, 404, 'File missing from disk'); return; }
@@ -6832,15 +6806,15 @@ async function handleRequest(req, res) {
   const invDel = pathname.match(/^\/api\/invoices\/(\d+)$/);
   if (invDel && method === 'DELETE') {
     const id = parseInt(invDel[1]);
-    const inv = db.prepare('SELECT file_path FROM invoices WHERE invoice_id = ?').get(id);
+    const inv = await db.prepare('SELECT file_path FROM invoices WHERE invoice_id = ?').get(id);
     if (!inv) { fail(res, 404, 'Invoice not found'); return; }
     // delete file from disk
     if (inv.file_path) {
       const fullPath = path.join(UPLOAD_DIR, inv.file_path);
       try { fs.unlinkSync(fullPath); } catch (_) { /* ignore if already deleted */ }
     }
-    db.prepare('DELETE FROM invoice_items WHERE invoice_id = ?').run(id);
-    db.prepare('DELETE FROM invoices WHERE invoice_id = ?').run(id);
+    await db.prepare('DELETE FROM invoice_items WHERE invoice_id = ?').run(id);
+    await db.prepare('DELETE FROM invoices WHERE invoice_id = ?').run(id);
     ok(res, { deleted: id });
     return;
   }
@@ -6853,20 +6827,20 @@ async function handleRequest(req, res) {
     const now = new Date();
     const ym = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
 
-    const totalPOs = db.prepare('SELECT COUNT(*) as cnt FROM po_header').get().cnt;
-    const draftPOs = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'draft'`).get().cnt;
-    const sentPOs = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'sent'`).get().cnt;
-    const confirmedPOs = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'confirmed'`).get().cnt;
-    const partialPOs = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'partial'`).get().cnt;
-    const receivedPOs = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'received'`).get().cnt;
-    const cancelledPOs = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'cancelled'`).get().cnt;
+    const totalPOs = (await db.prepare('SELECT COUNT(*) as cnt FROM po_header').get()).cnt;
+    const draftPOs = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'draft'`).get()).cnt;
+    const sentPOs = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'sent'`).get()).cnt;
+    const confirmedPOs = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'confirmed'`).get()).cnt;
+    const partialPOs = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'partial'`).get()).cnt;
+    const receivedPOs = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'received'`).get()).cnt;
+    const cancelledPOs = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status = 'cancelled'`).get()).cnt;
     const pendingPOs = draftPOs + sentPOs + confirmedPOs + partialPOs;
 
-    const thisMonthPOs = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE po_date LIKE ?`).get(ym + '%').cnt;
-    const thisMonthItems = db.prepare(`SELECT COALESCE(SUM(pi.ordered_qty),0) as qty FROM po_items pi JOIN po_header ph ON ph.po_id=pi.po_id WHERE ph.po_date LIKE ?`).get(ym + '%').qty;
-    const totalVendors = db.prepare('SELECT COUNT(*) as cnt FROM vendors').get().cnt;
-    const totalInvoices = db.prepare('SELECT COUNT(*) as cnt FROM invoices').get().cnt;
-    const thisMonthInvoiceAmt = db.prepare(`SELECT COALESCE(SUM(amount),0) as amt FROM invoices WHERE invoice_date LIKE ?`).get(ym + '%').amt;
+    const thisMonthPOs = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE po_date LIKE ?`).get(ym + '%')).cnt;
+    const thisMonthItems = (await db.prepare(`SELECT COALESCE(SUM(pi.ordered_qty),0) as qty FROM po_items pi JOIN po_header ph ON ph.po_id=pi.po_id WHERE ph.po_date LIKE ?`).get(ym + '%')).qty;
+    const totalVendors = (await db.prepare('SELECT COUNT(*) as cnt FROM vendors').get()).cnt;
+    const totalInvoices = (await db.prepare('SELECT COUNT(*) as cnt FROM invoices').get()).cnt;
+    const thisMonthInvoiceAmt = (await db.prepare(`SELECT COALESCE(SUM(amount),0) as amt FROM invoices WHERE invoice_date LIKE ?`).get(ym + '%')).amt;
 
     ok(res, {
       totalPOs, pendingPOs, draftPOs, sentPOs, confirmedPOs, partialPOs, receivedPOs, cancelledPOs,
@@ -6885,21 +6859,21 @@ async function handleRequest(req, res) {
     for (let i = 5; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const m = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
-      const row = db.prepare(`SELECT COUNT(*) as cnt, COALESCE(SUM(total_qty),0) as qty FROM po_header WHERE po_date LIKE ? AND status != 'cancelled'`).get(m + '%');
+      const row = await db.prepare(`SELECT COUNT(*) as cnt, COALESCE(SUM(total_qty),0) as qty FROM po_header WHERE po_date LIKE ? AND status != 'cancelled'`).get(m + '%');
       monthlyPO.push({ month: m, count: row.cnt, qty: row.qty });
     }
 
     // 2. 거래처별 발주 비중 (최근 3개월, 도넛 차트용)
     const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 2, 1).toISOString().slice(0, 10);
-    const vendorShare = db.prepare(`SELECT vendor_name as name, COUNT(*) as count, COALESCE(SUM(total_qty),0) as qty FROM po_header WHERE po_date >= ? AND status != 'cancelled' GROUP BY vendor_name ORDER BY count DESC LIMIT 8`).all(threeMonthsAgo);
+    const vendorShare = await db.prepare(`SELECT vendor_name as name, COUNT(*) as count, COALESCE(SUM(total_qty),0) as qty FROM po_header WHERE po_date >= ? AND status != 'cancelled' GROUP BY vendor_name ORDER BY count DESC LIMIT 8`).all(threeMonthsAgo);
 
     // 3. 발주 상태 분포 (도넛 차트용)
-    const statusDist = db.prepare(`SELECT status, COUNT(*) as count FROM po_header WHERE status != 'cancelled' GROUP BY status`).all();
+    const statusDist = await db.prepare(`SELECT status, COUNT(*) as count FROM po_header WHERE status != 'cancelled' GROUP BY status`).all();
     const enToKo = { 'draft':'대기', 'sent':'발송', 'confirmed':'확인', 'partial':'수령중', 'received':'완료', 'os_pending':'OS등록대기' };
     statusDist.forEach(r => r.label = enToKo[r.status] || r.status);
 
     // 4. 리드타임 분석 (발주일~완료일)
-    const ltRows = db.prepare(`SELECT po_date, updated_at, vendor_name FROM po_header WHERE status IN ('received','os_pending') AND po_date IS NOT NULL AND updated_at IS NOT NULL ORDER BY updated_at DESC LIMIT 50`).all();
+    const ltRows = await db.prepare(`SELECT po_date, updated_at, vendor_name FROM po_header WHERE status IN ('received','os_pending') AND po_date IS NOT NULL AND updated_at IS NOT NULL ORDER BY updated_at DESC LIMIT 50`).all();
     let totalLT = 0, ltCount = 0;
     const ltByVendor = {};
     ltRows.forEach(r => {
@@ -6919,14 +6893,14 @@ async function handleRequest(req, res) {
     const vendorLeadTime = Object.entries(ltByVendor).map(([name, v]) => ({ name, avg: Math.round(v.total / v.count * 10) / 10, count: v.count })).sort((a, b) => a.avg - b.avg);
 
     // 5. 불량률
-    const defectTotal = db.prepare("SELECT COUNT(*) as cnt FROM defects").get().cnt;
-    const defectMonth = db.prepare("SELECT COUNT(*) as cnt FROM defects WHERE created_at LIKE ?").get(ym + '%').cnt;
+    const defectTotal = (await db.prepare("SELECT COUNT(*) as cnt FROM defects").get()).cnt;
+    const defectMonth = (await db.prepare("SELECT COUNT(*) as cnt FROM defects WHERE created_at LIKE ?").get(ym + '%')).cnt;
 
     // 6. 알림 (안전재고 미달 = urgent 품목 수, 납기 초과, 미승인 PO)
-    const pendingPO = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status IN ('draft','sent')`).get().cnt;
-    const overdueCount = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE expected_date < date('now') AND status NOT IN ('received','cancelled','os_pending')`).get().cnt;
+    const pendingPO = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status IN ('draft','sent')`).get()).cnt;
+    const overdueCount = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE expected_date < date('now') AND status NOT IN ('received','cancelled','os_pending')`).get()).cnt;
     // 납기 임박 (D-3 이내)
-    const upcomingDeadlineCount = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE expected_date >= date('now') AND expected_date <= date('now','+3 days') AND status NOT IN ('received','cancelled','os_pending')`).get().cnt;
+    const upcomingDeadlineCount = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE expected_date >= date('now') AND expected_date <= date('now','+3 days') AND status NOT IN ('received','cancelled','os_pending')`).get()).cnt;
 
     ok(res, {
       monthlyPO, vendorShare, statusDist, avgLeadTime, vendorLeadTime,
@@ -6941,19 +6915,19 @@ async function handleRequest(req, res) {
     const type = pathname.split('/').pop();
     let rows = [], filename = '', headers = [];
     if (type === 'po') {
-      rows = db.prepare('SELECT po_id, po_number, po_date, vendor_name, po_type, status, total_qty, expected_date, notes, created_at FROM po_header ORDER BY po_date DESC').all();
+      rows = await db.prepare('SELECT po_id, po_number, po_date, vendor_name, po_type, status, total_qty, expected_date, notes, created_at FROM po_header ORDER BY po_date DESC').all();
       filename = 'po_list.csv';
       headers = ['발주ID', '발주번호', '발주일', '거래처', '유형', '상태', '수량', '납기일', '비고', '생성일'];
     } else if (type === 'vendors') {
-      rows = db.prepare('SELECT vendor_id, name, type, email, phone, contact, notes, created_at FROM vendors ORDER BY name').all();
+      rows = await db.prepare('SELECT vendor_id, name, type, email, phone, contact, notes, created_at FROM vendors ORDER BY name').all();
       filename = 'vendors.csv';
       headers = ['ID', '거래처명', '유형', '이메일', '전화', '담당자', '비고', '생성일'];
     } else if (type === 'products') {
-      rows = db.prepare('SELECT * FROM products ORDER BY product_code').all();
+      rows = await db.prepare('SELECT * FROM products ORDER BY product_code').all();
       filename = 'products.csv';
       headers = Object.keys(rows[0] || {});
     } else if (type === 'defects') {
-      rows = db.prepare('SELECT * FROM defects ORDER BY created_at DESC').all();
+      rows = await db.prepare('SELECT * FROM defects ORDER BY created_at DESC').all();
       filename = 'defects.csv';
       headers = Object.keys(rows[0] || {});
     } else {
@@ -7311,7 +7285,7 @@ async function handleRequest(req, res) {
   // ── 보고서 CRUD API ──
   // GET /api/reports — 보고서 목록
   if (pathname === '/api/reports' && method === 'GET') {
-    const rows = db.prepare(`SELECT id, title, subtitle, report_type, created_at, updated_at FROM reports ORDER BY created_at DESC`).all();
+    const rows = await db.prepare(`SELECT id, title, subtitle, report_type, created_at, updated_at FROM reports ORDER BY created_at DESC`).all();
     ok(res, rows);
     return;
   }
@@ -7319,7 +7293,7 @@ async function handleRequest(req, res) {
   // GET /api/reports/:id — 보고서 상세
   if (pathname.match(/^\/api\/reports\/\d+$/) && method === 'GET') {
     const id = parseInt(pathname.split('/').pop());
-    const row = db.prepare('SELECT * FROM reports WHERE id=?').get(id);
+    const row = await db.prepare('SELECT * FROM reports WHERE id=?').get(id);
     if (!row) { fail(res, 404, '보고서를 찾을 수 없습니다'); return; }
     ok(res, row);
     return;
@@ -7330,7 +7304,7 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const { title, subtitle, report_type, content } = body;
     if (!title) { fail(res, 400, '제목 필수'); return; }
-    const result = db.prepare(`INSERT INTO reports (title, subtitle, report_type, content) VALUES (?,?,?,?)`).run(
+    const result = await db.prepare(`INSERT INTO reports (title, subtitle, report_type, content) VALUES (?,?,?,?)`).run(
       title, subtitle || '', report_type || 'general', typeof content === 'string' ? content : JSON.stringify(content || {})
     );
     ok(res, { id: result.lastInsertRowid });
@@ -7341,13 +7315,13 @@ async function handleRequest(req, res) {
   if (pathname.match(/^\/api\/reports\/\d+$/) && method === 'PUT') {
     const id = parseInt(pathname.split('/').pop());
     const body = await readJSON(req);
-    const existing = db.prepare('SELECT * FROM reports WHERE id=?').get(id);
+    const existing = await db.prepare('SELECT * FROM reports WHERE id=?').get(id);
     if (!existing) { fail(res, 404, '보고서를 찾을 수 없습니다'); return; }
     const title = body.title !== undefined ? body.title : existing.title;
     const subtitle = body.subtitle !== undefined ? body.subtitle : existing.subtitle;
     const report_type = body.report_type !== undefined ? body.report_type : existing.report_type;
     const content = body.content !== undefined ? (typeof body.content === 'string' ? body.content : JSON.stringify(body.content)) : existing.content;
-    db.prepare(`UPDATE reports SET title=?, subtitle=?, report_type=?, content=?, updated_at=datetime('now','localtime') WHERE id=?`).run(title, subtitle, report_type, content, id);
+    await db.prepare(`UPDATE reports SET title=?, subtitle=?, report_type=?, content=?, updated_at=datetime('now','localtime') WHERE id=?`).run(title, subtitle, report_type, content, id);
     ok(res, { id, updated: true });
     return;
   }
@@ -7355,7 +7329,7 @@ async function handleRequest(req, res) {
   // DELETE /api/reports/:id — 보고서 삭제
   if (pathname.match(/^\/api\/reports\/\d+$/) && method === 'DELETE') {
     const id = parseInt(pathname.split('/').pop());
-    db.prepare('DELETE FROM reports WHERE id=?').run(id);
+    await db.prepare('DELETE FROM reports WHERE id=?').run(id);
     ok(res, { deleted: id });
     return;
   }
@@ -7456,7 +7430,7 @@ async function handleRequest(req, res) {
 
   // GET /api/po-drafts — 발주서 목록
   if (pathname === '/api/po-drafts' && method === 'GET') {
-    const rows = db.prepare(`SELECT * FROM po_drafts ORDER BY created_at DESC`).all();
+    const rows = await db.prepare(`SELECT * FROM po_drafts ORDER BY created_at DESC`).all();
     ok(res, rows);
     return;
   }
@@ -7486,7 +7460,7 @@ async function handleRequest(req, res) {
   // POST /api/po-drafts/:id/email — 발주서 이메일 발송
   if (pathname.match(/^\/api\/po-drafts\/\d+\/email$/) && method === 'POST') {
     const id = parseInt(pathname.split('/')[3]);
-    const draft = db.prepare('SELECT * FROM po_drafts WHERE id=?').get(id);
+    const draft = await db.prepare('SELECT * FROM po_drafts WHERE id=?').get(id);
     if (!draft) { fail(res, 404, '발주서 없음'); return; }
     if (!smtpTransporter) { fail(res, 503, 'SMTP 미설정 — .env에 SMTP_USER, SMTP_PASS 추가 필요'); return; }
     const body = await readJSON(req);
@@ -7578,7 +7552,7 @@ async function handleRequest(req, res) {
   // DELETE /api/po-drafts/:id — 발주서 삭제
   if (pathname.match(/^\/api\/po-drafts\/\d+$/) && method === 'DELETE') {
     const id = parseInt(pathname.split('/').pop());
-    db.prepare(`DELETE FROM po_drafts WHERE id=?`).run(id);
+    await db.prepare(`DELETE FROM po_drafts WHERE id=?`).run(id);
     ok(res, { deleted: true });
     return;
   }
@@ -7618,7 +7592,7 @@ async function handleRequest(req, res) {
     if (to) { sql += ' AND note_date <= ?'; params.push(to); }
     if (q) { sql += ' AND (title LIKE ? OR content LIKE ?)'; params.push('%'+q+'%', '%'+q+'%'); }
     sql += ' ORDER BY note_date DESC, note_id DESC';
-    const rows = db.prepare(sql).all(...params);
+    const rows = await db.prepare(sql).all(...params);
     ok(res, rows);
     return;
   }
@@ -7626,7 +7600,7 @@ async function handleRequest(req, res) {
   const noteGet = pathname.match(/^\/api\/notes\/(\d+)$/);
   if (noteGet && method === 'GET') {
     const id = parseInt(noteGet[1]);
-    const note = db.prepare('SELECT * FROM vendor_notes WHERE note_id = ?').get(id);
+    const note = await db.prepare('SELECT * FROM vendor_notes WHERE note_id = ?').get(id);
     if (!note) { fail(res, 404, 'Note not found'); return; }
     ok(res, note);
     return;
@@ -7634,7 +7608,7 @@ async function handleRequest(req, res) {
 
   if (pathname === '/api/notes' && method === 'POST') {
     const body = await readJSON(req);
-    const info = db.prepare(`INSERT INTO vendor_notes (vendor_id, vendor_name, title, content, note_type, note_date) VALUES (?, ?, ?, ?, ?, ?)`).run(
+    const info = await db.prepare(`INSERT INTO vendor_notes (vendor_id, vendor_name, title, content, note_type, note_date) VALUES (?, ?, ?, ?, ?, ?)`).run(
       body.vendor_id || null,
       body.vendor_name || '',
       body.title || '',
@@ -7660,7 +7634,7 @@ async function handleRequest(req, res) {
     }
     if (fields.length === 0) { fail(res, 400, 'No fields to update'); return; }
     fields.push(`updated_at = datetime('now','localtime')`);
-    db.prepare(`UPDATE vendor_notes SET ${fields.join(', ')} WHERE note_id = @id`).run(params);
+    await db.prepare(`UPDATE vendor_notes SET ${fields.join(', ')} WHERE note_id = @id`).run(params);
     ok(res, { note_id: id });
     return;
   }
@@ -7668,8 +7642,8 @@ async function handleRequest(req, res) {
   const noteDel = pathname.match(/^\/api\/notes\/(\d+)$/);
   if (noteDel && method === 'DELETE') {
     const id = parseInt(noteDel[1]);
-    db.prepare('DELETE FROM note_comments WHERE note_id = ?').run(id);
-    db.prepare('DELETE FROM vendor_notes WHERE note_id = ?').run(id);
+    await db.prepare('DELETE FROM note_comments WHERE note_id = ?').run(id);
+    await db.prepare('DELETE FROM vendor_notes WHERE note_id = ?').run(id);
     ok(res, { deleted: id });
     return;
   }
@@ -7677,7 +7651,7 @@ async function handleRequest(req, res) {
   // GET /api/notes/:id/comments
   const noteComGet = pathname.match(/^\/api\/notes\/(\d+)\/comments$/);
   if (noteComGet && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM note_comments WHERE note_id=? ORDER BY created_at ASC').all(noteComGet[1]);
+    const rows = await db.prepare('SELECT * FROM note_comments WHERE note_id=? ORDER BY created_at ASC').all(noteComGet[1]);
     ok(res, rows);
     return;
   }
@@ -7687,7 +7661,7 @@ async function handleRequest(req, res) {
   if (noteComPost && method === 'POST') {
     const b = await readJSON(req);
     if (!b.content?.trim()) { fail(res, 400, 'content required'); return; }
-    const info = db.prepare('INSERT INTO note_comments (note_id, author, content) VALUES (?,?,?)').run(
+    const info = await db.prepare('INSERT INTO note_comments (note_id, author, content) VALUES (?,?,?)').run(
       parseInt(noteComPost[1]), b.author||'', b.content.trim()
     );
     ok(res, { id: info.lastInsertRowid });
@@ -7697,7 +7671,7 @@ async function handleRequest(req, res) {
   // DELETE /api/note-comments/:id
   const noteComDel = pathname.match(/^\/api\/note-comments\/(\d+)$/);
   if (noteComDel && method === 'DELETE') {
-    db.prepare('DELETE FROM note_comments WHERE id=?').run(noteComDel[1]);
+    await db.prepare('DELETE FROM note_comments WHERE id=?').run(noteComDel[1]);
     ok(res, { deleted: true });
     return;
   }
@@ -7707,17 +7681,17 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/bom' && method === 'GET') {
-    const rows = db.prepare(`SELECT b.*, (SELECT COUNT(*) FROM bom_items WHERE bom_id=b.bom_id) as item_count FROM bom_header b ORDER BY b.product_code`).all();
+    const rows = await db.prepare(`SELECT b.*, (SELECT COUNT(*) FROM bom_items WHERE bom_id=b.bom_id) as item_count FROM bom_header b ORDER BY b.product_code`).all();
     ok(res, rows);
     return;
   }
 
   // GET /api/bom/export — BOM 전체를 플랫 CSV용 데이터로
   if (pathname === '/api/bom/export' && method === 'GET') {
-    const headers = db.prepare('SELECT * FROM bom_header ORDER BY product_code').all();
+    const headers = await db.prepare('SELECT * FROM bom_header ORDER BY product_code').all();
     const processes = ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공'];
-    const rows = headers.map(h => {
-      const items = db.prepare('SELECT * FROM bom_items WHERE bom_id=? ORDER BY sort_order').all(h.bom_id);
+    const rows = await Promise.all(headers.map(async h => {
+      const items = await db.prepare('SELECT * FROM bom_items WHERE bom_id=? ORDER BY sort_order').all(h.bom_id);
       const mat = items.find(i => i.item_type === 'material') || {};
       const row = {
         product_code: h.product_code, product_name: h.product_name||'', brand: h.brand||'',
@@ -7726,7 +7700,7 @@ async function handleRequest(req, res) {
       };
       processes.forEach(p => { const proc = items.find(i => i.process_type === p); row[p] = proc ? proc.vendor_name : ''; });
       return row;
-    });
+    }));
     ok(res, rows);
     return;
   }
@@ -7737,30 +7711,30 @@ async function handleRequest(req, res) {
     const rows = body.rows || [];
     const processes = ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공'];
     let updated = 0, created = 0;
-    const txn = db.transaction(() => {
+    const txn = db.transaction(async () => {
       for (const r of rows) {
         if (!r.product_code) continue;
-        let header = db.prepare('SELECT bom_id FROM bom_header WHERE product_code=?').get(r.product_code);
+        let header = await db.prepare('SELECT bom_id FROM bom_header WHERE product_code=?').get(r.product_code);
         if (header) {
-          db.prepare('UPDATE bom_header SET product_name=?, brand=?, updated_at=datetime(\'now\',\'localtime\') WHERE bom_id=?').run(r.product_name||'', r.brand||'', header.bom_id);
-          db.prepare('DELETE FROM bom_items WHERE bom_id=?').run(header.bom_id);
+          await db.prepare('UPDATE bom_header SET product_name=?, brand=?, updated_at=datetime(\'now\',\'localtime\') WHERE bom_id=?').run(r.product_name||'', r.brand||'', header.bom_id);
+          await db.prepare('DELETE FROM bom_items WHERE bom_id=?').run(header.bom_id);
           updated++;
         } else {
-          const ins = db.prepare('INSERT INTO bom_header (product_code, product_name, brand) VALUES (?,?,?)').run(r.product_code, r.product_name||'', r.brand||'');
+          const ins = await db.prepare('INSERT INTO bom_header (product_code, product_name, brand) VALUES (?,?,?)').run(r.product_code, r.product_name||'', r.brand||'');
           header = { bom_id: ins.lastInsertRowid };
           created++;
         }
         const insItem = db.prepare('INSERT INTO bom_items (bom_id, item_type, material_code, material_name, vendor_name, process_type, qty_per, cut_spec, plate_spec, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?)');
         let sort = 0;
         if (r.material_code) {
-          insItem.run(header.bom_id, 'material', r.material_code, r.material_name||'', r.vendor_name||'', '원재료', 1, r.cut_spec||'', r.plate_spec||'', sort++);
+          await insItem.run(header.bom_id, 'material', r.material_code, r.material_name||'', r.vendor_name||'', '원재료', 1, r.cut_spec||'', r.plate_spec||'', sort++);
         }
-        processes.forEach(p => {
-          if (r[p]) insItem.run(header.bom_id, 'process', '', '', r[p], p, 1, '', '', sort++);
+        processes.forEach(async p => {
+          if (r[p]) await insItem.run(header.bom_id, 'process', '', '', r[p], p, 1, '', '', sort++);
         });
       }
     });
-    txn();
+    await txn();
     ok(res, { created, updated, total: created + updated });
     return;
   }
@@ -7768,9 +7742,9 @@ async function handleRequest(req, res) {
   const bomGet = pathname.match(/^\/api\/bom\/(.+)$/);
   if (bomGet && method === 'GET' && bomGet[1] !== 'import') {
     const code = decodeURIComponent(bomGet[1]);
-    const header = db.prepare('SELECT * FROM bom_header WHERE product_code = ? OR bom_id = ?').get(code, parseInt(code)||0);
+    const header = await db.prepare('SELECT * FROM bom_header WHERE product_code = ? OR bom_id = ?').get(code, parseInt(code)||0);
     if (!header) { res.writeHead(404); res.end(JSON.stringify({error:'not found'})); return; }
-    const items = db.prepare('SELECT * FROM bom_items WHERE bom_id = ? ORDER BY sort_order, bom_item_id').all(header.bom_id);
+    const items = await db.prepare('SELECT * FROM bom_items WHERE bom_id = ? ORDER BY sort_order, bom_item_id').all(header.bom_id);
     ok(res, { ...header, items });
     return;
   }
@@ -7780,11 +7754,11 @@ async function handleRequest(req, res) {
     const ins = db.prepare('INSERT INTO bom_header (product_code, product_name, brand, notes, default_order_qty, finished_w, finished_h) VALUES (?,?,?,?,?,?,?)');
     const insItem = db.prepare(`INSERT INTO bom_items (bom_id, item_type, material_code, material_name, vendor_name, process_type, qty_per, cut_spec, plate_spec, unit, notes, sort_order,
       material_type, paper_standard, paper_type, gsm, finished_w, finished_h, bleed, grip, loss_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?)`);
-    const txn = db.transaction(() => {
-      const r = ins.run(b.product_code, b.product_name||'', b.brand||'', b.notes||'', b.default_order_qty||1000, b.finished_w||0, b.finished_h||0);
+    const txn = db.transaction(async () => {
+      const r = await ins.run(b.product_code, b.product_name||'', b.brand||'', b.notes||'', b.default_order_qty||1000, b.finished_w||0, b.finished_h||0);
       const bomId = r.lastInsertRowid;
-      (b.items||[]).forEach((it,i) => {
-        insItem.run(bomId, it.item_type||'material', it.material_code||'', it.material_name||'', it.vendor_name||'', it.process_type||'', it.qty_per||1, it.cut_spec||'', it.plate_spec||'', it.unit||'EA', it.notes||'', i,
+      (b.items||[]).forEach(async (it,i) => {
+        await insItem.run(bomId, it.item_type||'material', it.material_code||'', it.material_name||'', it.vendor_name||'', it.process_type||'', it.qty_per||1, it.cut_spec||'', it.plate_spec||'', it.unit||'EA', it.notes||'', i,
           it.material_type||'IMPOSITION', it.paper_standard||'', it.paper_type||'', it.gsm||0, it.finished_w||0, it.finished_h||0, it.bleed??3, it.grip??10, it.loss_rate??5);
       });
       return bomId;
@@ -7798,26 +7772,26 @@ async function handleRequest(req, res) {
   if (bomPut && method === 'PUT') {
     const bomId = parseInt(bomPut[1]);
     const b = await readJSON(req);
-    const txn = db.transaction(() => {
-      if (b.product_name !== undefined) db.prepare("UPDATE bom_header SET product_name=?, brand=?, notes=?, default_order_qty=?, finished_w=?, finished_h=?, updated_at=datetime('now','localtime') WHERE bom_id=?").run(b.product_name||'', b.brand||'', b.notes||'', b.default_order_qty||1000, b.finished_w||0, b.finished_h||0, bomId);
+    const txn = db.transaction(async () => {
+      if (b.product_name !== undefined) await db.prepare("UPDATE bom_header SET product_name=?, brand=?, notes=?, default_order_qty=?, finished_w=?, finished_h=?, updated_at=datetime('now','localtime') WHERE bom_id=?").run(b.product_name||'', b.brand||'', b.notes||'', b.default_order_qty||1000, b.finished_w||0, b.finished_h||0, bomId);
       if (b.items) {
-        db.prepare('DELETE FROM bom_items WHERE bom_id=?').run(bomId);
+        await db.prepare('DELETE FROM bom_items WHERE bom_id=?').run(bomId);
         const insItem = db.prepare(`INSERT INTO bom_items (bom_id, item_type, material_code, material_name, vendor_name, process_type, qty_per, cut_spec, plate_spec, unit, notes, sort_order,
           material_type, paper_standard, paper_type, gsm, finished_w, finished_h, bleed, grip, loss_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?)`);
-        b.items.forEach((it,i) => {
-          insItem.run(bomId, it.item_type||'material', it.material_code||'', it.material_name||'', it.vendor_name||'', it.process_type||'', it.qty_per||1, it.cut_spec||'', it.plate_spec||'', it.unit||'EA', it.notes||'', i,
+        b.items.forEach(async (it,i) => {
+          await insItem.run(bomId, it.item_type||'material', it.material_code||'', it.material_name||'', it.vendor_name||'', it.process_type||'', it.qty_per||1, it.cut_spec||'', it.plate_spec||'', it.unit||'EA', it.notes||'', i,
             it.material_type||'IMPOSITION', it.paper_standard||'', it.paper_type||'', it.gsm||0, it.finished_w||0, it.finished_h||0, it.bleed??3, it.grip??10, it.loss_rate??5);
         });
       }
     });
-    txn();
+    await txn();
     ok(res, { updated: bomId });
     return;
   }
 
   const bomDel = pathname.match(/^\/api\/bom\/(\d+)$/);
   if (bomDel && method === 'DELETE') {
-    db.prepare('DELETE FROM bom_header WHERE bom_id=?').run(parseInt(bomDel[1]));
+    await db.prepare('DELETE FROM bom_header WHERE bom_id=?').run(parseInt(bomDel[1]));
     ok(res, { deleted: parseInt(bomDel[1]) });
     return;
   }
@@ -7831,29 +7805,29 @@ async function handleRequest(req, res) {
     const insH = db.prepare('INSERT OR IGNORE INTO bom_header (product_code, product_name, brand) VALUES (?,?,?)');
     const insI = db.prepare('INSERT INTO bom_items (bom_id, item_type, material_code, material_name, vendor_name, process_type, qty_per, cut_spec, plate_spec, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?)');
     let count = 0;
-    const txn = db.transaction(() => {
+    const txn = db.transaction(async () => {
       for (const [code, info] of Object.entries(pi)) {
-        const r = insH.run(code, info['제품사양']||'', '');
-        const bomId = r.lastInsertRowid || db.prepare('SELECT bom_id FROM bom_header WHERE product_code=?').get(code)?.bom_id;
+        const r = await insH.run(code, info['제품사양']||'', '');
+        const bomId = r.lastInsertRowid || await db.prepare('SELECT bom_id FROM bom_header WHERE product_code=?').get(code)?.bom_id;
         if (!bomId) continue;
         // skip if already has items
-        const existing = db.prepare('SELECT COUNT(*) as c FROM bom_items WHERE bom_id=?').get(bomId);
+        const existing = await db.prepare('SELECT COUNT(*) as c FROM bom_items WHERE bom_id=?').get(bomId);
         if (existing.c > 0) continue;
         let sort = 0;
         // raw material
         if (info['제지사'] || info['원자재코드']) {
-          insI.run(bomId, 'material', info['원자재코드']||'', info['원재료용지명']||'', info['제지사']||'', '원재료', 1, info['절']||'', info['조판']||'', sort++);
+          await insI.run(bomId, 'material', info['원자재코드']||'', info['원재료용지명']||'', info['제지사']||'', '원재료', 1, info['절']||'', info['조판']||'', sort++);
         }
         // post-processes
         for (const proc of processes) {
           if (info[proc]) {
-            insI.run(bomId, 'process', '', '', info[proc], proc, 1, '', '', sort++);
+            await insI.run(bomId, 'process', '', '', info[proc], proc, 1, '', '', sort++);
           }
         }
         count++;
       }
     });
-    txn();
+    await txn();
     ok(res, { imported: count });
     return;
   }
@@ -7866,7 +7840,7 @@ async function handleRequest(req, res) {
     try {
       const piData = getProductInfo();
       const jsonCodes = new Set(Object.keys(piData));
-      const dbRows = db.prepare("SELECT product_code FROM products").all();
+      const dbRows = await db.prepare("SELECT product_code FROM products").all();
       const dbCodes = new Set(dbRows.map(r => r.product_code));
       let inBoth = 0, onlyJson = 0, onlyDb = 0;
       for (const c of jsonCodes) { if (dbCodes.has(c)) inBoth++; else onlyJson++; }
@@ -7881,14 +7855,14 @@ async function handleRequest(req, res) {
   if (pathname === '/api/product-info/sync' && method === 'POST') {
     try {
       const piData = getProductInfo();
-      const dbRows = db.prepare("SELECT product_code FROM products").all();
+      const dbRows = await db.prepare("SELECT product_code FROM products").all();
       const dbCodes = new Set(dbRows.map(r => r.product_code));
       const upd = db.prepare(`UPDATE products SET material_code=?, material_name=?, cut_spec=?, jopan=?, paper_maker=?, updated_at=datetime('now','localtime') WHERE product_code=?`);
       let updated = 0, skipped = 0;
-      const txn = db.transaction(() => {
+      const txn = db.transaction(async () => {
         for (const [code, info] of Object.entries(piData)) {
           if (dbCodes.has(code)) {
-            upd.run(
+            await upd.run(
               info['원자재코드'] || '',
               info['원재료용지명'] || '',
               info['절'] || '',
@@ -7902,7 +7876,7 @@ async function handleRequest(req, res) {
           }
         }
       });
-      txn();
+      await txn();
       // 캐시 무효화
       productInfoCache = null;
       ok(res, { updated, skipped });
@@ -7922,7 +7896,7 @@ async function handleRequest(req, res) {
     if (!pool) { fail(res, 503, 'DD 데이터베이스 미연결 (DD_DB_SERVER 설정 확인)'); return; }
     try {
       const [ddRows] = await pool.query("SELECT id, code, name, type, price, sale_price, is_display, printing_company FROM products WHERE deleted_at IS NULL");
-      const dbRows = db.prepare("SELECT product_code FROM products WHERE origin = 'DD'").all();
+      const dbRows = await db.prepare("SELECT product_code FROM products WHERE origin = 'DD'").all();
       const ddCodes = new Set(ddRows.map(r => r.code));
       const dbCodes = new Set(dbRows.map(r => r.product_code));
       const inBoth = [...ddCodes].filter(c => dbCodes.has(c)).length;
@@ -7950,18 +7924,18 @@ async function handleRequest(req, res) {
           memo = excluded.memo,
           updated_at = datetime('now','localtime')`);
       let inserted = 0, updated = 0;
-      const tx = db.transaction(() => {
+      const tx = db.transaction(async () => {
         for (const r of ddRows) {
           const code = r.code || '';
           if (!code) continue;
-          const existing = db.prepare("SELECT id FROM products WHERE product_code = ?").get(code);
+          const existing = await db.prepare("SELECT id FROM products WHERE product_code = ?").get(code);
           const status = r.is_display === 'Y' ? 'active' : 'inactive';
           const memo = `DD#${r.id} | ${r.printing_company || ''} | ${r.price}→${r.sale_price}원`;
-          upsert.run(code, r.name || '', r.type || 'wcard', status, memo);
+          await upsert.run(code, r.name || '', r.type || 'wcard', status, memo);
           if (existing) updated++; else inserted++;
         }
       });
-      tx();
+      await tx();
       productInfoCache = null;
       ok(res, { inserted, updated, total: ddRows.length });
     } catch(e) { fail(res, 500, 'DD 동기화 실패: ' + e.message); }
@@ -8068,7 +8042,7 @@ async function handleRequest(req, res) {
         prodMap[c][r.ym.slice(0,4)+'-'+r.ym.slice(4,6)] = Math.round(r.qty||0);
       });
       // 품목명 조회
-      const nameRows = db.prepare(`SELECT product_code, product_name FROM products WHERE product_code IN (${topCodes.map(()=>'?').join(',')})`).all(...topCodes);
+      const nameRows = await db.prepare(`SELECT product_code, product_name FROM products WHERE product_code IN (${topCodes.map(()=>'?').join(',')})`).all(...topCodes);
       const nameMap = {};
       nameRows.forEach(r => nameMap[r.product_code] = r.product_name);
       const products = topCodes.map(code => ({
@@ -8093,19 +8067,19 @@ async function handleRequest(req, res) {
       const products = b.products || [];
       if (!products.length) { fail(res, 400, 'products 배열 필요'); return; }
       let totalRows = 0, totalProducts = 0;
-      const txn = db.transaction(() => {
-        db.exec('DELETE FROM china_price_tiers');
+      const txn = db.transaction(async () => {
+        await db.exec('DELETE FROM china_price_tiers');
         const ins = db.prepare('INSERT INTO china_price_tiers (product_code, product_type, qty_tier, unit_price, currency, effective_date) VALUES (?,?,?,?,?,?)');
         for (const p of products) {
           if (!p.product_code || !p.tiers || !p.tiers.length) continue;
           totalProducts++;
           for (const t of p.tiers) {
-            ins.run(p.product_code, p.product_type || 'Card', t.qty || 0, t.price || 0, 'CNY', new Date().toISOString().slice(0,10));
+            await ins.run(p.product_code, p.product_type || 'Card', t.qty || 0, t.price || 0, 'CNY', new Date().toISOString().slice(0,10));
             totalRows++;
           }
         }
       });
-      txn();
+      await txn();
       ok(res, { imported: totalRows, products: totalProducts });
     } catch (e) {
       fail(res, 500, '단가 업로드 오류: ' + e.message);
@@ -8123,7 +8097,7 @@ async function handleRequest(req, res) {
     const params = [];
     if (month) { q += ' WHERE plan_month = ?'; params.push(month); }
     q += ' ORDER BY product_code';
-    const plans = db.prepare(q).all(...params);
+    const plans = await db.prepare(q).all(...params);
 
     // 2024-2025 이력 데이터 첨부
     const mm = month ? month.split('-')[1] : '';
@@ -8147,12 +8121,12 @@ async function handleRequest(req, res) {
     const b = await readJSON(req);
     const items = b.items || [b];
     const upsert = db.prepare('INSERT INTO production_plan (plan_month, product_code, product_name, brand, planned_qty, confirmed, notes) VALUES (?,?,?,?,?,?,?) ON CONFLICT(plan_month, product_code) DO UPDATE SET planned_qty=excluded.planned_qty, confirmed=excluded.confirmed, notes=excluded.notes, updated_at=datetime(\'now\',\'localtime\')');
-    const txn = db.transaction(() => {
+    const txn = db.transaction(async () => {
       for (const it of items) {
-        upsert.run(it.plan_month, it.product_code, it.product_name||'', it.brand||'', it.planned_qty||0, it.confirmed||0, it.notes||'');
+        await upsert.run(it.plan_month, it.product_code, it.product_name||'', it.brand||'', it.planned_qty||0, it.confirmed||0, it.notes||'');
       }
     });
-    txn();
+    await txn();
     ok(res, { saved: items.length });
     return;
   }
@@ -8167,7 +8141,7 @@ async function handleRequest(req, res) {
     if (sets.length) {
       sets.push("updated_at=datetime('now','localtime')");
       vals.push(parseInt(planPut[1]));
-      db.prepare(`UPDATE production_plan SET ${sets.join(',')} WHERE plan_id=?`).run(...vals);
+      await db.prepare(`UPDATE production_plan SET ${sets.join(',')} WHERE plan_id=?`).run(...vals);
     }
     ok(res, { updated: parseInt(planPut[1]) });
     return;
@@ -8177,10 +8151,10 @@ async function handleRequest(req, res) {
   if (pathname === '/api/plans' && method === 'DELETE') {
     const month = parsed.searchParams.get('month');
     if (month) {
-      const r = db.prepare('DELETE FROM production_plan WHERE plan_month=?').run(month);
+      const r = await db.prepare('DELETE FROM production_plan WHERE plan_month=?').run(month);
       ok(res, { deleted: r.changes, month });
     } else {
-      const r = db.prepare('DELETE FROM production_plan').run();
+      const r = await db.prepare('DELETE FROM production_plan').run();
       ok(res, { deleted: r.changes });
     }
     return;
@@ -8188,7 +8162,7 @@ async function handleRequest(req, res) {
 
   const planDel = pathname.match(/^\/api\/plans\/(\d+)$/);
   if (planDel && method === 'DELETE') {
-    db.prepare('DELETE FROM production_plan WHERE plan_id=?').run(parseInt(planDel[1]));
+    await db.prepare('DELETE FROM production_plan WHERE plan_id=?').run(parseInt(planDel[1]));
     ok(res, { deleted: parseInt(planDel[1]) });
     return;
   }
@@ -8223,7 +8197,7 @@ async function handleRequest(req, res) {
     let count = 0;
     let methodUsed = hasHist ? 'weighted_history' : 'fallback_rolling';
 
-    const txn = db.transaction(() => {
+    const txn = db.transaction(async () => {
       for (const p of erpProducts) {
         const code = p['품목코드'];
         const brand = p['브랜드'] || '';
@@ -8256,11 +8230,11 @@ async function handleRequest(req, res) {
         }
 
         if (planned <= 0) continue;
-        upsert.run(month, code, '', brand, planned, note);
+        await upsert.run(month, code, '', brand, planned, note);
         count++;
       }
     });
-    txn();
+    await txn();
     ok(res, { generated: count, month, method: methodUsed });
     return;
   }
@@ -8287,25 +8261,25 @@ async function handleRequest(req, res) {
     // 발주이력 필터: order_history 테이블에 있는 품목코드만 포함
     let histCodes = null;
     if (useHistoryFilter) {
-      const hRows = db.prepare('SELECT DISTINCT product_code FROM order_history').all();
+      const hRows = await db.prepare('SELECT DISTINCT product_code FROM order_history').all();
       if (hRows.length > 0) {
         histCodes = new Set(hRows.map(r => r.product_code));
       }
     }
     // Get plans for the month
-    let plans = db.prepare('SELECT * FROM production_plan WHERE plan_month=? AND planned_qty>0').all(month);
+    let plans = await db.prepare('SELECT * FROM production_plan WHERE plan_month=? AND planned_qty>0').all(month);
     if (histCodes) {
       const before = plans.length;
       plans = plans.filter(p => histCodes.has(p.product_code));
       console.log(`MRP 발주이력 필터: ${before} → ${plans.length} (${before - plans.length}개 제외)`);
     }
     // Clear previous results for this month
-    db.prepare('DELETE FROM mrp_result WHERE plan_month=?').run(month);
+    await db.prepare('DELETE FROM mrp_result WHERE plan_month=?').run(month);
     const insR = db.prepare('INSERT INTO mrp_result (plan_month, product_code, material_code, material_name, vendor_name, process_type, gross_req, on_hand, on_order, net_req, order_qty, unit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
     let resultCount = 0;
-    const txn = db.transaction(() => {
+    const txn = db.transaction(async () => {
       for (const plan of plans) {
-        const bom = db.prepare('SELECT bi.* FROM bom_items bi JOIN bom_header bh ON bi.bom_id=bh.bom_id WHERE bh.product_code=? ORDER BY bi.sort_order').all(plan.product_code);
+        const bom = await db.prepare('SELECT bi.* FROM bom_items bi JOIN bom_header bh ON bi.bom_id=bh.bom_id WHERE bh.product_code=? ORDER BY bi.sort_order').all(plan.product_code);
         if (!bom.length) continue;
         for (const item of bom) {
           const gross = plan.planned_qty * (item.qty_per || 1);
@@ -8313,7 +8287,7 @@ async function handleRequest(req, res) {
           let onHand = 0;
           if (item.item_type === 'material' && item.material_code) {
             // find products using this material and sum their available stock
-            const relatedBoms = db.prepare('SELECT bh.product_code FROM bom_header bh JOIN bom_items bi ON bh.bom_id=bi.bom_id WHERE bi.material_code=?').all(item.material_code);
+            const relatedBoms = await db.prepare('SELECT bh.product_code FROM bom_header bh JOIN bom_items bi ON bh.bom_id=bi.bom_id WHERE bi.material_code=?').all(item.material_code);
             // Use the current product's ERP available stock as proxy
             const erpItem = erpMap[plan.product_code];
             onHand = erpItem ? Math.max(0, erpItem['가용재고'] || 0) : 0;
@@ -8321,16 +8295,16 @@ async function handleRequest(req, res) {
           // on_order: sum of outstanding PO qty for this material/product
           let onOrder = 0;
           const lookupCode = item.material_code || plan.product_code;
-          const poRows = db.prepare("SELECT SUM(pi.ordered_qty - pi.received_qty) as pending FROM po_items pi JOIN po_header ph ON pi.po_id=ph.po_id WHERE pi.product_code=? AND ph.status NOT IN ('완료','취소')").get(lookupCode);
+          const poRows = await db.prepare("SELECT SUM(pi.ordered_qty - pi.received_qty) as pending FROM po_items pi JOIN po_header ph ON pi.po_id=ph.po_id WHERE pi.product_code=? AND ph.status NOT IN ('완료','취소')").get(lookupCode);
           onOrder = poRows?.pending || 0;
           const net = Math.max(0, gross - onHand - onOrder);
           const orderQty = net > 0 ? Math.ceil(net / roundUnit) * roundUnit : 0;
-          insR.run(month, plan.product_code, item.material_code||'', item.material_name||'', item.vendor_name||'', item.process_type||'', gross, onHand, onOrder, net, orderQty, item.unit||'EA');
+          await insR.run(month, plan.product_code, item.material_code||'', item.material_name||'', item.vendor_name||'', item.process_type||'', gross, onHand, onOrder, net, orderQty, item.unit||'EA');
           resultCount++;
         }
       }
     });
-    txn();
+    await txn();
     ok(res, { plan_month: month, results: resultCount, history_filter: histCodes ? histCodes.size : 0 });
     return;
   }
@@ -8343,7 +8317,7 @@ async function handleRequest(req, res) {
     const params = [];
     if (month) { q += ' WHERE plan_month=?'; params.push(month); }
     q += ' ORDER BY vendor_name, product_code';
-    ok(res, db.prepare(q).all(...params));
+    ok(res, await db.prepare(q).all(...params));
     return;
   }
 
@@ -8353,10 +8327,10 @@ async function handleRequest(req, res) {
     if (!decoded) { fail(res, 401, '인증 필요'); return; }
     const month = parsed.searchParams.get('month');
     if (month) {
-      const r = db.prepare('DELETE FROM mrp_result WHERE plan_month=?').run(month);
+      const r = await db.prepare('DELETE FROM mrp_result WHERE plan_month=?').run(month);
       ok(res, { deleted: r.changes, month });
     } else {
-      const r = db.prepare('DELETE FROM mrp_result').run();
+      const r = await db.prepare('DELETE FROM mrp_result').run();
       ok(res, { deleted: r.changes });
     }
     return;
@@ -8370,20 +8344,20 @@ async function handleRequest(req, res) {
     const roundUnit = b.round_unit || 1;
 
     // 1) Pending work orders (not completed/cancelled)
-    const pendingWOs = db.prepare(
+    const pendingWOs = await db.prepare(
       "SELECT wo_id, product_code, product_name, ordered_qty, produced_qty FROM work_orders WHERE status NOT IN ('completed','cancelled')"
     ).all();
 
     // 2) Confirmed / in_production sales orders with their items
-    const confirmedSOs = db.prepare(
+    const confirmedSOs = await db.prepare(
       "SELECT so.id, soi.product_code, soi.product_name, soi.qty FROM sales_orders so JOIN sales_order_items soi ON so.id=soi.order_id WHERE so.status IN ('confirmed','in_production') AND soi.qty > 0"
     ).all();
 
     // 3) Build gross requirements per material via BOM explosion
     const grossMap = {}; // material_code -> { product_name, gross_req }
 
-    const explodeBOM = (productCode, productName, qty) => {
-      const bomRows = db.prepare(
+    const explodeBOM = async (productCode, productName, qty) => {
+      const bomRows = await db.prepare(
         "SELECT bi.material_code, bi.material_name, bi.qty_per, bi.unit FROM bom_items bi JOIN bom_header bh ON bi.bom_id=bh.bom_id WHERE bh.product_code=? AND bi.item_type='material' AND bi.material_code IS NOT NULL AND bi.material_code != '' ORDER BY bi.sort_order"
       ).all(productCode);
       if (!bomRows.length) return;
@@ -8400,19 +8374,19 @@ async function handleRequest(req, res) {
     for (const wo of pendingWOs) {
       const remaining = Math.max(0, (wo.ordered_qty || 0) - (wo.produced_qty || 0));
       if (remaining > 0 && wo.product_code) {
-        explodeBOM(wo.product_code, wo.product_name, remaining);
+        await explodeBOM(wo.product_code, wo.product_name, remaining);
       }
     }
 
     // Explode from sales orders
     for (const so of confirmedSOs) {
       if (so.qty > 0 && so.product_code) {
-        explodeBOM(so.product_code, so.product_name, so.qty);
+        await explodeBOM(so.product_code, so.product_name, so.qty);
       }
     }
 
     // 4) Get on-hand inventory per material (sum across all warehouses)
-    const invRows = db.prepare(
+    const invRows = await db.prepare(
       "SELECT product_code, SUM(quantity) AS total_qty FROM warehouse_inventory GROUP BY product_code"
     ).all();
     const invMap = {};
@@ -8463,16 +8437,16 @@ async function handleRequest(req, res) {
   if (pathname === '/api/mrp/shortage' && method === 'GET') {
     const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증 필요'); return; }
-    const pendingWOs = db.prepare(
+    const pendingWOs = await db.prepare(
       "SELECT wo_id, product_code, product_name, ordered_qty, produced_qty FROM work_orders WHERE status NOT IN ('completed','cancelled')"
     ).all();
-    const confirmedSOs = db.prepare(
+    const confirmedSOs = await db.prepare(
       "SELECT so.id, soi.product_code, soi.product_name, soi.qty FROM sales_orders so JOIN sales_order_items soi ON so.id=soi.order_id WHERE so.status IN ('confirmed','in_production') AND soi.qty > 0"
     ).all();
 
     const grossMap = {};
-    const explodeBOM = (productCode, qty) => {
-      const bomRows = db.prepare(
+    const explodeBOM = async (productCode, qty) => {
+      const bomRows = await db.prepare(
         "SELECT bi.material_code, bi.material_name, bi.qty_per, bi.unit FROM bom_items bi JOIN bom_header bh ON bi.bom_id=bh.bom_id WHERE bh.product_code=? AND bi.item_type='material' AND bi.material_code IS NOT NULL AND bi.material_code != '' ORDER BY bi.sort_order"
       ).all(productCode);
       for (const bi of bomRows) {
@@ -8486,13 +8460,13 @@ async function handleRequest(req, res) {
 
     for (const wo of pendingWOs) {
       const remaining = Math.max(0, (wo.ordered_qty || 0) - (wo.produced_qty || 0));
-      if (remaining > 0 && wo.product_code) explodeBOM(wo.product_code, remaining);
+      if (remaining > 0 && wo.product_code) await explodeBOM(wo.product_code, remaining);
     }
     for (const so of confirmedSOs) {
-      if (so.qty > 0 && so.product_code) explodeBOM(so.product_code, so.qty);
+      if (so.qty > 0 && so.product_code) await explodeBOM(so.product_code, so.qty);
     }
 
-    const invRows = db.prepare("SELECT product_code, SUM(quantity) AS total_qty FROM warehouse_inventory GROUP BY product_code").all();
+    const invRows = await db.prepare("SELECT product_code, SUM(quantity) AS total_qty FROM warehouse_inventory GROUP BY product_code").all();
     const invMap = {};
     for (const r of invRows) { invMap[r.product_code] = r.total_qty || 0; }
 
@@ -8536,7 +8510,7 @@ async function handleRequest(req, res) {
     const b = await readJSON(req);
     const ids = b.result_ids || [];
     if (!ids.length) { res.writeHead(400); res.end(JSON.stringify({error:'result_ids required'})); return; }
-    const results = db.prepare(`SELECT * FROM mrp_result WHERE result_id IN (${ids.map(()=>'?').join(',')}) AND order_qty > 0`).all(...ids);
+    const results = await db.prepare(`SELECT * FROM mrp_result WHERE result_id IN (${ids.map(()=>'?').join(',')}) AND order_qty > 0`).all(...ids);
     // Group by vendor + process_type
     const groups = {};
     for (const r of results) {
@@ -8545,27 +8519,27 @@ async function handleRequest(req, res) {
       groups[key].push(r);
     }
     const today = new Date().toISOString().slice(0,10).replace(/-/g,'');
-    const cnt = db.prepare("SELECT COUNT(*) as c FROM po_header WHERE po_number LIKE ?").get('PO-'+today+'%');
+    const cnt = await db.prepare("SELECT COUNT(*) as c FROM po_header WHERE po_number LIKE ?").get('PO-'+today+'%');
     let seq = (cnt?.c || 0) + 1;
     const created = [];
-    const txn = db.transaction(() => {
+    const txn = db.transaction(async () => {
       for (const [key, items] of Object.entries(groups)) {
         const [vendor, poType] = key.split('|');
         const poNum = `PO-${today}-${String(seq++).padStart(3,'0')}`;
         const totalQty = items.reduce((s,i) => s + i.order_qty, 0);
         // origin: 첫 번째 품목의 products.origin
-        const _mrpFirstProd = db.prepare('SELECT origin FROM products WHERE product_code=?').get(items[0].product_code || '');
+        const _mrpFirstProd = await db.prepare('SELECT origin FROM products WHERE product_code=?').get(items[0].product_code || '');
         const _mrpOrigin = (_mrpFirstProd && _mrpFirstProd.origin) || '';
-        const r = db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, po_date) VALUES (?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(poNum, poType, vendor, '대기', totalQty, 'MRP 자동생성', _mrpOrigin);
+        const r = await db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, po_date) VALUES (?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(poNum, poType, vendor, '대기', totalQty, 'MRP 자동생성', _mrpOrigin);
         const poId = r.lastInsertRowid;
         for (const item of items) {
-          db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec) VALUES (?,?,?,?,?,?)').run(poId, item.product_code, '', item.process_type, item.order_qty, item.material_name);
-          db.prepare('UPDATE mrp_result SET status=? WHERE result_id=?').run('ordered', item.result_id);
+          await db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec) VALUES (?,?,?,?,?,?)').run(poId, item.product_code, '', item.process_type, item.order_qty, item.material_name);
+          await db.prepare('UPDATE mrp_result SET status=? WHERE result_id=?').run('ordered', item.result_id);
         }
         created.push({ po_number: poNum, vendor, po_type: poType, items: items.length });
       }
     });
-    txn();
+    await txn();
     ok(res, { created });
     return;
   }
@@ -8579,17 +8553,17 @@ async function handleRequest(req, res) {
     const mode = parsed.searchParams.get('mode') || 'full';
     if (mode === 'codes') {
       // 고유 품목코드 목록만
-      const rows = db.prepare('SELECT DISTINCT product_code FROM order_history ORDER BY product_code').all();
+      const rows = await db.prepare('SELECT DISTINCT product_code FROM order_history ORDER BY product_code').all();
       ok(res, rows.map(r => r.product_code));
     } else if (mode === 'today') {
       // 오늘 발주된 품목코드 + 수량
       const today = new Date().toISOString().slice(0,10).replace(/-/g,'-');
-      const rows = db.prepare('SELECT product_code, SUM(order_qty) as total_qty FROM order_history WHERE order_date = ? GROUP BY product_code').all(today);
+      const rows = await db.prepare('SELECT product_code, SUM(order_qty) as total_qty FROM order_history WHERE order_date = ? GROUP BY product_code').all(today);
       const map = {};
       rows.forEach(r => { map[r.product_code] = r.total_qty; });
       ok(res, map);
     } else {
-      const rows = db.prepare('SELECT * FROM order_history ORDER BY order_date DESC, history_id DESC LIMIT 5000').all();
+      const rows = await db.prepare('SELECT * FROM order_history ORDER BY order_date DESC, history_id DESC LIMIT 5000').all();
       ok(res, rows);
     }
     return;
@@ -8597,9 +8571,9 @@ async function handleRequest(req, res) {
 
   // GET /api/order-history/stats — 통계
   if (pathname === '/api/order-history/stats' && method === 'GET') {
-    const total = db.prepare('SELECT COUNT(*) as cnt FROM order_history').get().cnt;
-    const codes = db.prepare('SELECT COUNT(DISTINCT product_code) as cnt FROM order_history').get().cnt;
-    const sheets = db.prepare("SELECT DISTINCT source_sheet FROM order_history WHERE source_sheet != ''").all().map(r => r.source_sheet);
+    const total = (await db.prepare('SELECT COUNT(*) as cnt FROM order_history').get()).cnt;
+    const codes = (await db.prepare('SELECT COUNT(DISTINCT product_code) as cnt FROM order_history').get()).cnt;
+    const sheets = (await db.prepare("SELECT DISTINCT source_sheet FROM order_history WHERE source_sheet != ''").all()).map(r => r.source_sheet);
     ok(res, { total_rows: total, unique_codes: codes, sheets });
     return;
   }
@@ -8620,15 +8594,15 @@ async function handleRequest(req, res) {
        seari, laser, silk, outsource, order_qty, product_spec, source_sheet)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 
-    const txn = db.transaction(() => {
+    const txn = db.transaction(async () => {
       if (clearExisting) {
-        db.prepare('DELETE FROM order_history').run();
+        await db.prepare('DELETE FROM order_history').run();
       }
       let count = 0;
       for (const r of rows) {
         const code = (r.product_code || r[5] || '').toString().trim();
         if (!code) continue;
-        ins.run(
+        await ins.run(
           r.order_date || r[0] || '',
           r.os_no || r[2] || '',
           r.warehouse_order || r[3] || '',
@@ -8702,10 +8676,10 @@ async function handleRequest(req, res) {
     const b = await readJSON(req).catch(() => ({}));
     if (b.source_sheets && Array.isArray(b.source_sheets) && b.source_sheets.length) {
       const ph = b.source_sheets.map(() => '?').join(',');
-      const r = db.prepare(`DELETE FROM order_history WHERE source_sheet IN (${ph})`).run(...b.source_sheets);
+      const r = await db.prepare(`DELETE FROM order_history WHERE source_sheet IN (${ph})`).run(...b.source_sheets);
       ok(res, { deleted: r.changes, source_sheets: b.source_sheets });
     } else {
-      db.prepare('DELETE FROM order_history').run();
+      await db.prepare('DELETE FROM order_history').run();
       ok(res, { deleted: true });
     }
     return;
@@ -8716,7 +8690,7 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/product-notes' && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM product_notes').all();
+    const rows = await db.prepare('SELECT * FROM product_notes').all();
     const map = {};
     rows.forEach(r => { map[r.product_code] = { note_type: r.note_type, note_text: r.note_text }; });
     ok(res, map);
@@ -8730,9 +8704,9 @@ async function handleRequest(req, res) {
     const noteType = b.note_type || '';
     const noteText = b.note_text || '';
     if (!noteType && !noteText) {
-      db.prepare('DELETE FROM product_notes WHERE product_code=?').run(code);
+      await db.prepare('DELETE FROM product_notes WHERE product_code=?').run(code);
     } else {
-      db.prepare('INSERT INTO product_notes (product_code, note_type, note_text, updated_at) VALUES (?,?,?,datetime(\'now\',\'localtime\')) ON CONFLICT(product_code) DO UPDATE SET note_type=excluded.note_type, note_text=excluded.note_text, updated_at=excluded.updated_at').run(code, noteType, noteText);
+      await db.prepare('INSERT INTO product_notes (product_code, note_type, note_text, updated_at) VALUES (?,?,?,datetime(\'now\',\'localtime\')) ON CONFLICT(product_code) DO UPDATE SET note_type=excluded.note_type, note_text=excluded.note_text, updated_at=excluded.updated_at').run(code, noteType, noteText);
     }
     ok(res, { saved: true, product_code: code });
     return;
@@ -8744,14 +8718,14 @@ async function handleRequest(req, res) {
 
   // GET /api/defects/summary — 불량 현황 요약
   if (pathname === '/api/defects/summary' && method === 'GET') {
-    const byStatus = db.prepare(`
+    const byStatus = await db.prepare(`
       SELECT status, COUNT(*) as count FROM defects GROUP BY status
     `).all();
     const byVendor = db.prepare(`
       SELECT vendor_name, COUNT(*) as defect_count, SUM(defect_qty) as total_defect_qty
       FROM defects GROUP BY vendor_name ORDER BY defect_count DESC
     `).all();
-    const byType = db.prepare(`
+    const byType = await db.prepare(`
       SELECT defect_type, COUNT(*) as count FROM defects WHERE defect_type != '' GROUP BY defect_type ORDER BY count DESC
     `).all();
     const since30 = new Date();
@@ -8779,7 +8753,7 @@ async function handleRequest(req, res) {
     if (sp.get('from_date'))    { q += ' AND defect_date>=?'; args.push(sp.get('from_date')); }
     if (sp.get('to_date'))      { q += ' AND defect_date<=?'; args.push(sp.get('to_date')); }
     q += ' ORDER BY defect_date DESC, created_at DESC LIMIT 200';
-    ok(res, db.prepare(q).all(...args));
+    ok(res, await db.prepare(q).all(...args));
     return;
   }
 
@@ -8797,7 +8771,7 @@ async function handleRequest(req, res) {
       + String(today.getMonth() + 1).padStart(2, '0')
       + String(today.getDate()).padStart(2, '0');
     const prefix = `DF${ymd}-`;
-    const lastRow = db.prepare(
+    const lastRow = await db.prepare(
       `SELECT defect_number FROM defects WHERE defect_number LIKE ? ORDER BY defect_number DESC LIMIT 1`
     ).get(prefix + '%');
     let seq = 1;
@@ -8818,8 +8792,8 @@ async function handleRequest(req, res) {
       (defect_id, defect_number, action, from_status, to_status, actor, details)
       VALUES (@defect_id, @defect_number, @action, @from_status, @to_status, @actor, @details)`);
 
-    const tx = db.transaction(() => {
-      const info = insertDefect.run({
+    const tx = db.transaction(async () => {
+      const info = await insertDefect.run({
         defect_number,
         po_id: body.po_id || null,
         po_number: body.po_number || '',
@@ -8836,7 +8810,7 @@ async function handleRequest(req, res) {
         claim_type: body.claim_type || '',
         claim_amount: body.claim_amount || 0,
       });
-      insertLog.run({
+      await insertLog.run({
         defect_id: info.lastInsertRowid,
         defect_number,
         action: 'registered',
@@ -8856,9 +8830,9 @@ async function handleRequest(req, res) {
   const defectIdMatch = pathname.match(/^\/api\/defects\/(\d+)$/);
   if (defectIdMatch && method === 'GET') {
     const defectId = parseInt(defectIdMatch[1]);
-    const defect = db.prepare('SELECT * FROM defects WHERE id=?').get(defectId);
+    const defect = await db.prepare('SELECT * FROM defects WHERE id=?').get(defectId);
     if (!defect) { fail(res, 404, '불량 접수 건 없음'); return; }
-    const logs = db.prepare('SELECT * FROM defect_logs WHERE defect_id=? ORDER BY created_at ASC').all(defectId);
+    const logs = await db.prepare('SELECT * FROM defect_logs WHERE defect_id=? ORDER BY created_at ASC').all(defectId);
     ok(res, { ...defect, logs });
     return;
   }
@@ -8867,7 +8841,7 @@ async function handleRequest(req, res) {
   const defectPutMatch = pathname.match(/^\/api\/defects\/(\d+)$/);
   if (defectPutMatch && method === 'PUT') {
     const defectId = parseInt(defectPutMatch[1]);
-    const defect = db.prepare('SELECT * FROM defects WHERE id=?').get(defectId);
+    const defect = await db.prepare('SELECT * FROM defects WHERE id=?').get(defectId);
     if (!defect) { fail(res, 404, '불량 접수 건 없음'); return; }
     const body = await readJSON(req);
 
@@ -8888,18 +8862,18 @@ async function handleRequest(req, res) {
       (defect_id, defect_number, action, from_status, to_status, actor, details)
       VALUES (?,?,?,?,?,?,?)`);
 
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       // Auto-set resolved_date when resolving
       if (body.status === 'resolved' && !body.resolved_date && !defect.resolved_date) {
         const today = new Date().toISOString().slice(0, 10);
         sets.splice(sets.length - 1, 0, 'resolved_date=?');
         vals.splice(vals.length - 1, 0, today);
       }
-      db.prepare(`UPDATE defects SET ${sets.join(',')} WHERE id=?`).run(...vals);
+      await db.prepare(`UPDATE defects SET ${sets.join(',')} WHERE id=?`).run(...vals);
       if (statusChanged) {
         const actionLabel = body.status === 'in_progress' ? '처리 시작' :
                             body.status === 'resolved'    ? '처리 완료' : '상태 변경';
-        insertLog.run(
+        await insertLog.run(
           defectId, defect.defect_number,
           actionLabel,
           defect.status, body.status,
@@ -8908,7 +8882,7 @@ async function handleRequest(req, res) {
         );
       }
     });
-    tx();
+    await tx();
     ok(res, { id: defectId, status: body.status || defect.status });
     return;
   }
@@ -8917,7 +8891,7 @@ async function handleRequest(req, res) {
   const defectLogMatch = pathname.match(/^\/api\/defects\/(\d+)\/log$/);
   if (defectLogMatch && method === 'POST') {
     const defectId = parseInt(defectLogMatch[1]);
-    const defect = db.prepare('SELECT * FROM defects WHERE id=?').get(defectId);
+    const defect = await db.prepare('SELECT * FROM defects WHERE id=?').get(defectId);
     if (!defect) { fail(res, 404, '불량 접수 건 없음'); return; }
     const body = await readJSON(req);
     if (!body.action) { fail(res, 400, 'action 필수'); return; }
@@ -8938,7 +8912,7 @@ async function handleRequest(req, res) {
   const defectCreatePoMatch = pathname.match(/^\/api\/defects\/(\d+)\/create-po$/);
   if (defectCreatePoMatch && method === 'POST') {
     const defectId = parseInt(defectCreatePoMatch[1]);
-    const defect = db.prepare('SELECT * FROM defects WHERE id=?').get(defectId);
+    const defect = await db.prepare('SELECT * FROM defects WHERE id=?').get(defectId);
     if (!defect) { fail(res, 404, '불량 접수 건 없음'); return; }
     if (!defect.product_code) { fail(res, 400, 'product_code가 없어 발주를 생성할 수 없습니다'); return; }
 
@@ -8947,10 +8921,10 @@ async function handleRequest(req, res) {
     const notes = `불량처리 발주 (${defect.defect_number}) - ${defect.description || '불량 재작업'}`;
 
     // origin 결정
-    const _defOriginProd = db.prepare('SELECT origin FROM products WHERE product_code=?').get(defect.product_code);
+    const _defOriginProd = await db.prepare('SELECT origin FROM products WHERE product_code=?').get(defect.product_code);
     const _defOrigin = (_defOriginProd && _defOriginProd.origin) || '';
 
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       // PO 헤더 생성
       const hdrInfo = db.prepare(`
         INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, defect_id, defect_number, origin, po_date)
@@ -8997,7 +8971,7 @@ async function handleRequest(req, res) {
 
   // GET /api/inspections
   if (pathname === '/api/inspections' && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM incoming_inspections ORDER BY created_at DESC LIMIT 200').all();
+    const rows = await db.prepare('SELECT * FROM incoming_inspections ORDER BY created_at DESC LIMIT 200').all();
     ok(res, rows);
     return;
   }
@@ -9041,7 +9015,7 @@ async function handleRequest(req, res) {
     const params = [];
     if (status) { sql += ' WHERE status = ?'; params.push(status); }
     sql += ' ORDER BY created_at DESC LIMIT 200';
-    ok(res, db.prepare(sql).all(...params));
+    ok(res, await db.prepare(sql).all(...params));
     return;
   }
 
@@ -9055,7 +9029,7 @@ async function handleRequest(req, res) {
       body.vendor_name || '', body.product_code || '', body.ncr_type || 'process',
       body.description || '', body.severity || 'minor', body.responsible || '', body.due_date || ''
     );
-    db.prepare("INSERT INTO ncr_logs (ncr_id, action, to_status, actor, details) VALUES (?,'created','open',?,?)").run(info.lastInsertRowid, body.actor || '', 'NCR 생성');
+    await db.prepare("INSERT INTO ncr_logs (ncr_id, action, to_status, actor, details) VALUES (?,'created','open',?,?)").run(info.lastInsertRowid, body.actor || '', 'NCR 생성');
     ok(res, { ncr_id: info.lastInsertRowid, ncr_number: ncrNum });
     return;
   }
@@ -9064,7 +9038,7 @@ async function handleRequest(req, res) {
   const ncrPut = pathname.match(/^\/api\/ncr\/(\d+)$/);
   if (ncrPut && method === 'PUT') {
     const ncrId = parseInt(ncrPut[1]);
-    const ncr = db.prepare('SELECT * FROM ncr WHERE ncr_id=?').get(ncrId);
+    const ncr = await db.prepare('SELECT * FROM ncr WHERE ncr_id=?').get(ncrId);
     if (!ncr) { fail(res, 404, 'NCR not found'); return; }
     const body = await readJSON(req);
     const sets = [], vals = [];
@@ -9074,10 +9048,10 @@ async function handleRequest(req, res) {
     if (body.status === 'closed' && !ncr.closed_at) { sets.push("closed_at=datetime('now','localtime')"); }
     sets.push("updated_at=datetime('now','localtime')");
     vals.push(ncrId);
-    db.prepare(`UPDATE ncr SET ${sets.join(',')} WHERE ncr_id=?`).run(...vals);
+    await db.prepare(`UPDATE ncr SET ${sets.join(',')} WHERE ncr_id=?`).run(...vals);
     if (body.status && body.status !== ncr.status) {
       const labels = { analysis: '원인분석 중', action: '시정조치 중', closed: '종결' };
-      db.prepare("INSERT INTO ncr_logs (ncr_id, action, from_status, to_status, actor, details) VALUES (?,?,?,?,?,?)").run(
+      await db.prepare("INSERT INTO ncr_logs (ncr_id, action, from_status, to_status, actor, details) VALUES (?,?,?,?,?,?)").run(
         ncrId, labels[body.status] || '상태변경', ncr.status, body.status, body.actor || '', body.details || ''
       );
     }
@@ -9088,9 +9062,9 @@ async function handleRequest(req, res) {
   // GET /api/ncr/:id
   const ncrGet = pathname.match(/^\/api\/ncr\/(\d+)$/);
   if (ncrGet && method === 'GET') {
-    const ncr = db.prepare('SELECT * FROM ncr WHERE ncr_id=?').get(parseInt(ncrGet[1]));
+    const ncr = await db.prepare('SELECT * FROM ncr WHERE ncr_id=?').get(parseInt(ncrGet[1]));
     if (!ncr) { fail(res, 404, 'NCR not found'); return; }
-    ncr.logs = db.prepare('SELECT * FROM ncr_logs WHERE ncr_id=? ORDER BY created_at ASC').all(ncr.ncr_id);
+    ncr.logs = await db.prepare('SELECT * FROM ncr_logs WHERE ncr_id=? ORDER BY created_at ASC').all(ncr.ncr_id);
     ok(res, ncr);
     return;
   }
@@ -9103,12 +9077,12 @@ async function handleRequest(req, res) {
   if (pathname === '/api/vendor-scorecard' && method === 'GET') {
     const vendor = parsed.searchParams.get('vendor');
     if (vendor) {
-      ok(res, db.prepare('SELECT * FROM vendor_scorecard WHERE vendor_name=? ORDER BY eval_month DESC').all(vendor));
+      ok(res, await db.prepare('SELECT * FROM vendor_scorecard WHERE vendor_name=? ORDER BY eval_month DESC').all(vendor));
     } else {
       // 최신 월 기준 전체 업체 스코어카드
-      const latest = db.prepare('SELECT MAX(eval_month) as m FROM vendor_scorecard').get();
+      const latest = await db.prepare('SELECT MAX(eval_month) as m FROM vendor_scorecard').get();
       if (latest && latest.m) {
-        ok(res, db.prepare('SELECT * FROM vendor_scorecard WHERE eval_month=? ORDER BY total_score DESC').all(latest.m));
+        ok(res, await db.prepare('SELECT * FROM vendor_scorecard WHERE eval_month=? ORDER BY total_score DESC').all(latest.m));
       } else {
         ok(res, []);
       }
@@ -9121,16 +9095,16 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const month = body.month || new Date().toISOString().slice(0, 7);
     const monthLike = month + '%';
-    const vendors = db.prepare('SELECT DISTINCT vendor_name FROM po_header WHERE po_date LIKE ? AND vendor_name IS NOT NULL').all(monthLike);
+    const vendors = await db.prepare('SELECT DISTINCT vendor_name FROM po_header WHERE po_date LIKE ? AND vendor_name IS NOT NULL').all(monthLike);
     const results = [];
     for (const { vendor_name } of vendors) {
       if (!vendor_name) continue;
       // 납기 준수율
-      const totalPO = db.prepare("SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date LIKE ? AND status != 'cancelled'").get(vendor_name, monthLike).cnt;
-      const ontimePO = db.prepare("SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date LIKE ? AND status IN ('received','os_pending') AND (expected_date IS NULL OR updated_at <= expected_date || ' 23:59:59')").get(vendor_name, monthLike).cnt;
+      const totalPO = (await db.prepare("SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date LIKE ? AND status != 'cancelled'").get(vendor_name, monthLike)).cnt;
+      const ontimePO = (await db.prepare("SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date LIKE ? AND status IN ('received','os_pending') AND (expected_date IS NULL OR updated_at <= expected_date || ' 23:59:59')").get(vendor_name, monthLike)).cnt;
       const deliveryScore = totalPO > 0 ? Math.round(ontimePO / totalPO * 100) : 100;
       // 품질 점수
-      const defectCount = db.prepare("SELECT COUNT(*) as cnt FROM defects WHERE vendor_name=? AND defect_date LIKE ?").get(vendor_name, monthLike).cnt;
+      const defectCount = (await db.prepare("SELECT COUNT(*) as cnt FROM defects WHERE vendor_name=? AND defect_date LIKE ?").get(vendor_name, monthLike)).cnt;
       const qualityScore = Math.max(0, 100 - defectCount * 10);
       // 종합
       const totalScore = Math.round(deliveryScore * 0.5 + qualityScore * 0.4 + 80 * 0.1); // 가격은 기본 80점
@@ -9154,8 +9128,8 @@ async function handleRequest(req, res) {
     const vals = [];
     if (status) { where += ' AND status=?'; vals.push(status); }
     if (type) { where += ' AND product_type=?'; vals.push(type); }
-    const rows = db.prepare(`SELECT * FROM production_requests WHERE ${where} ORDER BY created_at DESC`).all(...vals);
-    const byStatus = db.prepare(`SELECT status, COUNT(*) as count FROM production_requests GROUP BY status`).all();
+    const rows = await db.prepare(`SELECT * FROM production_requests WHERE ${where} ORDER BY created_at DESC`).all(...vals);
+    const byStatus = await db.prepare(`SELECT status, COUNT(*) as count FROM production_requests GROUP BY status`).all();
     ok(res, { list: rows, byStatus });
     return;
   }
@@ -9175,7 +9149,7 @@ async function handleRequest(req, res) {
       body.printer_vendor || '', body.post_vendor || '',
       body.priority || 'normal', body.due_date || '', body.notes || ''
     );
-    db.prepare(`INSERT INTO production_request_logs (request_id, request_number, action, from_status, to_status, actor, details) VALUES (?,?,?,?,?,?,?)`)
+    await db.prepare(`INSERT INTO production_request_logs (request_id, request_number, action, from_status, to_status, actor, details) VALUES (?,?,?,?,?,?,?)`)
       .run(info.lastInsertRowid, num, '생산요청 등록', '', 'requested', body.requester || 'system', `${body.product_name} ${body.requested_qty || 0}부`);
     ok(res, { id: info.lastInsertRowid, request_number: num });
     return;
@@ -9185,9 +9159,9 @@ async function handleRequest(req, res) {
   const prDetailMatch = pathname.match(/^\/api\/production-requests\/(\d+)$/);
   if (prDetailMatch && method === 'GET') {
     const prId = parseInt(prDetailMatch[1]);
-    const pr = db.prepare('SELECT * FROM production_requests WHERE id=?').get(prId);
+    const pr = await db.prepare('SELECT * FROM production_requests WHERE id=?').get(prId);
     if (!pr) { fail(res, 404, '요청 없음'); return; }
-    const logs = db.prepare('SELECT * FROM production_request_logs WHERE request_id=? ORDER BY created_at ASC').all(prId);
+    const logs = await db.prepare('SELECT * FROM production_request_logs WHERE request_id=? ORDER BY created_at ASC').all(prId);
     ok(res, { ...pr, logs });
     return;
   }
@@ -9195,7 +9169,7 @@ async function handleRequest(req, res) {
   // PUT /api/production-requests/:id — 수정/상태변경
   if (prDetailMatch && method === 'PUT') {
     const prId = parseInt(prDetailMatch[1]);
-    const pr = db.prepare('SELECT * FROM production_requests WHERE id=?').get(prId);
+    const pr = await db.prepare('SELECT * FROM production_requests WHERE id=?').get(prId);
     if (!pr) { fail(res, 404, '요청 없음'); return; }
     const body = await readJSON(req);
 
@@ -9221,11 +9195,11 @@ async function handleRequest(req, res) {
     sets.push("updated_at=datetime('now','localtime')");
     vals.push(prId);
 
-    db.prepare(`UPDATE production_requests SET ${sets.join(',')} WHERE id=?`).run(...vals);
+    await db.prepare(`UPDATE production_requests SET ${sets.join(',')} WHERE id=?`).run(...vals);
 
     if (statusChanged) {
       const statusNames = { requested:'요청등록', design_confirmed:'디자인확인', data_confirmed:'데이터확인', in_production:'생산진행', completed:'완료', cancelled:'취소' };
-      db.prepare(`INSERT INTO production_request_logs (request_id, request_number, action, from_status, to_status, actor, details) VALUES (?,?,?,?,?,?,?)`)
+      await db.prepare(`INSERT INTO production_request_logs (request_id, request_number, action, from_status, to_status, actor, details) VALUES (?,?,?,?,?,?,?)`)
         .run(prId, pr.request_number, `상태변경: ${statusNames[body.status] || body.status}`,
           pr.status, body.status, body.actor || 'system', body.log_details || '');
     }
@@ -9238,10 +9212,10 @@ async function handleRequest(req, res) {
   const prLogMatch = pathname.match(/^\/api\/production-requests\/(\d+)\/log$/);
   if (prLogMatch && method === 'POST') {
     const prId = parseInt(prLogMatch[1]);
-    const pr = db.prepare('SELECT * FROM production_requests WHERE id=?').get(prId);
+    const pr = await db.prepare('SELECT * FROM production_requests WHERE id=?').get(prId);
     if (!pr) { fail(res, 404, '요청 없음'); return; }
     const body = await readJSON(req);
-    db.prepare(`INSERT INTO production_request_logs (request_id, request_number, action, from_status, to_status, actor, details) VALUES (?,?,?,?,?,?,?)`)
+    await db.prepare(`INSERT INTO production_request_logs (request_id, request_number, action, from_status, to_status, actor, details) VALUES (?,?,?,?,?,?,?)`)
       .run(prId, pr.request_number, body.action || '메모', pr.status, pr.status, body.actor || '', body.details || '');
     ok(res, { added: true });
     return;
@@ -9259,7 +9233,7 @@ async function handleRequest(req, res) {
     const vals = [];
     if (type) { where += ' AND product_type=?'; vals.push(type); }
     if (templateOnly) { where += ' AND is_template=1'; }
-    const rows = db.prepare(`SELECT * FROM product_spec_master WHERE ${where} ORDER BY product_type, spec_name`).all(...vals);
+    const rows = await db.prepare(`SELECT * FROM product_spec_master WHERE ${where} ORDER BY product_type, spec_name`).all(...vals);
     ok(res, rows);
     return;
   }
@@ -9293,7 +9267,7 @@ async function handleRequest(req, res) {
     if (!sets.length) { fail(res, 400, '수정 항목 없음'); return; }
     sets.push("updated_at=datetime('now','localtime')");
     vals.push(specId);
-    db.prepare(`UPDATE product_spec_master SET ${sets.join(',')} WHERE id=?`).run(...vals);
+    await db.prepare(`UPDATE product_spec_master SET ${sets.join(',')} WHERE id=?`).run(...vals);
     ok(res, { updated: true });
     return;
   }
@@ -9301,7 +9275,7 @@ async function handleRequest(req, res) {
   // DELETE /api/specs/:id — 삭제
   if (specPutMatch && method === 'DELETE') {
     const specId = parseInt(specPutMatch[1]);
-    db.prepare('DELETE FROM product_spec_master WHERE id=?').run(specId);
+    await db.prepare('DELETE FROM product_spec_master WHERE id=?').run(specId);
     ok(res, { deleted: true });
     return;
   }
@@ -9323,14 +9297,14 @@ async function handleRequest(req, res) {
     if (q) { sql += ` AND (a.acc_name LIKE ? OR a.acc_code LIKE ?)`; params.push('%'+q+'%','%'+q+'%'); }
     if (type) { sql += ` AND a.acc_type=?`; params.push(type); }
     sql += ` ORDER BY a.acc_type, a.acc_name`;
-    ok(res, db.prepare(sql).all(...params));
+    ok(res, await db.prepare(sql).all(...params));
     return;
   }
 
   // POST /api/accessories — 부속품 추가
   if (pathname === '/api/accessories' && method === 'POST') {
     const b = await readJSON(req);
-    const info = db.prepare(`INSERT INTO accessories (acc_code,acc_name,acc_type,current_stock,min_stock,unit,vendor,memo,origin) VALUES (?,?,?,?,?,?,?,?,?)`).run(
+    const info = await db.prepare(`INSERT INTO accessories (acc_code,acc_name,acc_type,current_stock,min_stock,unit,vendor,memo,origin) VALUES (?,?,?,?,?,?,?,?,?)`).run(
       b.acc_code||'', b.acc_name||'', b.acc_type||'기타', b.current_stock||0, b.min_stock||0, b.unit||'개', b.vendor||'', b.memo||'', b.origin||'한국'
     );
     ok(res, { id: info.lastInsertRowid });
@@ -9347,7 +9321,7 @@ async function handleRequest(req, res) {
       if (b[col] !== undefined) { fields.push(`${col}=@${col}`); params[col] = b[col]; }
     }
     fields.push(`updated_at=datetime('now','localtime')`);
-    db.prepare(`UPDATE accessories SET ${fields.join(',')} WHERE id=@id`).run(params);
+    await db.prepare(`UPDATE accessories SET ${fields.join(',')} WHERE id=@id`).run(params);
     ok(res, { updated: true });
     return;
   }
@@ -9355,8 +9329,8 @@ async function handleRequest(req, res) {
   // DELETE /api/accessories/:id
   const accDel = pathname.match(/^\/api\/accessories\/(\d+)$/);
   if (accDel && method === 'DELETE') {
-    db.prepare('DELETE FROM product_accessories WHERE acc_id=?').run(accDel[1]);
-    db.prepare('DELETE FROM accessories WHERE id=?').run(accDel[1]);
+    await db.prepare('DELETE FROM product_accessories WHERE acc_id=?').run(accDel[1]);
+    await db.prepare('DELETE FROM accessories WHERE id=?').run(accDel[1]);
     ok(res, { deleted: true });
     return;
   }
@@ -9364,7 +9338,7 @@ async function handleRequest(req, res) {
   // GET /api/accessories/:id/products — 부속품을 사용하는 제품 목록
   const accProdGet = pathname.match(/^\/api\/accessories\/(\d+)\/products$/);
   if (accProdGet && method === 'GET') {
-    const rows = db.prepare(`SELECT p.product_code, p.product_name, pa.qty_per, pa.id AS pa_id FROM product_accessories pa LEFT JOIN products p ON p.product_code=pa.product_code WHERE pa.acc_id=? ORDER BY pa.product_code`).all(accProdGet[1]);
+    const rows = await db.prepare(`SELECT p.product_code, p.product_name, pa.qty_per, pa.id AS pa_id FROM product_accessories pa LEFT JOIN products p ON p.product_code=pa.product_code WHERE pa.acc_id=? ORDER BY pa.product_code`).all(accProdGet[1]);
     ok(res, rows);
     return;
   }
@@ -9373,7 +9347,7 @@ async function handleRequest(req, res) {
   const prodAccGet = pathname.match(/^\/api\/products\/([^/]+)\/accessories$/);
   if (prodAccGet && method === 'GET') {
     const code = decodeURIComponent(prodAccGet[1]);
-    const rows = db.prepare(`SELECT a.*, pa.qty_per, pa.id AS link_id FROM accessories a JOIN product_accessories pa ON a.id=pa.acc_id WHERE pa.product_code=? ORDER BY a.acc_type, a.acc_name`).all(code);
+    const rows = await db.prepare(`SELECT a.*, pa.qty_per, pa.id AS link_id FROM accessories a JOIN product_accessories pa ON a.id=pa.acc_id WHERE pa.product_code=? ORDER BY a.acc_type, a.acc_name`).all(code);
     ok(res, rows);
     return;
   }
@@ -9384,7 +9358,7 @@ async function handleRequest(req, res) {
     const code = decodeURIComponent(prodAccPost[1]);
     const b = await readJSON(req);
     try {
-      const info = db.prepare(`INSERT OR REPLACE INTO product_accessories (product_code, acc_id, qty_per) VALUES (?,?,?)`).run(code, b.acc_id, b.qty_per||1);
+      const info = await db.prepare(`INSERT OR REPLACE INTO product_accessories (product_code, acc_id, qty_per) VALUES (?,?,?)`).run(code, b.acc_id, b.qty_per||1);
       ok(res, { id: info.lastInsertRowid });
     } catch(e) { fail(res, 400, e.message); }
     return;
@@ -9393,7 +9367,7 @@ async function handleRequest(req, res) {
   // DELETE /api/product-accessories/:id — 연결 제거
   const prodAccDel = pathname.match(/^\/api\/product-accessories\/(\d+)$/);
   if (prodAccDel && method === 'DELETE') {
-    db.prepare('DELETE FROM product_accessories WHERE id=?').run(prodAccDel[1]);
+    await db.prepare('DELETE FROM product_accessories WHERE id=?').run(prodAccDel[1]);
     ok(res, { deleted: true });
     return;
   }
@@ -9412,16 +9386,16 @@ async function handleRequest(req, res) {
     if (assignee) { where += ' AND assignee LIKE ?'; vals.push('%' + assignee + '%'); }
     if (priority && priority !== 'all') { where += ' AND priority=?'; vals.push(priority); }
     if (q) { where += ' AND (title LIKE ? OR description LIKE ?)'; vals.push('%'+q+'%', '%'+q+'%'); }
-    const rows = db.prepare(`SELECT * FROM tasks WHERE ${where} ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 WHEN 'low' THEN 4 ELSE 5 END, due_date ASC, created_at DESC`).all(...vals);
+    const rows = await db.prepare(`SELECT * FROM tasks WHERE ${where} ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 WHEN 'low' THEN 4 ELSE 5 END, due_date ASC, created_at DESC`).all(...vals);
     ok(res, rows);
     return;
   }
 
   // GET /api/tasks/:id — 단건
   if (taskMatch && method === 'GET') {
-    const row = db.prepare('SELECT * FROM tasks WHERE id=?').get(parseInt(taskMatch[1]));
+    const row = await db.prepare('SELECT * FROM tasks WHERE id=?').get(parseInt(taskMatch[1]));
     if (!row) { fail(res, 404, 'Not found'); return; }
-    const comments = db.prepare('SELECT * FROM task_comments WHERE task_id=? ORDER BY created_at ASC').all(row.id);
+    const comments = await db.prepare('SELECT * FROM task_comments WHERE task_id=? ORDER BY created_at ASC').all(row.id);
     ok(res, { ...row, comments });
     return;
   }
@@ -9434,7 +9408,7 @@ async function handleRequest(req, res) {
     const num = 'TASK-' + today.getFullYear().toString().slice(2) +
       String(today.getMonth()+1).padStart(2,'0') +
       String(today.getDate()).padStart(2,'0') + '-' +
-      String(db.prepare("SELECT COUNT(*) as c FROM tasks").get().c + 1).padStart(3,'0');
+      String((await db.prepare("SELECT COUNT(*) as c FROM tasks").get()).c + 1).padStart(3,'0');
     const info = db.prepare(`INSERT INTO tasks (task_number,title,description,category,status,priority,assignee,due_date,start_date,related_po,related_vendor,tags,created_by)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       num, b.title, b.description||'', b.category||'기타', b.status||'todo',
@@ -9458,7 +9432,7 @@ async function handleRequest(req, res) {
     else if (b.status && b.status !== 'done') { sets.push("completed_at=''"); }
     sets.push("updated_at=datetime('now','localtime')");
     vals2.push(id);
-    db.prepare(`UPDATE tasks SET ${sets.join(',')} WHERE id=?`).run(...vals2);
+    await db.prepare(`UPDATE tasks SET ${sets.join(',')} WHERE id=?`).run(...vals2);
     if (currentUser) auditLog(currentUser.userId, currentUser.username, 'task_update', 'tasks', id, `업무 수정: ${b.status ? '상태→'+b.status : ''}${b.title ? ' 제목→'+b.title : ''}`, clientIP);
     ok(res, { updated: true });
     return;
@@ -9467,8 +9441,8 @@ async function handleRequest(req, res) {
   // DELETE /api/tasks/:id — 삭제
   if (taskMatch && method === 'DELETE') {
     const id = parseInt(taskMatch[1]);
-    db.prepare('DELETE FROM task_comments WHERE task_id=?').run(id);
-    db.prepare('DELETE FROM tasks WHERE id=?').run(id);
+    await db.prepare('DELETE FROM task_comments WHERE task_id=?').run(id);
+    await db.prepare('DELETE FROM tasks WHERE id=?').run(id);
     if (currentUser) auditLog(currentUser.userId, currentUser.username, 'task_delete', 'tasks', id, `업무 삭제`, clientIP);
     ok(res, { deleted: true });
     return;
@@ -9476,7 +9450,7 @@ async function handleRequest(req, res) {
 
   // GET /api/tasks/:id/comments — 댓글 목록
   if (taskCommentMatch && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM task_comments WHERE task_id=? ORDER BY created_at ASC').all(parseInt(taskCommentMatch[1]));
+    const rows = await db.prepare('SELECT * FROM task_comments WHERE task_id=? ORDER BY created_at ASC').all(parseInt(taskCommentMatch[1]));
     ok(res, rows);
     return;
   }
@@ -9485,7 +9459,7 @@ async function handleRequest(req, res) {
   if (taskCommentMatch && method === 'POST') {
     const b = await readJSON(req);
     if (!b.content) { fail(res, 400, 'content 필수'); return; }
-    const info = db.prepare('INSERT INTO task_comments (task_id, author, content) VALUES (?,?,?)').run(
+    const info = await db.prepare('INSERT INTO task_comments (task_id, author, content) VALUES (?,?,?)').run(
       parseInt(taskCommentMatch[1]), b.author||'', b.content
     );
     ok(res, { id: info.lastInsertRowid });
@@ -9506,11 +9480,11 @@ async function handleRequest(req, res) {
     const tpl = TASK_TEMPLATES[b.template_id];
     if (!tpl) { fail(res, 400, '템플릿 없음'); return; }
     // 기존 단계 삭제 후 재생성
-    db.prepare('DELETE FROM task_steps WHERE task_id=?').run(taskId);
+    await db.prepare('DELETE FROM task_steps WHERE task_id=?').run(taskId);
     const steps = b.custom_steps && b.custom_steps.length ? b.custom_steps : tpl.steps;
     const insert = db.prepare('INSERT INTO task_steps (task_id, step_order, step_name, step_type) VALUES (?,?,?,?)');
-    steps.forEach((s, i) => insert.run(taskId, i, s.name, s.type || 'text'));
-    db.prepare("UPDATE tasks SET template_id=? WHERE id=?").run(b.template_id, taskId);
+    for (let i = 0; i < steps.length; i++) { const s = steps[i]; await insert.run(taskId, i, s.name, s.type || 'text'); }
+    await db.prepare("UPDATE tasks SET template_id=? WHERE id=?").run(b.template_id, taskId);
     ok(res, { created: steps.length });
     return;
   }
@@ -9518,7 +9492,7 @@ async function handleRequest(req, res) {
   // GET /api/tasks/:id/steps — 단계 목록
   const stepsMatch = pathname.match(/^\/api\/tasks\/(\d+)\/steps$/);
   if (stepsMatch && method === 'GET') {
-    const rows = db.prepare('SELECT * FROM task_steps WHERE task_id=? ORDER BY step_order').all(parseInt(stepsMatch[1]));
+    const rows = await db.prepare('SELECT * FROM task_steps WHERE task_id=? ORDER BY step_order').all(parseInt(stepsMatch[1]));
     ok(res, rows);
     return;
   }
@@ -9537,16 +9511,16 @@ async function handleRequest(req, res) {
     }
     if (!sets.length) { fail(res, 400, '변경 없음'); return; }
     vals.push(stepId);
-    db.prepare(`UPDATE task_steps SET ${sets.join(',')} WHERE id=?`).run(...vals);
+    await db.prepare(`UPDATE task_steps SET ${sets.join(',')} WHERE id=?`).run(...vals);
     // 모든 단계 완료 시 task 상태 자동 업데이트
-    const step = db.prepare('SELECT task_id FROM task_steps WHERE id=?').get(stepId);
+    const step = await db.prepare('SELECT task_id FROM task_steps WHERE id=?').get(stepId);
     if (step) {
-      const total = db.prepare('SELECT COUNT(*) as c FROM task_steps WHERE task_id=?').get(step.task_id).c;
-      const done = db.prepare("SELECT COUNT(*) as c FROM task_steps WHERE task_id=? AND is_done=1").get(step.task_id).c;
+      const total = (await db.prepare('SELECT COUNT(*) as c FROM task_steps WHERE task_id=?').get(step.task_id)).c;
+      const done = (await db.prepare("SELECT COUNT(*) as c FROM task_steps WHERE task_id=? AND is_done=1").get(step.task_id)).c;
       if (total > 0 && done === total) {
-        db.prepare("UPDATE tasks SET status='done', completed_at=datetime('now','localtime') WHERE id=?").run(step.task_id);
+        await db.prepare("UPDATE tasks SET status='done', completed_at=datetime('now','localtime') WHERE id=?").run(step.task_id);
       } else if (done > 0) {
-        db.prepare("UPDATE tasks SET status='in_progress' WHERE id=? AND status='todo'").run(step.task_id);
+        await db.prepare("UPDATE tasks SET status='in_progress' WHERE id=? AND status='todo'").run(step.task_id);
       }
     }
     ok(res, { updated: true });
@@ -9561,8 +9535,8 @@ async function handleRequest(req, res) {
   if (pathname === '/api/gift-sets' && method === 'GET') {
     const status = parsed.searchParams.get('status') || 'active';
     const sets = status === 'all'
-      ? db.prepare('SELECT * FROM gift_sets ORDER BY set_name').all()
-      : db.prepare('SELECT * FROM gift_sets WHERE status=? ORDER BY set_name').all(status);
+      ? await db.prepare('SELECT * FROM gift_sets ORDER BY set_name').all()
+      : await db.prepare('SELECT * FROM gift_sets WHERE status=? ORDER BY set_name').all(status);
     const bomStmt = db.prepare('SELECT * FROM gift_set_bom WHERE set_id=? ORDER BY item_type, id');
     // 생산재고 = 전체 assembly 합산
     const totalAssemblyStmt = db.prepare("SELECT COALESCE(SUM(qty),0) as total FROM gift_set_transactions WHERE set_id=? AND tx_type='assembly'");
@@ -9578,7 +9552,7 @@ async function handleRequest(req, res) {
         (async () => {
           try {
             const req = xerpPool.request();
-            const placeholders = xerpCodes.map((c, i) => { req.input(`xc${i}`, sql.VarChar(50), c); return `@xc${i}`; }).join(',');
+            const placeholders = (await Promise.all(xerpCodes.map(async (c, i) => { req.input(`xc${i}`, sql.VarChar(50), c); return `@xc${i}`; }))).join(',');
             const result = await req.query(`
               SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty
               FROM mmInoutItem WITH (NOLOCK)
@@ -9607,15 +9581,15 @@ async function handleRequest(req, res) {
     const upcomingTotalStmt = db.prepare("SELECT COALESCE(SUM(planned_qty),0) as total FROM gift_shipment_schedule WHERE set_id=? AND status='planned' AND ship_date >= date('now','localtime') AND ship_date <= date('now','localtime','+7 days')");
 
     for (const s of sets) {
-      s.bom = bomStmt.all(s.id);
-      const totalAssembly = totalAssemblyStmt.get(s.id).total;
-      const todayAssembly = todayAssemblyStmt.get(s.id).total;
+      s.bom = await bomStmt.all(s.id);
+      const totalAssembly = await totalAssemblyStmt.get(s.id).total;
+      const todayAssembly = await todayAssemblyStmt.get(s.id).total;
       const xerpCode = (s.xerp_code || '').trim();
       const totalShipped = xerpCode ? (xerpShipments[xerpCode] || 0) : 0;
       // 금일 출고 + 출고예정
-      const todayShipped = todayShipStmt.get(s.id).total;
-      const upcomingDays = upcomingShipStmt.all(s.id);
-      const upcomingTotal = upcomingTotalStmt.get(s.id).total;
+      const todayShipped = await todayShipStmt.get(s.id).total;
+      const upcomingDays = await upcomingShipStmt.all(s.id);
+      const upcomingTotal = await upcomingTotalStmt.get(s.id).total;
       // 재고 계산
       s.production_stock = totalAssembly;                              // 생산재고 (조립 누적)
       s.shipped_stock = totalShipped;                                  // 출고재고 (XERP 누적)
@@ -9636,17 +9610,17 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const { set_code, set_name, description, base_stock, xerp_code, bom } = body;
     if (!set_code || !set_name) { fail(res, 400, '세트코드와 이름은 필수입니다'); return; }
-    const existing = db.prepare('SELECT id FROM gift_sets WHERE set_code=?').get(set_code);
+    const existing = await db.prepare('SELECT id FROM gift_sets WHERE set_code=?').get(set_code);
     if (existing) { fail(res, 409, '이미 존재하는 세트코드입니다'); return; }
     const initStock = parseInt(base_stock) || 0;
-    const result = db.prepare('INSERT INTO gift_sets (set_code, set_name, description, base_stock, current_stock, xerp_code) VALUES (?,?,?,?,?,?)').run(set_code, set_name, description || '', initStock, initStock, xerp_code || '');
+    const result = await db.prepare('INSERT INTO gift_sets (set_code, set_name, description, base_stock, current_stock, xerp_code) VALUES (?,?,?,?,?,?)').run(set_code, set_name, description || '', initStock, initStock, xerp_code || '');
     const setId = result.lastInsertRowid;
     if (initStock > 0) {
-      db.prepare('INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)').run(setId, 'base', initStock, body.operator || '', '기초재고 설정');
+      await db.prepare('INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)').run(setId, 'base', initStock, body.operator || '', '기초재고 설정');
     }
     if (Array.isArray(bom) && bom.length) {
       const ins = db.prepare('INSERT OR IGNORE INTO gift_set_bom (set_id, item_type, item_code, item_name, qty_per, unit) VALUES (?,?,?,?,?,?)');
-      for (const b of bom) ins.run(setId, b.item_type || 'material', b.item_code || '', b.item_name || '', b.qty_per || 1, b.unit || 'EA');
+      for (const b of bom) await ins.run(setId, b.item_type || 'material', b.item_code || '', b.item_name || '', b.qty_per || 1, b.unit || 'EA');
     }
     ok(res, { id: setId });
     return;
@@ -9666,12 +9640,12 @@ async function handleRequest(req, res) {
     if (sets.length) {
       sets.push("updated_at=datetime('now','localtime')");
       vals.push(id);
-      db.prepare(`UPDATE gift_sets SET ${sets.join(',')} WHERE id=?`).run(...vals);
+      await db.prepare(`UPDATE gift_sets SET ${sets.join(',')} WHERE id=?`).run(...vals);
     }
     if (Array.isArray(body.bom)) {
-      db.prepare('DELETE FROM gift_set_bom WHERE set_id=?').run(id);
+      await db.prepare('DELETE FROM gift_set_bom WHERE set_id=?').run(id);
       const ins = db.prepare('INSERT OR IGNORE INTO gift_set_bom (set_id, item_type, item_code, item_name, qty_per, unit) VALUES (?,?,?,?,?,?)');
-      for (const b of body.bom) ins.run(id, b.item_type || 'material', b.item_code || '', b.item_name || '', b.qty_per || 1, b.unit || 'EA');
+      for (const b of body.bom) await ins.run(id, b.item_type || 'material', b.item_code || '', b.item_name || '', b.qty_per || 1, b.unit || 'EA');
     }
     ok(res, { updated: true });
     return;
@@ -9686,23 +9660,23 @@ async function handleRequest(req, res) {
     if (!['base', 'assembly', 'shipment', 'adjust'].includes(tx_type)) { fail(res, 400, '유효하지 않은 거래유형'); return; }
     const amount = parseInt(qty);
     if (!amount || amount <= 0) { fail(res, 400, '수량은 1 이상이어야 합니다'); return; }
-    const gs = db.prepare('SELECT * FROM gift_sets WHERE id=?').get(id);
+    const gs = await db.prepare('SELECT * FROM gift_sets WHERE id=?').get(id);
     if (!gs) { fail(res, 404, '세트를 찾을 수 없습니다'); return; }
-    const txRun = db.transaction(() => {
-      db.prepare('INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)').run(id, tx_type, amount, operator || '', memo || '');
+    const txRun = db.transaction(async () => {
+      await db.prepare('INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)').run(id, tx_type, amount, operator || '', memo || '');
       let newStock;
       if (tx_type === 'base') {
         newStock = amount;
-        db.prepare('UPDATE gift_sets SET current_stock=?, base_stock=?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, amount, id);
+        await db.prepare('UPDATE gift_sets SET current_stock=?, base_stock=?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, amount, id);
       } else if (tx_type === 'assembly') {
         newStock = gs.current_stock + amount;
-        db.prepare('UPDATE gift_sets SET current_stock=current_stock+?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, id);
+        await db.prepare('UPDATE gift_sets SET current_stock=current_stock+?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, id);
       } else if (tx_type === 'shipment') {
         newStock = gs.current_stock - amount;
-        db.prepare('UPDATE gift_sets SET current_stock=current_stock-?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, id);
+        await db.prepare('UPDATE gift_sets SET current_stock=current_stock-?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, id);
       } else {
         newStock = gs.current_stock + amount;
-        db.prepare('UPDATE gift_sets SET current_stock=current_stock+?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, id);
+        await db.prepare('UPDATE gift_sets SET current_stock=current_stock+?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, id);
       }
       return newStock;
     });
@@ -9717,20 +9691,20 @@ async function handleRequest(req, res) {
     const id = parseInt(gsTxList[1]);
     const date = parsed.searchParams.get('date') || new Date().toLocaleDateString('en-CA');
     const limit = parseInt(parsed.searchParams.get('limit')) || 200;
-    const rows = db.prepare("SELECT * FROM gift_set_transactions WHERE set_id=? AND date(created_at)=? ORDER BY created_at DESC LIMIT ?").all(id, date, limit);
+    const rows = await db.prepare("SELECT * FROM gift_set_transactions WHERE set_id=? AND date(created_at)=? ORDER BY created_at DESC LIMIT ?").all(id, date, limit);
     ok(res, rows);
     return;
   }
 
   // GET /api/gift-sets/production-capacity — 최대 생산가능수량
   if (pathname === '/api/gift-sets/production-capacity' && method === 'GET') {
-    const sets = db.prepare("SELECT * FROM gift_sets WHERE status='active' ORDER BY set_name").all();
+    const sets = await db.prepare("SELECT * FROM gift_sets WHERE status='active' ORDER BY set_name").all();
     const bomStmt = db.prepare('SELECT * FROM gift_set_bom WHERE set_id=?');
     const accStmt = db.prepare("SELECT current_stock FROM accessories WHERE acc_code=? OR acc_name=? LIMIT 1");
     const xerpProducts = (xerpInventoryCache && xerpInventoryCache.products) ? xerpInventoryCache.products : [];
     const result = [];
     for (const s of sets) {
-      const bomItems = bomStmt.all(s.id);
+      const bomItems = await bomStmt.all(s.id);
       let maxProduction = Infinity;
       let bottleneck = null;
       const components = [];
@@ -9740,7 +9714,7 @@ async function handleRequest(req, res) {
           const xp = xerpProducts.find(p => (p['제품코드'] || '') === b.item_code);
           available = xp ? (xp['가용재고'] || 0) : 0;
         } else {
-          const acc = accStmt.get(b.item_code, b.item_name);
+          const acc = await accStmt.get(b.item_code, b.item_name);
           available = acc ? acc.current_stock : 0;
         }
         const canMake = b.qty_per > 0 ? Math.floor(available / b.qty_per) : Infinity;
@@ -9773,7 +9747,7 @@ async function handleRequest(req, res) {
     if (status) { q += ' AND status = ?'; p.push(status); }
     if (setId) { q += ' AND set_id = ?'; p.push(setId); }
     q += ' ORDER BY ship_date ASC, id ASC';
-    const rows = db.prepare(q).all(...p);
+    const rows = await db.prepare(q).all(...p);
     ok(res, rows); return;
   }
 
@@ -9781,8 +9755,8 @@ async function handleRequest(req, res) {
   if (pathname === '/api/gift-shipment-schedule' && method === 'POST') {
     const body = await readJSON(req);
     if (!body.set_id || !body.ship_date || !body.planned_qty) { fail(res, 400, 'set_id, ship_date, planned_qty required'); return; }
-    const gs = db.prepare('SELECT * FROM gift_sets WHERE id=?').get(body.set_id);
-    const info = db.prepare("INSERT INTO gift_shipment_schedule (set_id, set_code, set_name, ship_date, planned_qty, order_ref, recipient, address, notes) VALUES (?,?,?,?,?,?,?,?,?)")
+    const gs = await db.prepare('SELECT * FROM gift_sets WHERE id=?').get(body.set_id);
+    const info = await db.prepare("INSERT INTO gift_shipment_schedule (set_id, set_code, set_name, ship_date, planned_qty, order_ref, recipient, address, notes) VALUES (?,?,?,?,?,?,?,?,?)")
       .run(body.set_id, gs?.set_code || '', gs?.set_name || '', body.ship_date, body.planned_qty, body.order_ref || '', body.recipient || '', body.address || '', body.notes || '');
     ok(res, { id: info.lastInsertRowid }); return;
   }
@@ -9792,12 +9766,12 @@ async function handleRequest(req, res) {
   if (gssShipMatch && method === 'POST') {
     const id = gssShipMatch[1];
     const body = await readJSON(req);
-    const sched = db.prepare('SELECT * FROM gift_shipment_schedule WHERE id=?').get(id);
+    const sched = await db.prepare('SELECT * FROM gift_shipment_schedule WHERE id=?').get(id);
     if (!sched) { fail(res, 404, 'Schedule not found'); return; }
     const shippedQty = body.shipped_qty || sched.planned_qty;
-    db.prepare("UPDATE gift_shipment_schedule SET status='shipped', shipped_qty=?, updated_at=datetime('now','localtime') WHERE id=?").run(shippedQty, id);
+    await db.prepare("UPDATE gift_shipment_schedule SET status='shipped', shipped_qty=?, updated_at=datetime('now','localtime') WHERE id=?").run(shippedQty, id);
     // gift_set_transactions에 출고 기록
-    db.prepare("INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)").run(
+    await db.prepare("INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)").run(
       sched.set_id, 'shipment', shippedQty, body.operator || '', `출고: ${sched.recipient || ''} ${sched.order_ref || ''}`);
     ok(res, { shipped: true, qty: shippedQty }); return;
   }
@@ -9806,20 +9780,20 @@ async function handleRequest(req, res) {
   const gssDelMatch = pathname.match(/^\/api\/gift-shipment-schedule\/(\d+)$/);
   if (gssDelMatch && method === 'DELETE') {
     const id = gssDelMatch[1];
-    db.prepare("UPDATE gift_shipment_schedule SET status='cancelled', updated_at=datetime('now','localtime') WHERE id=? AND status='planned'").run(id);
+    await db.prepare("UPDATE gift_shipment_schedule SET status='cancelled', updated_at=datetime('now','localtime') WHERE id=? AND status='planned'").run(id);
     ok(res, { cancelled: true }); return;
   }
 
   // GET /api/gift-production-summary — 생산재고 종합 대시보드
   if (pathname === '/api/gift-production-summary' && method === 'GET') {
-    const sets = db.prepare("SELECT * FROM gift_sets WHERE status='active' ORDER BY set_name").all();
+    const sets = await db.prepare("SELECT * FROM gift_sets WHERE status='active' ORDER BY set_name").all();
     const result = [];
     for (const s of sets) {
-      const totalAssembly = db.prepare("SELECT COALESCE(SUM(qty),0) as t FROM gift_set_transactions WHERE set_id=? AND tx_type='assembly'").get(s.id).t;
-      const totalShipment = db.prepare("SELECT COALESCE(SUM(qty),0) as t FROM gift_set_transactions WHERE set_id=? AND tx_type='shipment'").get(s.id).t;
-      const todayShipped = db.prepare("SELECT COALESCE(SUM(shipped_qty),0) as t FROM gift_shipment_schedule WHERE set_id=? AND ship_date=date('now','localtime') AND status='shipped'").get(s.id).t;
-      const todayAssembly = db.prepare("SELECT COALESCE(SUM(qty),0) as t FROM gift_set_transactions WHERE set_id=? AND tx_type='assembly' AND date(created_at)=date('now','localtime')").get(s.id).t;
-      const upcoming = db.prepare("SELECT ship_date, SUM(planned_qty) as qty FROM gift_shipment_schedule WHERE set_id=? AND status='planned' AND ship_date >= date('now','localtime') AND ship_date <= date('now','localtime','+7 days') GROUP BY ship_date ORDER BY ship_date").all(s.id);
+      const totalAssembly = (await db.prepare("SELECT COALESCE(SUM(qty),0) as t FROM gift_set_transactions WHERE set_id=? AND tx_type='assembly'").get(s.id)).t;
+      const totalShipment = (await db.prepare("SELECT COALESCE(SUM(qty),0) as t FROM gift_set_transactions WHERE set_id=? AND tx_type='shipment'").get(s.id)).t;
+      const todayShipped = (await db.prepare("SELECT COALESCE(SUM(shipped_qty),0) as t FROM gift_shipment_schedule WHERE set_id=? AND ship_date=date('now','localtime') AND status='shipped'").get(s.id)).t;
+      const todayAssembly = (await db.prepare("SELECT COALESCE(SUM(qty),0) as t FROM gift_set_transactions WHERE set_id=? AND tx_type='assembly' AND date(created_at)=date('now','localtime')").get(s.id)).t;
+      const upcoming = await db.prepare("SELECT ship_date, SUM(planned_qty) as qty FROM gift_shipment_schedule WHERE set_id=? AND status='planned' AND ship_date >= date('now','localtime') AND ship_date <= date('now','localtime','+7 days') GROUP BY ship_date ORDER BY ship_date").all(s.id);
       const upcomingTotal = upcoming.reduce((sum, d) => sum + d.qty, 0);
       const productionStock = s.base_stock + totalAssembly - totalShipment; // 기초 + 생산 - 출고
       result.push({
@@ -9844,7 +9818,7 @@ async function handleRequest(req, res) {
 
   // GET /api/warehouses — 창고 목록
   if (pathname === '/api/warehouses' && method === 'GET') {
-    const rows = db.prepare("SELECT * FROM warehouses ORDER BY is_default DESC, id ASC").all();
+    const rows = await db.prepare("SELECT * FROM warehouses ORDER BY is_default DESC, id ASC").all();
     ok(res, rows);
     return;
   }
@@ -9855,7 +9829,7 @@ async function handleRequest(req, res) {
     const { code, name, location, description } = body;
     if (!code || !name) { fail(res, 400, '창고코드와 이름은 필수입니다'); return; }
     try {
-      db.prepare("INSERT INTO warehouses (code, name, location, description) VALUES (?, ?, ?, ?)").run(code, name, location || '', description || '');
+      await db.prepare("INSERT INTO warehouses (code, name, location, description) VALUES (?, ?, ?, ?)").run(code, name, location || '', description || '');
       ok(res, { message: '창고 등록 완료' });
     } catch (e) {
       if (e.message.includes('UNIQUE')) fail(res, 409, '이미 존재하는 창고코드입니다');
@@ -9879,7 +9853,7 @@ async function handleRequest(req, res) {
     if (fields.length === 0) { fail(res, 400, '수정할 내용이 없습니다'); return; }
     fields.push("updated_at=datetime('now','localtime')");
     vals.push(whId);
-    db.prepare(`UPDATE warehouses SET ${fields.join(', ')} WHERE id=?`).run(...vals);
+    await db.prepare(`UPDATE warehouses SET ${fields.join(', ')} WHERE id=?`).run(...vals);
     ok(res, { message: '창고 수정 완료' });
     return;
   }
@@ -9888,13 +9862,13 @@ async function handleRequest(req, res) {
   const whDelMatch = pathname.match(/^\/api\/warehouses\/(\d+)$/);
   if (whDelMatch && method === 'DELETE') {
     const whId = parseInt(whDelMatch[1]);
-    const wh = db.prepare("SELECT * FROM warehouses WHERE id=?").get(whId);
+    const wh = await db.prepare("SELECT * FROM warehouses WHERE id=?").get(whId);
     if (!wh) { fail(res, 404, '창고를 찾을 수 없습니다'); return; }
     if (wh.is_default) { fail(res, 400, '기본 창고는 삭제할 수 없습니다'); return; }
-    const invCount = db.prepare("SELECT COUNT(*) as cnt FROM warehouse_inventory WHERE warehouse_id=? AND quantity>0").get(whId);
+    const invCount = await db.prepare("SELECT COUNT(*) as cnt FROM warehouse_inventory WHERE warehouse_id=? AND quantity>0").get(whId);
     if (invCount.cnt > 0) { fail(res, 400, '재고가 남아있는 창고는 삭제할 수 없습니다. 먼저 재고를 이동해주세요.'); return; }
-    db.prepare("DELETE FROM warehouse_inventory WHERE warehouse_id=?").run(whId);
-    db.prepare("DELETE FROM warehouses WHERE id=?").run(whId);
+    await db.prepare("DELETE FROM warehouse_inventory WHERE warehouse_id=?").run(whId);
+    await db.prepare("DELETE FROM warehouses WHERE id=?").run(whId);
     ok(res, { message: '창고 삭제 완료' });
     return;
   }
@@ -9911,7 +9885,7 @@ async function handleRequest(req, res) {
       const args = [warehouseId];
       if (search) { sql += " AND (wi.product_code LIKE ? OR wi.product_name LIKE ?)"; args.push(`%${search}%`, `%${search}%`); }
       sql += " ORDER BY wi.product_code";
-      rows = db.prepare(sql).all(...args);
+      rows = await db.prepare(sql).all(...args);
     } else {
       // 전체: 품목별 합산 + 창고별 내역
       let sql = `SELECT wi.product_code, wi.product_name,
@@ -9921,7 +9895,7 @@ async function handleRequest(req, res) {
       const args = [];
       if (search) { sql += " WHERE wi.product_code LIKE ? OR wi.product_name LIKE ?"; args.push(`%${search}%`, `%${search}%`); }
       sql += " GROUP BY wi.product_code, wi.product_name ORDER BY wi.product_code";
-      rows = db.prepare(sql).all(...args);
+      rows = await db.prepare(sql).all(...args);
     }
     ok(res, rows);
     return;
@@ -9933,11 +9907,11 @@ async function handleRequest(req, res) {
     const { warehouse_id, product_code, product_name, quantity } = body;
     if (!warehouse_id || !product_code) { fail(res, 400, '창고ID와 제품코드는 필수입니다'); return; }
     const qty = parseInt(quantity) || 0;
-    const existing = db.prepare("SELECT * FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?").get(warehouse_id, product_code);
+    const existing = await db.prepare("SELECT * FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?").get(warehouse_id, product_code);
     if (existing) {
-      db.prepare("UPDATE warehouse_inventory SET quantity=?, product_name=?, updated_at=datetime('now','localtime') WHERE id=?").run(qty, product_name || existing.product_name, existing.id);
+      await db.prepare("UPDATE warehouse_inventory SET quantity=?, product_name=?, updated_at=datetime('now','localtime') WHERE id=?").run(qty, product_name || existing.product_name, existing.id);
     } else {
-      db.prepare("INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity) VALUES (?, ?, ?, ?)").run(warehouse_id, product_code, product_name || '', qty);
+      await db.prepare("INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity) VALUES (?, ?, ?, ?)").run(warehouse_id, product_code, product_name || '', qty);
     }
     ok(res, { message: '재고 저장 완료' });
     return;
@@ -9950,10 +9924,10 @@ async function handleRequest(req, res) {
     if (!warehouse_id || !Array.isArray(items)) { fail(res, 400, '창고ID와 items 배열 필수'); return; }
     const upsert = db.prepare(`INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity)
       VALUES (?, ?, ?, ?) ON CONFLICT(warehouse_id, product_code) DO UPDATE SET quantity=excluded.quantity, product_name=excluded.product_name, updated_at=datetime('now','localtime')`);
-    const tx = db.transaction((list) => {
+    const tx = db.transaction(async (list) => {
       let cnt = 0;
       for (const it of list) {
-        upsert.run(warehouse_id, it.product_code, it.product_name || '', parseInt(it.quantity) || 0);
+        await upsert.run(warehouse_id, it.product_code, it.product_name || '', parseInt(it.quantity) || 0);
         cnt++;
       }
       return cnt;
@@ -9975,34 +9949,34 @@ async function handleRequest(req, res) {
     if (qty <= 0) { fail(res, 400, '이동 수량은 1 이상이어야 합니다'); return; }
 
     // 출발 창고 재고 확인
-    const fromInv = db.prepare("SELECT * FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?").get(from_warehouse, product_code);
+    const fromInv = await db.prepare("SELECT * FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?").get(from_warehouse, product_code);
     if (!fromInv || fromInv.quantity < qty) {
       fail(res, 400, `출발 창고 재고 부족 (현재: ${fromInv ? fromInv.quantity : 0})`); return;
     }
 
     // 창고명 조회
-    const fromWh = db.prepare("SELECT name FROM warehouses WHERE id=?").get(from_warehouse);
-    const toWh = db.prepare("SELECT name FROM warehouses WHERE id=?").get(to_warehouse);
+    const fromWh = await db.prepare("SELECT name FROM warehouses WHERE id=?").get(from_warehouse);
+    const toWh = await db.prepare("SELECT name FROM warehouses WHERE id=?").get(to_warehouse);
     const now = new Date().toISOString().slice(0, 10);
     const autoMemo = memo || `${now} ${qty}개 ${fromWh ? fromWh.name : ''}→${toWh ? toWh.name : ''}`;
 
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       // 출발 창고 차감 + 메모 업데이트
       const fromMemo = `${now} ${qty}개 출고→${toWh ? toWh.name : ''}`;
-      db.prepare("UPDATE warehouse_inventory SET quantity=quantity-?, memo=?, updated_at=datetime('now','localtime') WHERE warehouse_id=? AND product_code=?").run(qty, fromMemo, from_warehouse, product_code);
+      await db.prepare("UPDATE warehouse_inventory SET quantity=quantity-?, memo=?, updated_at=datetime('now','localtime') WHERE warehouse_id=? AND product_code=?").run(qty, fromMemo, from_warehouse, product_code);
       // 도착 창고 추가 + 메모 업데이트
       const toMemo = `${now} ${qty}개 입고←${fromWh ? fromWh.name : ''}`;
-      const toInv = db.prepare("SELECT * FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?").get(to_warehouse, product_code);
+      const toInv = await db.prepare("SELECT * FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?").get(to_warehouse, product_code);
       if (toInv) {
-        db.prepare("UPDATE warehouse_inventory SET quantity=quantity+?, memo=?, updated_at=datetime('now','localtime') WHERE warehouse_id=? AND product_code=?").run(qty, toMemo, to_warehouse, product_code);
+        await db.prepare("UPDATE warehouse_inventory SET quantity=quantity+?, memo=?, updated_at=datetime('now','localtime') WHERE warehouse_id=? AND product_code=?").run(qty, toMemo, to_warehouse, product_code);
       } else {
-        db.prepare("INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity, memo) VALUES (?, ?, ?, ?, ?)").run(to_warehouse, product_code, product_name || fromInv.product_name || '', qty, toMemo);
+        await db.prepare("INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity, memo) VALUES (?, ?, ?, ?, ?)").run(to_warehouse, product_code, product_name || fromInv.product_name || '', qty, toMemo);
       }
       // 이력 기록
-      db.prepare("INSERT INTO warehouse_transfers (from_warehouse, to_warehouse, product_code, product_name, quantity, operator, memo) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      await db.prepare("INSERT INTO warehouse_transfers (from_warehouse, to_warehouse, product_code, product_name, quantity, operator, memo) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(from_warehouse, to_warehouse, product_code, product_name || fromInv.product_name || '', qty, operator || '', autoMemo);
     });
-    tx();
+    await tx();
     ok(res, { message: `${qty}개 이동 완료` });
     return;
   }
@@ -10034,7 +10008,7 @@ async function handleRequest(req, res) {
       JOIN warehouses tw ON t.to_warehouse=tw.id
       WHERE ${where.join(' AND ')}
       ORDER BY t.created_at DESC`;
-    const rows = db.prepare(sql).all(...args);
+    const rows = await db.prepare(sql).all(...args);
     ok(res, rows);
     return;
   }
@@ -10057,11 +10031,11 @@ async function handleRequest(req, res) {
     }
 
     // 총 건수/수량
-    const total = db.prepare(`SELECT COUNT(*) as cnt, COALESCE(SUM(quantity),0) as total_qty FROM warehouse_transfers t WHERE ${dateFilter}`).get(...args);
+    const total = await db.prepare(`SELECT COUNT(*) as cnt, COALESCE(SUM(quantity),0) as total_qty FROM warehouse_transfers t WHERE ${dateFilter}`).get(...args);
     // 오늘 건수
-    const today = db.prepare(`SELECT COUNT(*) as cnt, COALESCE(SUM(quantity),0) as total_qty FROM warehouse_transfers t WHERE date(t.created_at)=date('now','localtime')`).get();
+    const today = await db.prepare(`SELECT COUNT(*) as cnt, COALESCE(SUM(quantity),0) as total_qty FROM warehouse_transfers t WHERE date(t.created_at)=date('now','localtime')`).get();
     // 최다 이동 품목
-    const topItem = db.prepare(`SELECT product_code, product_name, SUM(quantity) as total_qty, COUNT(*) as cnt FROM warehouse_transfers t WHERE ${dateFilter} GROUP BY product_code ORDER BY total_qty DESC LIMIT 1`).get(...args);
+    const topItem = await db.prepare(`SELECT product_code, product_name, SUM(quantity) as total_qty, COUNT(*) as cnt FROM warehouse_transfers t WHERE ${dateFilter} GROUP BY product_code ORDER BY total_qty DESC LIMIT 1`).get(...args);
     // 창고 간 흐름 TOP5
     const flows = db.prepare(`SELECT fw.name as from_name, tw.name as to_name, COUNT(*) as cnt, SUM(t.quantity) as total_qty
       FROM warehouse_transfers t
@@ -10071,7 +10045,7 @@ async function handleRequest(req, res) {
       GROUP BY t.from_warehouse, t.to_warehouse
       ORDER BY total_qty DESC LIMIT 5`).all(...args);
     // 담당자별
-    const operators = db.prepare(`SELECT operator, COUNT(*) as cnt, SUM(quantity) as total_qty FROM warehouse_transfers t WHERE ${dateFilter} AND operator!='' GROUP BY operator ORDER BY cnt DESC LIMIT 5`).all(...args);
+    const operators = await db.prepare(`SELECT operator, COUNT(*) as cnt, SUM(quantity) as total_qty FROM warehouse_transfers t WHERE ${dateFilter} AND operator!='' GROUP BY operator ORDER BY cnt DESC LIMIT 5`).all(...args);
 
     ok(res, { total, today, topItem, flows, operators });
     return;
@@ -10085,21 +10059,21 @@ async function handleRequest(req, res) {
       fail(res, 400, '창고ID, 제품코드, 조정수량은 필수입니다'); return;
     }
     const newQty = parseInt(new_quantity);
-    const existing = db.prepare("SELECT * FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?").get(warehouse_id, product_code);
+    const existing = await db.prepare("SELECT * FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?").get(warehouse_id, product_code);
     const beforeQty = existing ? existing.quantity : 0;
     const diff = newQty - beforeQty;
     const adjType = diff > 0 ? 'increase' : diff < 0 ? 'decrease' : 'no_change';
 
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       if (existing) {
-        db.prepare("UPDATE warehouse_inventory SET quantity=?, updated_at=datetime('now','localtime') WHERE id=?").run(newQty, existing.id);
+        await db.prepare("UPDATE warehouse_inventory SET quantity=?, updated_at=datetime('now','localtime') WHERE id=?").run(newQty, existing.id);
       } else {
-        db.prepare("INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity) VALUES (?, ?, ?, ?)").run(warehouse_id, product_code, product_name || '', newQty);
+        await db.prepare("INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity) VALUES (?, ?, ?, ?)").run(warehouse_id, product_code, product_name || '', newQty);
       }
-      db.prepare("INSERT INTO warehouse_adjustments (warehouse_id, product_code, product_name, adj_type, before_qty, after_qty, diff_qty, reason, operator) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      await db.prepare("INSERT INTO warehouse_adjustments (warehouse_id, product_code, product_name, adj_type, before_qty, after_qty, diff_qty, reason, operator) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .run(warehouse_id, product_code, product_name || (existing ? existing.product_name : ''), adjType, beforeQty, newQty, diff, reason || '', operator || '');
     });
-    tx();
+    await tx();
     ok(res, { message: `재고 조정 완료 (${beforeQty} → ${newQty}, ${diff > 0 ? '+' : ''}${diff})` });
     return;
   }
@@ -10121,7 +10095,7 @@ async function handleRequest(req, res) {
     if (wh) { where.push("a.warehouse_id = ?"); args.push(parseInt(wh)); }
     if (search) { where.push("(a.product_code LIKE ? OR a.product_name LIKE ?)"); args.push(`%${search}%`, `%${search}%`); }
 
-    const rows = db.prepare(`SELECT a.*, w.name as warehouse_name
+    const rows = await db.prepare(`SELECT a.*, w.name as warehouse_name
       FROM warehouse_adjustments a JOIN warehouses w ON a.warehouse_id=w.id
       WHERE ${where.join(' AND ')}
       ORDER BY a.created_at DESC`).all(...args);
@@ -10142,18 +10116,18 @@ async function handleRequest(req, res) {
       // 로컬 products 테이블에서 품목명 매칭
       const localProducts = {};
       try {
-        const prods = db.prepare("SELECT product_code, product_name FROM products").all();
+        const prods = await db.prepare("SELECT product_code, product_name FROM products").all();
         for (const p of prods) localProducts[p.product_code] = p.product_name;
       } catch(e) {}
-      const defaultWh = db.prepare("SELECT id FROM warehouses WHERE is_default=1 LIMIT 1").get();
+      const defaultWh = await db.prepare("SELECT id FROM warehouses WHERE is_default=1 LIMIT 1").get();
       if (!defaultWh) { fail(res, 500, '기본 창고가 설정되지 않았습니다'); return; }
 
       const upsert = db.prepare(`INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity)
         VALUES (?, ?, ?, ?) ON CONFLICT(warehouse_id, product_code) DO UPDATE SET quantity=excluded.quantity, product_name=excluded.product_name, updated_at=datetime('now','localtime')`);
-      const tx = db.transaction((rows) => {
+      const tx = db.transaction(async (rows) => {
         let cnt = 0;
         for (const r of rows) {
-          upsert.run(defaultWh.id, r.product_code, localProducts[r.product_code] || r.product_code, parseInt(r.quantity) || 0);
+          await upsert.run(defaultWh.id, r.product_code, localProducts[r.product_code] || r.product_code, parseInt(r.quantity) || 0);
           cnt++;
         }
         return cnt;
@@ -10232,14 +10206,14 @@ async function handleRequest(req, res) {
   // 더기프트 = XERP mmInoutItem에서 SiteCode='BK10', InoutGubun='SO', 등록된 gift_sets의 xerp_code 매칭
   async function queryGiftSales(pool, startYMD, endYMD) {
     // gift_sets에서 등록된 xerp_code 목록
-    const giftSets = db.prepare("SELECT xerp_code, set_name FROM gift_sets WHERE status='active' AND xerp_code != ''").all();
+    const giftSets = await db.prepare("SELECT xerp_code, set_name FROM gift_sets WHERE status='active' AND xerp_code != ''").all();
     if (!giftSets.length) return { order_count: 0, total_sales: 0, total_qty: 0, items: 0 };
     const xerpCodes = giftSets.map(g => g.xerp_code.trim()).filter(Boolean);
     if (!xerpCodes.length) return { order_count: 0, total_sales: 0, total_qty: 0, items: 0 };
     const req = pool.request();
     req.input('startDate', sql.NVarChar(16), startYMD);
     req.input('endDate', sql.NVarChar(16), endYMD);
-    const placeholders = xerpCodes.map((c, i) => { req.input(`gc${i}`, sql.VarChar(50), c); return `@gc${i}`; }).join(',');
+    const placeholders = (await Promise.all(xerpCodes.map(async (c, i) => { req.input(`gc${i}`, sql.VarChar(50), c); return `@gc${i}`; }))).join(',');
     const r = await req.query(`
       SELECT COUNT(DISTINCT InoutNo) AS order_count,
              ISNULL(SUM(InoutAmnt),0) AS total_sales,
@@ -10255,13 +10229,13 @@ async function handleRequest(req, res) {
 
   // 헬퍼: 더기프트 일별 매출
   async function queryGiftDailySales(pool, startYMD, endYMD) {
-    const giftSets = db.prepare("SELECT xerp_code FROM gift_sets WHERE status='active' AND xerp_code != ''").all();
+    const giftSets = await db.prepare("SELECT xerp_code FROM gift_sets WHERE status='active' AND xerp_code != ''").all();
     const xerpCodes = giftSets.map(g => g.xerp_code.trim()).filter(Boolean);
     if (!xerpCodes.length) return [];
     const req = pool.request();
     req.input('startDate', sql.NVarChar(16), startYMD);
     req.input('endDate', sql.NVarChar(16), endYMD);
-    const placeholders = xerpCodes.map((c, i) => { req.input(`gc${i}`, sql.VarChar(50), c); return `@gc${i}`; }).join(',');
+    const placeholders = (await Promise.all(xerpCodes.map(async (c, i) => { req.input(`gc${i}`, sql.VarChar(50), c); return `@gc${i}`; }))).join(',');
     const r = await req.query(`
       SELECT RTRIM(InoutDate) AS inout_date,
              COUNT(DISTINCT InoutNo) AS order_count,
@@ -10282,7 +10256,7 @@ async function handleRequest(req, res) {
 
   // 헬퍼: 더기프트 상품별 매출
   async function queryGiftProductSales(pool, startYMD, endYMD) {
-    const giftSets = db.prepare("SELECT xerp_code, set_name FROM gift_sets WHERE status='active' AND xerp_code != ''").all();
+    const giftSets = await db.prepare("SELECT xerp_code, set_name FROM gift_sets WHERE status='active' AND xerp_code != ''").all();
     const xerpCodes = giftSets.map(g => g.xerp_code.trim()).filter(Boolean);
     if (!xerpCodes.length) return [];
     const codeNameMap = {};
@@ -10290,7 +10264,7 @@ async function handleRequest(req, res) {
     const req = pool.request();
     req.input('startDate', sql.NVarChar(16), startYMD);
     req.input('endDate', sql.NVarChar(16), endYMD);
-    const placeholders = xerpCodes.map((c, i) => { req.input(`gc${i}`, sql.VarChar(50), c); return `@gc${i}`; }).join(',');
+    const placeholders = (await Promise.all(xerpCodes.map(async (c, i) => { req.input(`gc${i}`, sql.VarChar(50), c); return `@gc${i}`; }))).join(',');
     const r = await req.query(`
       SELECT RTRIM(ItemCode) AS item_code, RTRIM(ItemName) AS item_name,
              COUNT(DISTINCT InoutNo) AS order_count,
@@ -10633,13 +10607,13 @@ async function handleRequest(req, res) {
       try {
         const pool = await ensureXerpPool();
         if (!pool) throw new Error('XERP pool unavailable');
-        const giftSets = db.prepare("SELECT xerp_code FROM gift_sets WHERE status='active' AND xerp_code != ''").all();
+        const giftSets = await db.prepare("SELECT xerp_code FROM gift_sets WHERE status='active' AND xerp_code != ''").all();
         const xerpCodes = giftSets.map(g => g.xerp_code.trim()).filter(Boolean);
         if (xerpCodes.length) {
           const req2 = pool.request();
           req2.input('s', sql.NVarChar(16), startYMD);
           req2.input('e', sql.NVarChar(16), endYMD);
-          const ph = xerpCodes.map((c, i) => { req2.input(`gc${i}`, sql.VarChar(50), c); return `@gc${i}`; }).join(',');
+          const ph = (await Promise.all(xerpCodes.map(async (c, i) => { req2.input(`gc${i}`, sql.VarChar(50), c); return `@gc${i}`; }))).join(',');
           const r = await req2.query(`
             SELECT LEFT(RTRIM(InoutDate),6) AS sale_month,
                    COUNT(DISTINCT InoutNo) AS order_count,
@@ -11122,9 +11096,9 @@ async function handleRequest(req, res) {
     const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
     if (!decoded || decoded.role !== 'admin') { fail(res, 403, '관리자 권한이 필요합니다'); return; }
     salesKpiCache = null; salesKpiCacheTime = 0;
-    const d1 = db.prepare("DELETE FROM sales_daily_cache WHERE sale_date >= date('now', '-7 days')").run();
-    const d2 = db.prepare("DELETE FROM sales_monthly_cache WHERE sale_month >= strftime('%Y-%m', 'now', '-2 months')").run();
-    const d3 = db.prepare("DELETE FROM sales_product_cache WHERE sale_month >= strftime('%Y-%m', 'now', '-2 months')").run();
+    const d1 = await db.prepare("DELETE FROM sales_daily_cache WHERE sale_date >= date('now', '-7 days')").run();
+    const d2 = await db.prepare("DELETE FROM sales_monthly_cache WHERE sale_month >= strftime('%Y-%m', 'now', '-2 months')").run();
+    const d3 = await db.prepare("DELETE FROM sales_product_cache WHERE sale_month >= strftime('%Y-%m', 'now', '-2 months')").run();
     ok(res, { message: '매출 캐시 초기화 완료', deleted: { daily: d1.changes, monthly: d2.changes, product: d3.changes } }); return;
   }
 
@@ -11187,19 +11161,19 @@ async function handleRequest(req, res) {
     let defectCount = 0;
     let postProcessTotal = 0;
     try {
-      const ts = db.prepare("SELECT status, COUNT(*) as cnt FROM tasks GROUP BY status").all();
-      ts.forEach(t => { taskStats.total += t.cnt; if(t.status==='done') taskStats.done=t.cnt; if(t.status==='in_progress') taskStats.in_progress=t.cnt; });
-      const dc = db.prepare("SELECT COUNT(*) as cnt FROM defects WHERE created_at >= ?").get(monthStart.toISOString().slice(0,10));
+      const ts = await db.prepare("SELECT status, COUNT(*) as cnt FROM tasks GROUP BY status").all();
+      ts.forEach(async t => { taskStats.total += t.cnt; if(t.status==='done') taskStats.done=t.cnt; if(t.status==='in_progress') taskStats.in_progress=t.cnt; });
+      const dc = await db.prepare("SELECT COUNT(*) as cnt FROM defects WHERE created_at >= ?").get(monthStart.toISOString().slice(0,10));
       defectCount = dc ? dc.cnt : 0;
-      try { const pp = db.prepare("SELECT COALESCE(SUM(amount),0) as total FROM post_process_history WHERE created_at >= ?").get(monthStart.toISOString().slice(0,10)); postProcessTotal = pp ? pp.total : 0; } catch(e){}
+      try { const pp = await db.prepare("SELECT COALESCE(SUM(amount),0) as total FROM post_process_history WHERE created_at >= ?").get(monthStart.toISOString().slice(0,10)); postProcessTotal = pp ? pp.total : 0; } catch(e){}
     } catch(e) {}
 
     // PO 현황
     let poStats = { total: 0, pending: 0 };
     try {
-      const pc = db.prepare("SELECT COUNT(*) as cnt FROM purchase_orders WHERE created_at >= ?").get(monthStart.toISOString().slice(0,10));
+      const pc = await db.prepare("SELECT COUNT(*) as cnt FROM purchase_orders WHERE created_at >= ?").get(monthStart.toISOString().slice(0,10));
       poStats.total = pc ? pc.cnt : 0;
-      const pp = db.prepare("SELECT COUNT(*) as cnt FROM purchase_orders WHERE status IN ('pending','ordered','partial')").get();
+      const pp = await db.prepare("SELECT COUNT(*) as cnt FROM purchase_orders WHERE status IN ('pending','ordered','partial')").get();
       poStats.pending = pp ? pp.cnt : 0;
     } catch(e) {}
 
@@ -11777,7 +11751,7 @@ async function handleRequest(req, res) {
           const codes = xerpProducts.map(p => p.product_code.trim()).filter(Boolean);
           const uniqueCodes = [...new Set(codes)].slice(0, 200);
           const req = bPool.request();
-          const placeholders = uniqueCodes.map((c, i) => { req.input(`c${i}`, sql.VarChar(30), c); return `@c${i}`; }).join(',');
+          const placeholders = (await Promise.all(uniqueCodes.map(async (c, i) => { req.input(`c${i}`, sql.VarChar(30), c); return `@c${i}`; }))).join(',');
           const r = await req.query(`SELECT RTRIM(Card_Code) AS card_code, RTRIM(Card_Name) AS card_name,
                     Card_Price, Cost_Price, CardFactory_Price, RTRIM(Brand) AS brand
                   FROM S2_Card WITH (NOLOCK)
@@ -12093,7 +12067,7 @@ async function handleRequest(req, res) {
       let ppSql = `SELECT COALESCE(SUM(amount),0) AS total FROM post_process_history WHERE date >= ? AND date <= ?`;
       const ppParams = [startDate, endDate];
       if (productCode) { ppSql += ` AND product_code = ?`; ppParams.push(productCode); }
-      const ppRow = db.prepare(ppSql).get(...ppParams);
+      const ppRow = await db.prepare(ppSql).get(...ppParams);
       postProcessCost = ppRow ? Number(ppRow.total || 0) : 0;
     } catch (e) {
       postProcessCost = 0;
@@ -12131,11 +12105,11 @@ async function handleRequest(req, res) {
     let where = "status = 'active'";
     const params = [];
     if (category) { where += " AND category = ?"; params.push(category); }
-    const total = db.prepare(`SELECT COUNT(*) as cnt FROM notices WHERE ${where}`).get(...params).cnt;
-    const rows = db.prepare(`SELECT * FROM notices WHERE ${where} ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?`)
+    const total = (await db.prepare(`SELECT COUNT(*) as cnt FROM notices WHERE ${where}`).get(...params)).cnt;
+    const rows = await db.prepare(`SELECT * FROM notices WHERE ${where} ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?`)
       .all(...params, limit, offset);
     // 읽음 여부 추가
-    const reads = db.prepare(`SELECT notice_id FROM notice_reads WHERE user_id = ?`).all(decoded.userId);
+    const reads = await db.prepare(`SELECT notice_id FROM notice_reads WHERE user_id = ?`).all(decoded.userId);
     const readSet = new Set(reads.map(r => r.notice_id));
     rows.forEach(r => { r.is_read = readSet.has(r.id) ? 1 : 0; });
     ok(res, { notices: rows, total, page, limit, totalPages: Math.ceil(total / limit) }); return;
@@ -12152,7 +12126,7 @@ async function handleRequest(req, res) {
         AND (n.popup_end IS NULL OR n.popup_end >= ?)
       ORDER BY n.created_at DESC`).all(now, now);
     // 사용자가 이미 닫은 팝업 제외
-    const dismissed = db.prepare(`SELECT notice_id FROM notice_reads WHERE user_id = ? AND popup_dismissed = 1`).all(decoded.userId);
+    const dismissed = await db.prepare(`SELECT notice_id FROM notice_reads WHERE user_id = ? AND popup_dismissed = 1`).all(decoded.userId);
     const dismissedSet = new Set(dismissed.map(r => r.notice_id));
     const active = popups.filter(p => !dismissedSet.has(p.id));
     ok(res, { popups: active }); return;
@@ -12174,10 +12148,10 @@ async function handleRequest(req, res) {
     const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증 필요'); return; }
     const id = parseInt(pathname.match(/\/(\d+)$/)[1], 10);
-    const notice = db.prepare("SELECT * FROM notices WHERE id = ?").get(id);
+    const notice = await db.prepare("SELECT * FROM notices WHERE id = ?").get(id);
     if (!notice) { fail(res, 404, '공지를 찾을 수 없습니다'); return; }
     // 조회수 증가
-    db.prepare("UPDATE notices SET view_count = view_count + 1 WHERE id = ?").run(id);
+    await db.prepare("UPDATE notices SET view_count = view_count + 1 WHERE id = ?").run(id);
     notice.view_count += 1;
     // 읽음 처리
     db.prepare(`INSERT INTO notice_reads (notice_id, user_id) VALUES (?, ?)
@@ -12226,7 +12200,7 @@ async function handleRequest(req, res) {
     const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
     if (!decoded || decoded.role !== 'admin') { fail(res, 403, '관리자 권한 필요'); return; }
     const id = parseInt(pathname.match(/\/(\d+)$/)[1], 10);
-    db.prepare("UPDATE notices SET status = 'deleted', updated_at = datetime('now','localtime') WHERE id = ?").run(id);
+    await db.prepare("UPDATE notices SET status = 'deleted', updated_at = datetime('now','localtime') WHERE id = ?").run(id);
     auditLog(decoded.userId, decoded.username, 'notice_delete', 'notices', id, '공지 삭제', clientIP);
     ok(res, { message: '공지 삭제 완료' }); return;
   }
@@ -12352,9 +12326,9 @@ async function handleRequest(req, res) {
         (invoice_no, invoice_date, ar_ap, cs_name, cs_reg_no, supply_amt, vat_amt, total_amt, item_name, remark, electronic, uploaded_by)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
       let inserted = 0, skipped = 0;
-      const txn = db.transaction((items) => {
+      const txn = db.transaction(async (items) => {
         for (const r of items) {
-          const info = stmt.run(
+          const info = await stmt.run(
             (r.invoice_no||'').trim(), (r.invoice_date||'').replace(/-/g,'').trim(),
             (r.ar_ap||'AP').trim(), (r.cs_name||'').trim(), (r.cs_reg_no||'').replace(/-/g,'').trim(),
             parseFloat(r.supply_amt)||0, parseFloat(r.vat_amt)||0, parseFloat(r.total_amt)||0,
@@ -12364,7 +12338,7 @@ async function handleRequest(req, res) {
           if (info.changes > 0) inserted++; else skipped++;
         }
       });
-      txn(rows);
+      await txn(rows);
       ok(res, { inserted, skipped, total: rows.length }); return;
     } catch (e) { fail(res, 500, e.message); return; }
   }
@@ -12384,8 +12358,8 @@ async function handleRequest(req, res) {
     const params = [from, to];
     if (arAp) { where += ' AND ar_ap = ?'; params.push(arAp); }
     if (search) { where += ' AND (invoice_no LIKE ? OR cs_name LIKE ? OR cs_reg_no LIKE ?)'; params.push('%'+search+'%','%'+search+'%','%'+search+'%'); }
-    const totalCount = db.prepare('SELECT COUNT(*) AS cnt FROM hometax_invoices WHERE ' + where).get(...params).cnt;
-    const invoices = db.prepare('SELECT * FROM hometax_invoices WHERE ' + where + ' ORDER BY invoice_date DESC, id DESC LIMIT ? OFFSET ?').all(...params, limit, offset);
+    const totalCount = (await db.prepare('SELECT COUNT(*) AS cnt FROM hometax_invoices WHERE ' + where).get(...params)).cnt;
+    const invoices = await db.prepare('SELECT * FROM hometax_invoices WHERE ' + where + ' ORDER BY invoice_date DESC, id DESC LIMIT ? OFFSET ?').all(...params, limit, offset);
     const totals = {
       count: totalCount,
       supply: invoices.reduce((s,r) => s + (r.supply_amt||0), 0),
@@ -12401,7 +12375,7 @@ async function handleRequest(req, res) {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const from = qs.get('from'), to = qs.get('to');
     if (!from || !to) { fail(res, 400, 'from/to 필수'); return; }
-    const info = db.prepare('DELETE FROM hometax_invoices WHERE invoice_date >= ? AND invoice_date <= ?').run(from, to);
+    const info = await db.prepare('DELETE FROM hometax_invoices WHERE invoice_date >= ? AND invoice_date <= ?').run(from, to);
     ok(res, { deleted: info.changes }); return;
   }
 
@@ -12421,9 +12395,9 @@ async function handleRequest(req, res) {
         (product_code, product_name, spec, unit, vendor_name, list_price, apply_price, discount_rate, apply_month, uploaded_by, updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))`);
       let upserted = 0;
-      const txn = db.transaction((items) => {
+      const txn = db.transaction(async (items) => {
         for (const r of items) {
-          stmt.run(
+          await stmt.run(
             (r.product_code||'').trim(), (r.product_name||'').trim(),
             (r.spec||'').trim(), (r.unit||'R').trim(),
             (r.vendor_name||'').trim(),
@@ -12435,7 +12409,7 @@ async function handleRequest(req, res) {
           upserted++;
         }
       });
-      txn(rows);
+      await txn(rows);
       ok(res, { upserted, total: rows.length }); return;
     } catch (e) { fail(res, 500, e.message); return; }
   }
@@ -12453,11 +12427,11 @@ async function handleRequest(req, res) {
     if (vendor) { where += ' AND vendor_name = ?'; params.push(vendor); }
     if (month) { where += ' AND apply_month = ?'; params.push(month); }
     if (search) { where += ' AND (product_code LIKE ? OR product_name LIKE ?)'; params.push('%'+search+'%','%'+search+'%'); }
-    const items = db.prepare('SELECT * FROM material_prices WHERE ' + where + ' ORDER BY vendor_name, product_code, apply_month DESC').all(...params);
+    const items = await db.prepare('SELECT * FROM material_prices WHERE ' + where + ' ORDER BY vendor_name, product_code, apply_month DESC').all(...params);
     // 제지사 목록
-    const vendors = db.prepare('SELECT DISTINCT vendor_name FROM material_prices ORDER BY vendor_name').all().map(r => r.vendor_name);
+    const vendors = (await db.prepare('SELECT DISTINCT vendor_name FROM material_prices ORDER BY vendor_name').all()).map(r => r.vendor_name);
     // 적용월 목록
-    const months = db.prepare('SELECT DISTINCT apply_month FROM material_prices ORDER BY apply_month DESC').all().map(r => r.apply_month);
+    const months = (await db.prepare('SELECT DISTINCT apply_month FROM material_prices ORDER BY apply_month DESC').all()).map(r => r.apply_month);
     ok(res, { items, vendors, months, count: items.length }); return;
   }
 
@@ -12476,7 +12450,7 @@ async function handleRequest(req, res) {
       INNER JOIN (SELECT product_code, vendor_name, MAX(apply_month) AS max_month FROM material_prices GROUP BY product_code, vendor_name) g
       ON m.product_code=g.product_code AND m.vendor_name=g.vendor_name AND m.apply_month=g.max_month
       WHERE ${where} ORDER BY m.vendor_name, m.product_code`).all(...params);
-    const vendors = db.prepare('SELECT DISTINCT vendor_name FROM material_prices ORDER BY vendor_name').all().map(r => r.vendor_name);
+    const vendors = (await db.prepare('SELECT DISTINCT vendor_name FROM material_prices ORDER BY vendor_name').all()).map(r => r.vendor_name);
     ok(res, { items, vendors, count: items.length }); return;
   }
 
@@ -12554,7 +12528,7 @@ async function handleRequest(req, res) {
     let where = '1=1'; const params = [];
     if (month) { where += ' AND apply_month = ?'; params.push(month); }
     if (vendor) { where += ' AND vendor_name = ?'; params.push(vendor); }
-    const info = db.prepare('DELETE FROM material_prices WHERE ' + where).run(...params);
+    const info = await db.prepare('DELETE FROM material_prices WHERE ' + where).run(...params);
     ok(res, { deleted: info.changes }); return;
   }
 
@@ -12572,8 +12546,8 @@ async function handleRequest(req, res) {
     let where = '1=1';
     if (status) where += " AND status = '" + status.replace(/'/g, '') + "'";
     if (search) where += " AND (wo_number LIKE '%" + search.replace(/'/g, '') + "%' OR product_name LIKE '%" + search.replace(/'/g, '') + "%')";
-    const orders = db.prepare(`SELECT * FROM work_orders WHERE ${where} ORDER BY created_at DESC LIMIT 200`).all();
-    const summary = db.prepare(`SELECT status, COUNT(*) AS cnt FROM work_orders GROUP BY status`).all();
+    const orders = await db.prepare(`SELECT * FROM work_orders WHERE ${where} ORDER BY created_at DESC LIMIT 200`).all();
+    const summary = await db.prepare(`SELECT status, COUNT(*) AS cnt FROM work_orders GROUP BY status`).all();
     const statusMap = {};
     summary.forEach(s => { statusMap[s.status] = s.cnt; });
     ok(res, { orders, summary: statusMap, total: orders.length }); return;
@@ -12588,8 +12562,8 @@ async function handleRequest(req, res) {
     const woNum = 'WO' + now.getFullYear().toString().slice(2) + String(now.getMonth()+1).padStart(2,'0') + String(now.getDate()).padStart(2,'0') + '-' + String(Math.floor(Math.random()*9999)).padStart(4,'0');
     const stmt = db.prepare(`INSERT INTO work_orders (wo_number, request_id, product_code, product_name, brand, ordered_qty, status, priority, start_date, due_date, printer_vendor, post_vendor, paper_type, notes, created_by)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-    const result = stmt.run(woNum, body.request_id||null, body.product_code||'', body.product_name||'', body.brand||'', body.ordered_qty||0, 'planned', body.priority||'normal', body.start_date||now.toISOString().slice(0,10), body.due_date||'', body.printer_vendor||'', body.post_vendor||'', body.paper_type||'', body.notes||'', decoded.username||'');
-    db.prepare(`INSERT INTO work_order_logs (wo_id, wo_number, action, to_status, actor, details) VALUES (?,?,?,?,?,?)`).run(result.lastInsertRowid, woNum, 'created', 'planned', decoded.username||'', '작업지시 생성');
+    const result = await stmt.run(woNum, body.request_id||null, body.product_code||'', body.product_name||'', body.brand||'', body.ordered_qty||0, 'planned', body.priority||'normal', body.start_date||now.toISOString().slice(0,10), body.due_date||'', body.printer_vendor||'', body.post_vendor||'', body.paper_type||'', body.notes||'', decoded.username||'');
+    await db.prepare(`INSERT INTO work_order_logs (wo_id, wo_number, action, to_status, actor, details) VALUES (?,?,?,?,?,?)`).run(result.lastInsertRowid, woNum, 'created', 'planned', decoded.username||'', '작업지시 생성');
     ok(res, { wo_id: result.lastInsertRowid, wo_number: woNum }); return;
   }
 
@@ -12598,8 +12572,8 @@ async function handleRequest(req, res) {
     const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증 필요'); return; }
     const id = parseInt(pathname.match(/\/(\d+)$/)[1], 10);
-    const wo = db.prepare('SELECT * FROM work_orders WHERE wo_id = ?').get(id);
-    const logs = db.prepare('SELECT * FROM work_order_logs WHERE wo_id = ? ORDER BY created_at DESC').all(id);
+    const wo = await db.prepare('SELECT * FROM work_orders WHERE wo_id = ?').get(id);
+    const logs = await db.prepare('SELECT * FROM work_order_logs WHERE wo_id = ? ORDER BY created_at DESC').all(id);
     if (!wo) { fail(res, 404, '작업지시 없음'); return; }
     ok(res, { order: wo, logs }); return;
   }
@@ -12610,7 +12584,7 @@ async function handleRequest(req, res) {
     if (!decoded) { fail(res, 401, '인증 필요'); return; }
     const id = parseInt(pathname.match(/\/(\d+)$/)[1], 10);
     const body = await readJSON(req);
-    const wo = db.prepare('SELECT * FROM work_orders WHERE wo_id = ?').get(id);
+    const wo = await db.prepare('SELECT * FROM work_orders WHERE wo_id = ?').get(id);
     if (!wo) { fail(res, 404, '작업지시 없음'); return; }
     const oldStatus = wo.status;
     const updates = [];
@@ -12632,7 +12606,7 @@ async function handleRequest(req, res) {
     updates.push("updated_at=datetime('now','localtime')");
     params.push(id);
     if (updates.length > 1) {
-      db.prepare(`UPDATE work_orders SET ${updates.join(',')} WHERE wo_id=?`).run(...params);
+      await db.prepare(`UPDATE work_orders SET ${updates.join(',')} WHERE wo_id=?`).run(...params);
     }
     // 로그
     let action = 'updated';
@@ -12640,7 +12614,7 @@ async function handleRequest(req, res) {
     if (body.status && body.status !== oldStatus) { action = 'status_change'; details = oldStatus + ' → ' + body.status; }
     else if (body.produced_qty !== undefined) { action = 'production_report'; details = '생산수량: ' + body.produced_qty + ', 불량: ' + (body.defect_qty||0); }
     else if (body.cost_material !== undefined || body.cost_labor !== undefined) { action = 'cost_update'; details = '원가 업데이트'; }
-    db.prepare(`INSERT INTO work_order_logs (wo_id, wo_number, action, from_status, to_status, qty_change, actor, details) VALUES (?,?,?,?,?,?,?,?)`).run(id, wo.wo_number, action, oldStatus, body.status||oldStatus, body.produced_qty||0, decoded.username||'', details);
+    await db.prepare(`INSERT INTO work_order_logs (wo_id, wo_number, action, from_status, to_status, qty_change, actor, details) VALUES (?,?,?,?,?,?,?,?)`).run(id, wo.wo_number, action, oldStatus, body.status||oldStatus, body.produced_qty||0, decoded.username||'', details);
     ok(res, { message: '업데이트 완료' }); return;
   }
 
@@ -12648,9 +12622,9 @@ async function handleRequest(req, res) {
   if (pathname === '/api/work-orders/stats' && method === 'GET') {
     const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증 필요'); return; }
-    const statusSummary = db.prepare(`SELECT status, COUNT(*) AS cnt, SUM(ordered_qty) AS total_ordered, SUM(produced_qty) AS total_produced, SUM(defect_qty) AS total_defect, SUM(cost_total) AS total_cost FROM work_orders GROUP BY status`).all();
-    const monthlyOrders = db.prepare(`SELECT strftime('%Y-%m', created_at) AS ym, COUNT(*) AS cnt, SUM(ordered_qty) AS total_qty FROM work_orders GROUP BY strftime('%Y-%m', created_at) ORDER BY ym DESC LIMIT 12`).all();
-    const recentCompleted = db.prepare(`SELECT * FROM work_orders WHERE status='completed' ORDER BY completed_date DESC LIMIT 10`).all();
+    const statusSummary = await db.prepare(`SELECT status, COUNT(*) AS cnt, SUM(ordered_qty) AS total_ordered, SUM(produced_qty) AS total_produced, SUM(defect_qty) AS total_defect, SUM(cost_total) AS total_cost FROM work_orders GROUP BY status`).all();
+    const monthlyOrders = await db.prepare(`SELECT strftime('%Y-%m', created_at) AS ym, COUNT(*) AS cnt, SUM(ordered_qty) AS total_qty FROM work_orders GROUP BY strftime('%Y-%m', created_at) ORDER BY ym DESC LIMIT 12`).all();
+    const recentCompleted = await db.prepare(`SELECT * FROM work_orders WHERE status='completed' ORDER BY completed_date DESC LIMIT 10`).all();
     ok(res, { statusSummary, monthlyOrders, recentCompleted }); return;
   }
 
@@ -12660,22 +12634,22 @@ async function handleRequest(req, res) {
 
   if (pathname === '/api/notifications' && method === 'GET') {
     const uid = currentUser ? currentUser.userId : 0;
-    const rows = db.prepare("SELECT * FROM notifications WHERE user_id IS NULL OR user_id = ? ORDER BY created_at DESC LIMIT 100").all(uid);
+    const rows = await db.prepare("SELECT * FROM notifications WHERE user_id IS NULL OR user_id = ? ORDER BY created_at DESC LIMIT 100").all(uid);
     ok(res, rows); return;
   }
   if (pathname === '/api/notifications/unread-count' && method === 'GET') {
     const uid = currentUser ? currentUser.userId : 0;
-    const r = db.prepare("SELECT COUNT(*) AS cnt FROM notifications WHERE (user_id IS NULL OR user_id = ?) AND is_read = 0").get(uid);
+    const r = await db.prepare("SELECT COUNT(*) AS cnt FROM notifications WHERE (user_id IS NULL OR user_id = ?) AND is_read = 0").get(uid);
     ok(res, { count: r.cnt }); return;
   }
   if (pathname.match(/^\/api\/notifications\/read\/(\d+)$/) && method === 'POST') {
     const id = pathname.match(/^\/api\/notifications\/read\/(\d+)$/)[1];
-    db.prepare("UPDATE notifications SET is_read = 1 WHERE id = ?").run(id);
+    await db.prepare("UPDATE notifications SET is_read = 1 WHERE id = ?").run(id);
     ok(res, { updated: true }); return;
   }
   if (pathname === '/api/notifications/read-all' && method === 'POST') {
     const uid = currentUser ? currentUser.userId : 0;
-    db.prepare("UPDATE notifications SET is_read = 1 WHERE (user_id IS NULL OR user_id = ?) AND is_read = 0").run(uid);
+    await db.prepare("UPDATE notifications SET is_read = 1 WHERE (user_id IS NULL OR user_id = ?) AND is_read = 0").run(uid);
     ok(res, { updated: true }); return;
   }
 
@@ -12685,7 +12659,7 @@ async function handleRequest(req, res) {
 
   if (pathname === '/api/approvals/pending-count' && method === 'GET') {
     const uid = currentUser ? currentUser.userId : 0;
-    const r = db.prepare("SELECT COUNT(*) AS cnt FROM approval_lines al JOIN approvals a ON a.id=al.approval_id WHERE al.approver_id=? AND al.status='pending' AND a.status='pending'").get(uid);
+    const r = await db.prepare("SELECT COUNT(*) AS cnt FROM approval_lines al JOIN approvals a ON a.id=al.approval_id WHERE al.approver_id=? AND al.status='pending' AND a.status='pending'").get(uid);
     ok(res, { count: r.cnt }); return;
   }
   if (pathname === '/api/approvals' && method === 'GET') {
@@ -12693,9 +12667,9 @@ async function handleRequest(req, res) {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const tab = qs.get('tab') || 'my'; // my/pending/done
     let rows = [];
-    if (tab === 'my') rows = db.prepare("SELECT * FROM approvals WHERE requester_id=? ORDER BY created_at DESC LIMIT 200").all(uid);
-    else if (tab === 'pending') rows = db.prepare("SELECT a.* FROM approvals a JOIN approval_lines al ON a.id=al.approval_id WHERE al.approver_id=? AND al.status='pending' AND a.status='pending' ORDER BY a.created_at DESC").all(uid);
-    else rows = db.prepare("SELECT a.* FROM approvals a JOIN approval_lines al ON a.id=al.approval_id WHERE al.approver_id=? AND al.status IN ('approved','rejected') ORDER BY al.acted_at DESC LIMIT 200").all(uid);
+    if (tab === 'my') rows = await db.prepare("SELECT * FROM approvals WHERE requester_id=? ORDER BY created_at DESC LIMIT 200").all(uid);
+    else if (tab === 'pending') rows = await db.prepare("SELECT a.* FROM approvals a JOIN approval_lines al ON a.id=al.approval_id WHERE al.approver_id=? AND al.status='pending' AND a.status='pending' ORDER BY a.created_at DESC").all(uid);
+    else rows = await db.prepare("SELECT a.* FROM approvals a JOIN approval_lines al ON a.id=al.approval_id WHERE al.approver_id=? AND al.status IN ('approved','rejected') ORDER BY al.acted_at DESC LIMIT 200").all(uid);
     ok(res, rows); return;
   }
   if (pathname === '/api/approvals' && method === 'POST') {
@@ -12703,14 +12677,14 @@ async function handleRequest(req, res) {
     const uid = currentUser ? currentUser.userId : 0;
     const uname = currentUser ? currentUser.username : 'system';
     const today = new Date().toISOString().slice(0,10).replace(/-/g,'');
-    const seq = db.prepare("SELECT COUNT(*) AS cnt FROM approvals WHERE approval_no LIKE ?").get('AP-'+today+'%').cnt + 1;
+    const seq = (await db.prepare("SELECT COUNT(*) AS cnt FROM approvals WHERE approval_no LIKE ?").get('AP-'+today+'%')).cnt + 1;
     const no = 'AP-'+today+'-'+String(seq).padStart(3,'0');
     const lines = body.lines || []; // [{approver_id, approver_name}]
-    const info = db.prepare("INSERT INTO approvals (approval_no,doc_type,doc_ref,title,content,amount,status,requester_id,requester_name,current_step,total_steps) VALUES (?,?,?,?,?,?,?,?,?,1,?)").run(
+    const info = await db.prepare("INSERT INTO approvals (approval_no,doc_type,doc_ref,title,content,amount,status,requester_id,requester_name,current_step,total_steps) VALUES (?,?,?,?,?,?,?,?,?,1,?)").run(
       no, body.doc_type||'general', body.doc_ref||'', body.title||'', body.content||'', body.amount||0, 'pending', uid, uname, Math.max(lines.length,1));
     const aid = info.lastInsertRowid;
-    lines.forEach(function(ln, i) {
-      db.prepare("INSERT INTO approval_lines (approval_id,step_order,approver_id,approver_name,role) VALUES (?,?,?,?,?)").run(aid, i+1, ln.approver_id, ln.approver_name||'', ln.role||'approver');
+    lines.forEach(async function(ln, i) {
+      await db.prepare("INSERT INTO approval_lines (approval_id,step_order,approver_id,approver_name,role) VALUES (?,?,?,?,?)").run(aid, i+1, ln.approver_id, ln.approver_name||'', ln.role||'approver');
     });
     // 첫 번째 결재자에게 알림
     if (lines.length > 0) createNotification(lines[0].approver_id, 'approval', '결재 요청: '+body.title, uname+'님이 결재를 요청했습니다.', 'approval');
@@ -12718,27 +12692,27 @@ async function handleRequest(req, res) {
   }
   if (pathname.match(/^\/api\/approvals\/(\d+)$/) && method === 'GET') {
     const id = pathname.match(/^\/api\/approvals\/(\d+)$/)[1];
-    const row = db.prepare("SELECT * FROM approvals WHERE id=?").get(id);
+    const row = await db.prepare("SELECT * FROM approvals WHERE id=?").get(id);
     if (!row) { fail(res, 404, '결재 문서를 찾을 수 없습니다'); return; }
-    const lines = db.prepare("SELECT * FROM approval_lines WHERE approval_id=? ORDER BY step_order").all(id);
+    const lines = await db.prepare("SELECT * FROM approval_lines WHERE approval_id=? ORDER BY step_order").all(id);
     ok(res, { ...row, lines }); return;
   }
   if (pathname.match(/^\/api\/approvals\/(\d+)\/approve$/) && method === 'POST') {
     const id = pathname.match(/^\/api\/approvals\/(\d+)\/approve$/)[1];
     const body = await readJSON(req);
     const uid = currentUser ? currentUser.userId : 0;
-    const ap = db.prepare("SELECT * FROM approvals WHERE id=?").get(id);
+    const ap = await db.prepare("SELECT * FROM approvals WHERE id=?").get(id);
     if (!ap || ap.status !== 'pending') { fail(res, 400, '결재 불가 상태'); return; }
-    const line = db.prepare("SELECT * FROM approval_lines WHERE approval_id=? AND step_order=? AND status='pending'").get(id, ap.current_step);
+    const line = await db.prepare("SELECT * FROM approval_lines WHERE approval_id=? AND step_order=? AND status='pending'").get(id, ap.current_step);
     if (!line) { fail(res, 403, '결재 권한이 없습니다'); return; }
-    db.prepare("UPDATE approval_lines SET status='approved', comment=?, acted_at=datetime('now','localtime') WHERE id=?").run(body.comment||'', line.id);
+    await db.prepare("UPDATE approval_lines SET status='approved', comment=?, acted_at=datetime('now','localtime') WHERE id=?").run(body.comment||'', line.id);
     // 다음 단계 또는 최종 승인
-    const nextLine = db.prepare("SELECT * FROM approval_lines WHERE approval_id=? AND step_order>? AND status='pending' ORDER BY step_order LIMIT 1").get(id, line.step_order);
+    const nextLine = await db.prepare("SELECT * FROM approval_lines WHERE approval_id=? AND step_order>? AND status='pending' ORDER BY step_order LIMIT 1").get(id, line.step_order);
     if (nextLine) {
-      db.prepare("UPDATE approvals SET current_step=?, updated_at=datetime('now','localtime') WHERE id=?").run(nextLine.step_order, id);
+      await db.prepare("UPDATE approvals SET current_step=?, updated_at=datetime('now','localtime') WHERE id=?").run(nextLine.step_order, id);
       createNotification(nextLine.approver_id, 'approval', '결재 요청: '+ap.title, '다음 단계 결재를 요청합니다.', 'approval');
     } else {
-      db.prepare("UPDATE approvals SET status='approved', updated_at=datetime('now','localtime') WHERE id=?").run(id);
+      await db.prepare("UPDATE approvals SET status='approved', updated_at=datetime('now','localtime') WHERE id=?").run(id);
       createNotification(ap.requester_id, 'approval', '결재 승인: '+ap.title, '요청하신 결재가 최종 승인되었습니다.', 'approval');
     }
     ok(res, { approved: true }); return;
@@ -12747,12 +12721,12 @@ async function handleRequest(req, res) {
     const id = pathname.match(/^\/api\/approvals\/(\d+)\/reject$/)[1];
     const body = await readJSON(req);
     const uid = currentUser ? currentUser.userId : 0;
-    const ap = db.prepare("SELECT * FROM approvals WHERE id=?").get(id);
+    const ap = await db.prepare("SELECT * FROM approvals WHERE id=?").get(id);
     if (!ap || ap.status !== 'pending') { fail(res, 400, '결재 불가 상태'); return; }
-    const line = db.prepare("SELECT * FROM approval_lines WHERE approval_id=? AND step_order=? AND status='pending'").get(id, ap.current_step);
+    const line = await db.prepare("SELECT * FROM approval_lines WHERE approval_id=? AND step_order=? AND status='pending'").get(id, ap.current_step);
     if (!line) { fail(res, 403, '결재 권한이 없습니다'); return; }
-    db.prepare("UPDATE approval_lines SET status='rejected', comment=?, acted_at=datetime('now','localtime') WHERE id=?").run(body.comment||'', line.id);
-    db.prepare("UPDATE approvals SET status='rejected', updated_at=datetime('now','localtime') WHERE id=?").run(id);
+    await db.prepare("UPDATE approval_lines SET status='rejected', comment=?, acted_at=datetime('now','localtime') WHERE id=?").run(body.comment||'', line.id);
+    await db.prepare("UPDATE approvals SET status='rejected', updated_at=datetime('now','localtime') WHERE id=?").run(id);
     createNotification(ap.requester_id, 'approval', '결재 반려: '+ap.title, (body.comment||'사유 없음'), 'approval');
     ok(res, { rejected: true }); return;
   }
@@ -12762,13 +12736,13 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/sales-orders/summary' && method === 'GET') {
-    const quote_count = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE order_type='quote' AND status NOT IN ('cancelled')").get().cnt;
-    const order_amount = db.prepare("SELECT COALESCE(SUM(total_amount),0) AS amt FROM sales_orders WHERE order_type='sales' AND status NOT IN ('cancelled','delivered')").get().amt;
-    const shipped_count = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE status='shipped'").get().cnt;
-    const unshipped_count = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE order_type='sales' AND status IN ('draft','confirmed','in_production')").get().cnt;
-    const bySource = db.prepare("SELECT source, COUNT(*) AS cnt, COALESCE(SUM(total_amount),0) AS amt FROM sales_orders GROUP BY source").all();
-    const syncDD = db.prepare("SELECT last_sync, status FROM sync_meta WHERE key='sales-dd'").get();
-    const syncXerp = db.prepare("SELECT last_sync, status FROM sync_meta WHERE key='sales-xerp'").get();
+    const quote_count = (await db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE order_type='quote' AND status NOT IN ('cancelled')").get()).cnt;
+    const order_amount = (await db.prepare("SELECT COALESCE(SUM(total_amount),0) AS amt FROM sales_orders WHERE order_type='sales' AND status NOT IN ('cancelled','delivered')").get()).amt;
+    const shipped_count = (await db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE status='shipped'").get()).cnt;
+    const unshipped_count = (await db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE order_type='sales' AND status IN ('draft','confirmed','in_production')").get()).cnt;
+    const bySource = await db.prepare("SELECT source, COUNT(*) AS cnt, COALESCE(SUM(total_amount),0) AS amt FROM sales_orders GROUP BY source").all();
+    const syncDD = await db.prepare("SELECT last_sync, status FROM sync_meta WHERE key='sales-dd'").get();
+    const syncXerp = await db.prepare("SELECT last_sync, status FROM sync_meta WHERE key='sales-xerp'").get();
     ok(res, { quote_count, order_amount, shipped_count, unshipped_count, by_source: bySource, sync: { dd: syncDD, xerp: syncXerp } }); return;
   }
   if (pathname === '/api/sales-orders' && method === 'GET') {
@@ -12781,7 +12755,7 @@ async function handleRequest(req, res) {
     if (status) { where += " AND status=?"; params.push(status); }
     if (type) { where += " AND order_type=?"; params.push(type); }
     if (search) { where += " AND (order_no LIKE ? OR customer_name LIKE ?)"; params.push('%'+search+'%', '%'+search+'%'); }
-    const rows = db.prepare('SELECT * FROM sales_orders WHERE '+where+' ORDER BY created_at DESC LIMIT 200').all(...params);
+    const rows = await db.prepare('SELECT * FROM sales_orders WHERE '+where+' ORDER BY created_at DESC LIMIT 200').all(...params);
     ok(res, rows); return;
   }
   if (pathname === '/api/sales-orders' && method === 'POST') {
@@ -12789,52 +12763,52 @@ async function handleRequest(req, res) {
     const uname = currentUser ? currentUser.username : 'system';
     const today = new Date().toISOString().slice(0,10).replace(/-/g,'');
     const prefix = (body.order_type === 'quote') ? 'QT' : 'SO';
-    const seq = db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE order_no LIKE ?").get(prefix+'-'+today+'%').cnt + 1;
+    const seq = (await db.prepare("SELECT COUNT(*) AS cnt FROM sales_orders WHERE order_no LIKE ?").get(prefix+'-'+today+'%')).cnt + 1;
     const no = prefix+'-'+today+'-'+String(seq).padStart(3,'0');
     const items = body.items || [];
     const totalQty = items.reduce(function(s,i){return s+(i.qty||0);},0);
     const totalAmt = items.reduce(function(s,i){return s+(i.amount||(i.qty||0)*(i.unit_price||0));},0);
     const taxAmt = body.tax_amount || Math.round(totalAmt * 0.1);
-    const info = db.prepare("INSERT INTO sales_orders (order_no,order_type,status,customer_name,customer_contact,customer_tel,order_date,delivery_date,total_qty,total_amount,tax_amount,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+    const info = await db.prepare("INSERT INTO sales_orders (order_no,order_type,status,customer_name,customer_contact,customer_tel,order_date,delivery_date,total_qty,total_amount,tax_amount,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
       no, body.order_type||'quote', 'draft', body.customer_name||'', body.customer_contact||'', body.customer_tel||'', body.order_date||new Date().toISOString().slice(0,10), body.delivery_date||'', totalQty, totalAmt, taxAmt, body.notes||'', uname);
     const oid = info.lastInsertRowid;
-    items.forEach(function(it) {
-      db.prepare("INSERT INTO sales_order_items (order_id,product_code,product_name,spec,unit_price,qty,amount,notes) VALUES (?,?,?,?,?,?,?,?)").run(oid, it.product_code||'', it.product_name||'', it.spec||'', it.unit_price||0, it.qty||0, it.amount||(it.qty||0)*(it.unit_price||0), it.notes||'');
+    items.forEach(async function(it) {
+      await db.prepare("INSERT INTO sales_order_items (order_id,product_code,product_name,spec,unit_price,qty,amount,notes) VALUES (?,?,?,?,?,?,?,?)").run(oid, it.product_code||'', it.product_name||'', it.spec||'', it.unit_price||0, it.qty||0, it.amount||(it.qty||0)*(it.unit_price||0), it.notes||'');
     });
     ok(res, { id: oid, order_no: no }); return;
   }
   if (pathname.match(/^\/api\/sales-orders\/(\d+)$/) && method === 'GET') {
     const id = pathname.match(/^\/api\/sales-orders\/(\d+)$/)[1];
-    const row = db.prepare("SELECT * FROM sales_orders WHERE id=?").get(id);
+    const row = await db.prepare("SELECT * FROM sales_orders WHERE id=?").get(id);
     if (!row) { fail(res, 404, '수주를 찾을 수 없습니다'); return; }
-    const items = db.prepare("SELECT * FROM sales_order_items WHERE order_id=?").all(id);
+    const items = await db.prepare("SELECT * FROM sales_order_items WHERE order_id=?").all(id);
     ok(res, { ...row, items }); return;
   }
   if (pathname.match(/^\/api\/sales-orders\/(\d+)$/) && method === 'PUT') {
     const id = pathname.match(/^\/api\/sales-orders\/(\d+)$/)[1];
     const body = await readJSON(req);
-    db.prepare("UPDATE sales_orders SET customer_name=COALESCE(?,customer_name), customer_contact=COALESCE(?,customer_contact), customer_tel=COALESCE(?,customer_tel), delivery_date=COALESCE(?,delivery_date), notes=COALESCE(?,notes), updated_at=datetime('now','localtime') WHERE id=?").run(body.customer_name, body.customer_contact, body.customer_tel, body.delivery_date, body.notes, id);
+    await db.prepare("UPDATE sales_orders SET customer_name=COALESCE(?,customer_name), customer_contact=COALESCE(?,customer_contact), customer_tel=COALESCE(?,customer_tel), delivery_date=COALESCE(?,delivery_date), notes=COALESCE(?,notes), updated_at=datetime('now','localtime') WHERE id=?").run(body.customer_name, body.customer_contact, body.customer_tel, body.delivery_date, body.notes, id);
     if (body.items) {
-      db.prepare("DELETE FROM sales_order_items WHERE order_id=?").run(id);
-      body.items.forEach(function(it) { db.prepare("INSERT INTO sales_order_items (order_id,product_code,product_name,spec,unit_price,qty,amount,notes) VALUES (?,?,?,?,?,?,?,?)").run(id, it.product_code||'', it.product_name||'', it.spec||'', it.unit_price||0, it.qty||0, it.amount||((it.qty||0)*(it.unit_price||0)), it.notes||''); });
+      await db.prepare("DELETE FROM sales_order_items WHERE order_id=?").run(id);
+      for (const it of body.items) { await db.prepare("INSERT INTO sales_order_items (order_id,product_code,product_name,spec,unit_price,qty,amount,notes) VALUES (?,?,?,?,?,?,?,?)").run(id, it.product_code||'', it.product_name||'', it.spec||'', it.unit_price||0, it.qty||0, it.amount||((it.qty||0)*(it.unit_price||0)), it.notes||''); }
       const totalQty = body.items.reduce(function(s,i){return s+(i.qty||0);},0);
       const totalAmt = body.items.reduce(function(s,i){return s+(i.amount||((i.qty||0)*(i.unit_price||0)));},0);
       const taxAmt = body.tax_amount || Math.round(totalAmt * 0.1);
-      db.prepare("UPDATE sales_orders SET total_qty=?, total_amount=?, tax_amount=?, updated_at=datetime('now','localtime') WHERE id=?").run(totalQty, totalAmt, taxAmt, id);
+      await db.prepare("UPDATE sales_orders SET total_qty=?, total_amount=?, tax_amount=?, updated_at=datetime('now','localtime') WHERE id=?").run(totalQty, totalAmt, taxAmt, id);
     }
     ok(res, { updated: true }); return;
   }
   if (pathname.match(/^\/api\/sales-orders\/(\d+)\/confirm$/) && method === 'POST') {
     const id = pathname.match(/^\/api\/sales-orders\/(\d+)\/confirm$/)[1];
-    const row = db.prepare("SELECT * FROM sales_orders WHERE id=?").get(id);
+    const row = await db.prepare("SELECT * FROM sales_orders WHERE id=?").get(id);
     if (!row) { fail(res, 404, '문서 없음'); return; }
     const newType = row.order_type === 'quote' ? 'sales' : row.order_type;
-    db.prepare("UPDATE sales_orders SET order_type=?, status='confirmed', updated_at=datetime('now','localtime') WHERE id=?").run(newType, id);
+    await db.prepare("UPDATE sales_orders SET order_type=?, status='confirmed', updated_at=datetime('now','localtime') WHERE id=?").run(newType, id);
     ok(res, { confirmed: true }); return;
   }
   if (pathname.match(/^\/api\/sales-orders\/(\d+)\/ship$/) && method === 'POST') {
     const id = pathname.match(/^\/api\/sales-orders\/(\d+)\/ship$/)[1];
-    db.prepare("UPDATE sales_orders SET status='shipped', shipped_date=date('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?").run(id);
+    await db.prepare("UPDATE sales_orders SET status='shipped', shipped_date=date('now','localtime'), updated_at=datetime('now','localtime') WHERE id=?").run(id);
     ok(res, { shipped: true }); return;
   }
 
@@ -12853,21 +12827,21 @@ async function handleRequest(req, res) {
       const stateMap = {B:'draft', P:'confirmed', D:'shipped', F:'delivered', C:'cancelled'};
       const upsert = db.prepare(`INSERT INTO sales_orders (order_no,order_type,status,customer_name,total_qty,total_amount,order_date,shipped_date,notes,source,external_id,created_by)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(order_no) DO UPDATE SET status=excluded.status, total_qty=excluded.total_qty, total_amount=excluded.total_amount, shipped_date=excluded.shipped_date, updated_at=datetime('now','localtime')`);
-      const tx = db.transaction(function() {
-        rows.forEach(function(r) {
+      const tx = db.transaction(async function() {
+        rows.forEach(async function(r) {
           const oNo = 'DD-' + (r.order_number || r.id);
           const st = stateMap[r.order_state] || 'draft';
           const shipDate = (r.shipping_state === 'Y' || r.order_state === 'D') ? (r.created_at ? r.created_at.toISOString().slice(0,10) : '') : '';
-          upsert.run(oNo, 'sales', st, 'DD고객', r.total_qty||0, r.total_money||0,
+          await upsert.run(oNo, 'sales', st, 'DD고객', r.total_qty||0, r.total_money||0,
             r.created_at ? r.created_at.toISOString().slice(0,10) : '', shipDate,
             (r.product_names||'').substring(0,200), 'dd', String(r.id));
         });
       });
-      tx();
-      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('sales-dd',datetime('now','localtime'),?,'ok')").run(rows.length);
+      await tx();
+      await db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('sales-dd',datetime('now','localtime'),?,'ok')").run(rows.length);
       ok(res, { synced: rows.length, source: 'DD' }); return;
     } catch(e) {
-      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,status,message) VALUES ('sales-dd',datetime('now','localtime'),'error',?)").run(e.message);
+      await db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,status,message) VALUES ('sales-dd',datetime('now','localtime'),'error',?)").run(e.message);
       fail(res, 500, 'DD 동기화 실패: ' + e.message); return;
     }
   }
@@ -12894,24 +12868,24 @@ async function handleRequest(req, res) {
       });
       const upsert = db.prepare(`INSERT INTO sales_orders (order_no,order_type,status,customer_name,total_qty,total_amount,order_date,notes,source,external_id,created_by)
         VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(order_no) DO UPDATE SET total_qty=excluded.total_qty, total_amount=excluded.total_amount, notes=excluded.notes, updated_at=datetime('now','localtime')`);
-      const tx = db.transaction(function() {
-        Object.keys(byDate).forEach(function(d) {
+      const tx = db.transaction(async function() {
+        Object.keys(byDate).forEach(async function(d) {
           const v = byDate[d];
           const dateStr = d.length===8 ? d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8) : d;
-          upsert.run('XERP-'+d, 'sales', 'delivered', 'XERP매출', v.qty, v.amount, dateStr,
+          await upsert.run('XERP-'+d, 'sales', 'delivered', 'XERP매출', v.qty, v.amount, dateStr,
             '채널: '+Array.from(v.dept).join(',')+'  건수: '+v.count, 'xerp', d, 'sync');
         });
       });
-      tx();
-      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('sales-xerp',datetime('now','localtime'),?,'ok')").run(Object.keys(byDate).length);
+      await tx();
+      await db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('sales-xerp',datetime('now','localtime'),?,'ok')").run(Object.keys(byDate).length);
       ok(res, { synced: Object.keys(byDate).length, raw_records: rows.length, source: 'XERP' }); return;
     } catch(e) {
-      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,status,message) VALUES ('sales-xerp',datetime('now','localtime'),'error',?)").run(e.message);
+      await db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,status,message) VALUES ('sales-xerp',datetime('now','localtime'),'error',?)").run(e.message);
       fail(res, 500, 'XERP 동기화 실패: ' + e.message); return;
     }
   }
   if (pathname === '/api/sync-meta' && method === 'GET') {
-    const rows = db.prepare("SELECT * FROM sync_meta ORDER BY key").all();
+    const rows = await db.prepare("SELECT * FROM sync_meta ORDER BY key").all();
     ok(res, rows); return;
   }
 
@@ -12920,11 +12894,11 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/lots/summary' && method === 'GET') {
-    const total = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master").get().cnt;
-    const active = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE current_qty > 0").get().cnt;
-    const held = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE quality_status='HOLD'").get().cnt;
-    const totalQty = db.prepare("SELECT COALESCE(SUM(current_qty),0) AS qty FROM batch_master").get().qty;
-    const expiring = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE exp_date IS NOT NULL AND exp_date != '' AND exp_date <= date('now','+30 days','localtime') AND current_qty > 0").get().cnt;
+    const total = (await db.prepare("SELECT COUNT(*) AS cnt FROM batch_master").get()).cnt;
+    const active = (await db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE current_qty > 0").get()).cnt;
+    const held = (await db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE quality_status='HOLD'").get()).cnt;
+    const totalQty = (await db.prepare("SELECT COALESCE(SUM(current_qty),0) AS qty FROM batch_master").get()).qty;
+    const expiring = (await db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE exp_date IS NOT NULL AND exp_date != '' AND exp_date <= date('now','+30 days','localtime') AND current_qty > 0").get()).cnt;
     ok(res, { total, active, held, totalQty, expiring }); return;
   }
   if (pathname === '/api/lots' && method === 'GET') {
@@ -12938,40 +12912,40 @@ async function handleRequest(req, res) {
     if (warehouse) where += " AND warehouse='" + warehouse.replace(/'/g,'') + "'";
     if (status) where += " AND quality_status='" + status.replace(/'/g,'') + "'";
     if (search) where += " AND (batch_number LIKE '%" + search.replace(/'/g,'') + "%' OR product_name LIKE '%" + search.replace(/'/g,'') + "%')";
-    const rows = db.prepare('SELECT * FROM batch_master WHERE '+where+' ORDER BY created_at DESC LIMIT 300').all();
+    const rows = await db.prepare('SELECT * FROM batch_master WHERE '+where+' ORDER BY created_at DESC LIMIT 300').all();
     ok(res, rows); return;
   }
   if (pathname === '/api/lots' && method === 'POST') {
     const body = await readJSON(req);
     const uname = currentUser ? currentUser.username : 'system';
     const today = new Date().toISOString().slice(0,10).replace(/-/g,'');
-    const seq = db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE batch_number LIKE ?").get('LOT-'+today+'%').cnt + 1;
+    const seq = (await db.prepare("SELECT COUNT(*) AS cnt FROM batch_master WHERE batch_number LIKE ?").get('LOT-'+today+'%')).cnt + 1;
     const batchNo = 'LOT-'+today+'-'+String(seq).padStart(3,'0');
-    const info = db.prepare("INSERT INTO batch_master (batch_number,product_code,product_name,vendor_name,vendor_lot,received_date,po_number,received_qty,current_qty,quality_status,warehouse,mfg_date,exp_date,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+    const info = await db.prepare("INSERT INTO batch_master (batch_number,product_code,product_name,vendor_name,vendor_lot,received_date,po_number,received_qty,current_qty,quality_status,warehouse,mfg_date,exp_date,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
       batchNo, body.product_code||'', body.product_name||'', body.vendor_name||'', body.vendor_lot||'', body.received_date||new Date().toISOString().slice(0,10), body.po_number||'', body.received_qty||0, body.received_qty||0, body.quality_status||'GOOD', body.warehouse||'본사', body.mfg_date||'', body.exp_date||'', body.notes||'', uname);
     const bid = info.lastInsertRowid;
-    db.prepare("INSERT INTO batch_transactions (batch_id,batch_number,txn_type,product_code,qty,qty_before,qty_after,to_warehouse,reference_no,actor,notes) VALUES (?,?,'receipt',?,?,0,?,?,?,?,?)").run(bid, batchNo, body.product_code||'', body.received_qty||0, body.received_qty||0, body.warehouse||'본사', body.po_number||'', uname, '입고 등록');
+    await db.prepare("INSERT INTO batch_transactions (batch_id,batch_number,txn_type,product_code,qty,qty_before,qty_after,to_warehouse,reference_no,actor,notes) VALUES (?,?,'receipt',?,?,0,?,?,?,?,?)").run(bid, batchNo, body.product_code||'', body.received_qty||0, body.received_qty||0, body.warehouse||'본사', body.po_number||'', uname, '입고 등록');
     ok(res, { id: bid, batch_number: batchNo }); return;
   }
   if (pathname.match(/^\/api\/lots\/(\d+)$/) && method === 'GET') {
     const id = pathname.match(/^\/api\/lots\/(\d+)$/)[1];
-    const row = db.prepare("SELECT * FROM batch_master WHERE batch_id=?").get(id);
+    const row = await db.prepare("SELECT * FROM batch_master WHERE batch_id=?").get(id);
     if (!row) { fail(res, 404, 'Lot를 찾을 수 없습니다'); return; }
-    const txns = db.prepare("SELECT * FROM batch_transactions WHERE batch_id=? ORDER BY created_at DESC").all(id);
-    const inspections = db.prepare("SELECT * FROM batch_inspections WHERE batch_id=? ORDER BY insp_date DESC").all(id);
+    const txns = await db.prepare("SELECT * FROM batch_transactions WHERE batch_id=? ORDER BY created_at DESC").all(id);
+    const inspections = await db.prepare("SELECT * FROM batch_inspections WHERE batch_id=? ORDER BY insp_date DESC").all(id);
     ok(res, { ...row, transactions: txns, inspections }); return;
   }
   if (pathname.match(/^\/api\/lots\/(\d+)$/) && method === 'PUT') {
     const id = pathname.match(/^\/api\/lots\/(\d+)$/)[1];
     const body = await readJSON(req);
-    db.prepare("UPDATE batch_master SET quality_status=COALESCE(?,quality_status), warehouse=COALESCE(?,warehouse), notes=COALESCE(?,notes), updated_at=datetime('now','localtime') WHERE batch_id=?").run(body.quality_status, body.warehouse, body.notes, id);
+    await db.prepare("UPDATE batch_master SET quality_status=COALESCE(?,quality_status), warehouse=COALESCE(?,warehouse), notes=COALESCE(?,notes), updated_at=datetime('now','localtime') WHERE batch_id=?").run(body.quality_status, body.warehouse, body.notes, id);
     ok(res, { updated: true }); return;
   }
   if (pathname.match(/^\/api\/lots\/(\d+)\/transaction$/) && method === 'POST') {
     const id = pathname.match(/^\/api\/lots\/(\d+)\/transaction$/)[1];
     const body = await readJSON(req);
     const uname = currentUser ? currentUser.username : 'system';
-    const lot = db.prepare("SELECT * FROM batch_master WHERE batch_id=?").get(id);
+    const lot = await db.prepare("SELECT * FROM batch_master WHERE batch_id=?").get(id);
     if (!lot) { fail(res, 404, 'Lot 없음'); return; }
     const qtyBefore = lot.current_qty;
     let qtyAfter = qtyBefore;
@@ -12979,28 +12953,28 @@ async function handleRequest(req, res) {
     if (txnType === 'usage' || txnType === 'transfer') qtyAfter = qtyBefore - (body.qty || 0);
     else if (txnType === 'receipt' || txnType === 'return') qtyAfter = qtyBefore + (body.qty || 0);
     else if (txnType === 'quality_hold') qtyAfter = qtyBefore;
-    db.prepare("INSERT INTO batch_transactions (batch_id,batch_number,txn_type,txn_date,from_warehouse,to_warehouse,product_code,qty,qty_before,qty_after,reference_no,actor,notes) VALUES (?,?,?,datetime('now','localtime'),?,?,?,?,?,?,?,?,?)").run(
+    await db.prepare("INSERT INTO batch_transactions (batch_id,batch_number,txn_type,txn_date,from_warehouse,to_warehouse,product_code,qty,qty_before,qty_after,reference_no,actor,notes) VALUES (?,?,?,datetime('now','localtime'),?,?,?,?,?,?,?,?,?)").run(
       id, lot.batch_number, txnType, body.from_warehouse||lot.warehouse, body.to_warehouse||'', lot.product_code, body.qty||0, qtyBefore, qtyAfter, body.reference_no||'', uname, body.notes||'');
-    db.prepare("UPDATE batch_master SET current_qty=?, warehouse=COALESCE(?,warehouse), updated_at=datetime('now','localtime') WHERE batch_id=?").run(qtyAfter, body.to_warehouse||null, id);
-    if (txnType === 'quality_hold') db.prepare("UPDATE batch_master SET quality_status='HOLD' WHERE batch_id=?").run(id);
+    await db.prepare("UPDATE batch_master SET current_qty=?, warehouse=COALESCE(?,warehouse), updated_at=datetime('now','localtime') WHERE batch_id=?").run(qtyAfter, body.to_warehouse||null, id);
+    if (txnType === 'quality_hold') await db.prepare("UPDATE batch_master SET quality_status='HOLD' WHERE batch_id=?").run(id);
     ok(res, { txn_type: txnType, qty_before: qtyBefore, qty_after: qtyAfter }); return;
   }
   if (pathname.match(/^\/api\/lots\/(\d+)\/inspect$/) && method === 'POST') {
     const id = pathname.match(/^\/api\/lots\/(\d+)\/inspect$/)[1];
     const body = await readJSON(req);
     const uname = currentUser ? currentUser.username : 'system';
-    db.prepare("INSERT INTO batch_inspections (batch_id,batch_number,insp_date,inspector,insp_type,sample_size,defects_found,defect_desc,result,next_action,notes,created_by) VALUES (?,?,datetime('now','localtime'),?,?,?,?,?,?,?,?,?)").run(
+    await db.prepare("INSERT INTO batch_inspections (batch_id,batch_number,insp_date,inspector,insp_type,sample_size,defects_found,defect_desc,result,next_action,notes,created_by) VALUES (?,?,datetime('now','localtime'),?,?,?,?,?,?,?,?,?)").run(
       id, body.batch_number||'', body.inspector||uname, body.insp_type||'RECEIVING', body.sample_size||0, body.defects_found||0, body.defect_desc||'', body.result||'PASS', body.next_action||'OK', body.notes||'', uname);
-    if (body.result === 'FAIL') db.prepare("UPDATE batch_master SET quality_status='HOLD', updated_at=datetime('now','localtime') WHERE batch_id=?").run(id);
-    else if (body.result === 'PASS') db.prepare("UPDATE batch_master SET quality_status='GOOD', updated_at=datetime('now','localtime') WHERE batch_id=?").run(id);
+    if (body.result === 'FAIL') await db.prepare("UPDATE batch_master SET quality_status='HOLD', updated_at=datetime('now','localtime') WHERE batch_id=?").run(id);
+    else if (body.result === 'PASS') await db.prepare("UPDATE batch_master SET quality_status='GOOD', updated_at=datetime('now','localtime') WHERE batch_id=?").run(id);
     ok(res, { inspected: true }); return;
   }
   if (pathname.match(/^\/api\/lots\/trace\/(.+)$/) && method === 'GET') {
     const bn = decodeURIComponent(pathname.match(/^\/api\/lots\/trace\/(.+)$/)[1]);
-    const lot = db.prepare("SELECT * FROM batch_master WHERE batch_number=?").get(bn);
+    const lot = await db.prepare("SELECT * FROM batch_master WHERE batch_number=?").get(bn);
     if (!lot) { fail(res, 404, 'Lot 없음'); return; }
-    const txns = db.prepare("SELECT * FROM batch_transactions WHERE batch_number=? ORDER BY created_at").all(bn);
-    const insps = db.prepare("SELECT * FROM batch_inspections WHERE batch_number=? ORDER BY insp_date").all(bn);
+    const txns = await db.prepare("SELECT * FROM batch_transactions WHERE batch_number=? ORDER BY created_at").all(bn);
+    const insps = await db.prepare("SELECT * FROM batch_inspections WHERE batch_number=? ORDER BY insp_date").all(bn);
     ok(res, { lot, transactions: txns, inspections: insps }); return;
   }
 
@@ -13017,13 +12991,13 @@ async function handleRequest(req, res) {
       const invRows = invR.recordset || [];
       const upsertLot = db.prepare(`INSERT INTO batch_master (batch_number,product_code,product_name,warehouse,received_qty,current_qty,quality_status,notes,created_by)
         VALUES (?,?,?,?,?,?,'GOOD','XERP 자동동기화','sync') ON CONFLICT(batch_number,product_code) DO UPDATE SET current_qty=excluded.current_qty, warehouse=excluded.warehouse, updated_at=datetime('now','localtime')`);
-      const tx1 = db.transaction(function() {
-        invRows.forEach(function(r) {
+      const tx1 = db.transaction(async function() {
+        invRows.forEach(async function(r) {
           const bn = 'XERP-' + (r.item_code||'').trim();
-          upsertLot.run(bn, (r.item_code||'').trim(), (r.item_name||'').trim(), (r.wh_code||'BK10').trim(), r.oh_qty||0, r.oh_qty||0);
+          await upsertLot.run(bn, (r.item_code||'').trim(), (r.item_name||'').trim(), (r.wh_code||'BK10').trim(), r.oh_qty||0, r.oh_qty||0);
         });
       });
-      tx1();
+      await tx1();
       // mmInoutItem에서 최근 30일 입출고 → 거래이력
       const end = new Date(); const start = new Date(); start.setDate(start.getDate() - 30);
       const fmt = d => d.toISOString().slice(0,10).replace(/-/g,'');
@@ -13038,19 +13012,19 @@ async function handleRequest(req, res) {
       const typeMap = {MI:'receipt', MO:'usage', SO:'usage', SI:'return'};
       const insTxn = db.prepare(`INSERT OR IGNORE INTO batch_transactions (batch_number,txn_type,txn_date,product_code,qty,reference_no,actor,notes)
         VALUES (?,?,?,?,?,?,?,?)`);
-      const tx2 = db.transaction(function() {
-        txnRows.forEach(function(r) {
+      const tx2 = db.transaction(async function() {
+        txnRows.forEach(async function(r) {
           const bn = 'XERP-' + (r.item_code||'').trim();
           const d = (r.InoutDate||'').toString().trim();
           const dateStr = d.length===8 ? d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8) : d;
-          insTxn.run(bn, typeMap[r.InoutGubun]||'usage', dateStr, (r.item_code||'').trim(), r.qty||0, 'XERP-'+r.InoutGubun+'-'+d, 'sync', (r.item_name||'').trim());
+          await insTxn.run(bn, typeMap[r.InoutGubun]||'usage', dateStr, (r.item_code||'').trim(), r.qty||0, 'XERP-'+r.InoutGubun+'-'+d, 'sync', (r.item_name||'').trim());
         });
       });
-      tx2();
-      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('lot-xerp',datetime('now','localtime'),?,'ok')").run(invRows.length);
+      await tx2();
+      await db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('lot-xerp',datetime('now','localtime'),?,'ok')").run(invRows.length);
       ok(res, { lots_synced: invRows.length, transactions_synced: txnRows.length, source: 'XERP' }); return;
     } catch(e) {
-      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,status,message) VALUES ('lot-xerp',datetime('now','localtime'),'error',?)").run(e.message);
+      await db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,status,message) VALUES ('lot-xerp',datetime('now','localtime'),'error',?)").run(e.message);
       fail(res, 500, 'Lot XERP 동기화 실패: ' + e.message); return;
     }
   }
@@ -13061,19 +13035,19 @@ async function handleRequest(req, res) {
       const qs = new URL(req.url, 'http://localhost').searchParams;
       const year = qs.get('year') || new Date().getFullYear().toString();
       // gl_balance_cache 갱신 (이미 있으면 그걸 사용)
-      const budgets = db.prepare("SELECT DISTINCT acc_code, month FROM budgets WHERE year=? AND acc_code IS NOT NULL AND acc_code != ''").all(year);
+      const budgets = await db.prepare("SELECT DISTINCT acc_code, month FROM budgets WHERE year=? AND acc_code IS NOT NULL AND acc_code != ''").all(year);
       let updated = 0;
-      budgets.forEach(function(b) {
+      budgets.forEach(async function(b) {
         const ym = year + '-' + b.month;
-        const cache = db.prepare("SELECT period_dr, period_cr FROM gl_balance_cache WHERE acc_code=? AND year_month=?").get(b.acc_code, ym);
+        const cache = await db.prepare("SELECT period_dr, period_cr FROM gl_balance_cache WHERE acc_code=? AND year_month=?").get(b.acc_code, ym);
         if (cache) {
-          const budget = db.prepare("SELECT budget_type FROM budgets WHERE year=? AND month=? AND acc_code=?").get(year, b.month, b.acc_code);
+          const budget = await db.prepare("SELECT budget_type FROM budgets WHERE year=? AND month=? AND acc_code=?").get(year, b.month, b.acc_code);
           const actual = budget && budget.budget_type === 'revenue' ? cache.period_cr : cache.period_dr;
-          db.prepare("UPDATE budgets SET actual_amount=?, updated_at=datetime('now','localtime') WHERE year=? AND month=? AND acc_code=?").run(actual, year, b.month, b.acc_code);
+          await db.prepare("UPDATE budgets SET actual_amount=?, updated_at=datetime('now','localtime') WHERE year=? AND month=? AND acc_code=?").run(actual, year, b.month, b.acc_code);
           updated++;
         }
       });
-      db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('budget-actual',datetime('now','localtime'),?,'ok')").run(updated);
+      await db.prepare("INSERT OR REPLACE INTO sync_meta (key,last_sync,record_count,status) VALUES ('budget-actual',datetime('now','localtime'),?,'ok')").run(updated);
       ok(res, { updated, source: 'GL Cache' }); return;
     } catch(e) {
       fail(res, 500, '예산 실적 동기화 실패: ' + e.message); return;
@@ -13087,26 +13061,26 @@ async function handleRequest(req, res) {
   if (pathname === '/api/budget/list' && method === 'GET') {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const year = qs.get('year') || new Date().getFullYear().toString();
-    const rows = db.prepare("SELECT * FROM budgets WHERE year=? ORDER BY month, acc_code").all(year);
+    const rows = await db.prepare("SELECT * FROM budgets WHERE year=? ORDER BY month, acc_code").all(year);
     ok(res, rows); return;
   }
   if (pathname === '/api/budget/save' && method === 'POST') {
     const body = await readJSON(req);
     const items = body.items || [];
     const upsert = db.prepare("INSERT INTO budgets (year,month,acc_code,acc_name,budget_type,budget_amount,notes) VALUES (?,?,?,?,?,?,?) ON CONFLICT(year,month,acc_code) DO UPDATE SET budget_amount=excluded.budget_amount, acc_name=excluded.acc_name, budget_type=excluded.budget_type, notes=excluded.notes, updated_at=datetime('now','localtime')");
-    const tx = db.transaction(function() { items.forEach(function(it) { upsert.run(it.year, it.month, it.acc_code||'', it.acc_name||'', it.budget_type||'expense', it.budget_amount||0, it.notes||''); }); });
-    tx();
+    const tx = db.transaction(async function() { for (const it of items) { await upsert.run(it.year, it.month, it.acc_code||'', it.acc_name||'', it.budget_type||'expense', it.budget_amount||0, it.notes||''); } });
+    await tx();
     ok(res, { saved: items.length }); return;
   }
   if (pathname === '/api/budget/vs-actual' && method === 'GET') {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const year = qs.get('year') || new Date().getFullYear().toString();
     const month = qs.get('month') || String(new Date().getMonth()+1).padStart(2,'0');
-    const budgets = db.prepare("SELECT * FROM budgets WHERE year=? AND month=? ORDER BY acc_code").all(year, month);
+    const budgets = await db.prepare("SELECT * FROM budgets WHERE year=? AND month=? ORDER BY acc_code").all(year, month);
     // 실적은 gl_balance_cache에서 가져오기 시도
     const ym = year + '-' + month;
-    budgets.forEach(function(b) {
-      const cache = db.prepare("SELECT period_dr, period_cr FROM gl_balance_cache WHERE acc_code=? AND year_month=?").get(b.acc_code, ym);
+    budgets.forEach(async function(b) {
+      const cache = await db.prepare("SELECT period_dr, period_cr FROM gl_balance_cache WHERE acc_code=? AND year_month=?").get(b.acc_code, ym);
       if (cache) b.actual_amount = (b.budget_type === 'expense') ? cache.period_dr : cache.period_cr;
     });
     ok(res, budgets); return;
@@ -13114,21 +13088,21 @@ async function handleRequest(req, res) {
   if (pathname === '/api/budget/summary' && method === 'GET') {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const year = qs.get('year') || new Date().getFullYear().toString();
-    const rows = db.prepare("SELECT month, budget_type, SUM(budget_amount) AS total_budget, SUM(actual_amount) AS total_actual FROM budgets WHERE year=? GROUP BY month, budget_type ORDER BY month").all(year);
+    const rows = await db.prepare("SELECT month, budget_type, SUM(budget_amount) AS total_budget, SUM(actual_amount) AS total_actual FROM budgets WHERE year=? GROUP BY month, budget_type ORDER BY month").all(year);
     ok(res, rows); return;
   }
   if (pathname === '/api/cash/daily' && method === 'GET') {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const from = qs.get('from') || new Date(Date.now()-30*86400000).toISOString().slice(0,10);
     const to = qs.get('to') || new Date().toISOString().slice(0,10);
-    const rows = db.prepare("SELECT * FROM daily_cash WHERE cash_date BETWEEN ? AND ? ORDER BY cash_date, acc_code").all(from, to);
+    const rows = await db.prepare("SELECT * FROM daily_cash WHERE cash_date BETWEEN ? AND ? ORDER BY cash_date, acc_code").all(from, to);
     ok(res, rows); return;
   }
   if (pathname === '/api/cash/daily' && method === 'POST') {
     const body = await readJSON(req);
     const items = body.items || [body];
     const upsert = db.prepare("INSERT INTO daily_cash (cash_date,acc_code,acc_name,inflow,outflow,balance,notes) VALUES (?,?,?,?,?,?,?) ON CONFLICT(cash_date,acc_code) DO UPDATE SET inflow=excluded.inflow, outflow=excluded.outflow, balance=excluded.balance, notes=excluded.notes");
-    items.forEach(function(it) { upsert.run(it.cash_date, it.acc_code||'', it.acc_name||'', it.inflow||0, it.outflow||0, it.balance||0, it.notes||''); });
+    for (const it of items) { await upsert.run(it.cash_date, it.acc_code||'', it.acc_name||'', it.inflow||0, it.outflow||0, it.balance||0, it.notes||''); }
     ok(res, { saved: items.length }); return;
   }
 
@@ -13139,23 +13113,23 @@ async function handleRequest(req, res) {
   if (pathname.match(/^\/api\/work-orders\/(\d+)\/result$/) && method === 'POST') {
     const woid = pathname.match(/^\/api\/work-orders\/(\d+)\/result$/)[1];
     const body = await readJSON(req);
-    db.prepare("INSERT INTO work_order_results (work_order_id,result_date,good_qty,defect_qty,worker_name,work_hours,notes) VALUES (?,?,?,?,?,?,?)").run(
+    await db.prepare("INSERT INTO work_order_results (work_order_id,result_date,good_qty,defect_qty,worker_name,work_hours,notes) VALUES (?,?,?,?,?,?,?)").run(
       woid, body.result_date||new Date().toISOString().slice(0,10), body.good_qty||0, body.defect_qty||0, body.worker_name||'', body.work_hours||0, body.notes||'');
     // 작업지시에 누적 반영
-    const totals = db.prepare("SELECT COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect FROM work_order_results WHERE work_order_id=?").get(woid);
-    db.prepare("UPDATE work_orders SET produced_qty=?, defect_qty=?, updated_at=datetime('now','localtime') WHERE wo_id=?").run(totals.good, totals.defect, woid);
+    const totals = await db.prepare("SELECT COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect FROM work_order_results WHERE work_order_id=?").get(woid);
+    await db.prepare("UPDATE work_orders SET produced_qty=?, defect_qty=?, updated_at=datetime('now','localtime') WHERE wo_id=?").run(totals.good, totals.defect, woid);
     ok(res, { saved: true, total_good: totals.good, total_defect: totals.defect }); return;
   }
   if (pathname.match(/^\/api\/work-orders\/(\d+)\/results$/) && method === 'GET') {
     const woid = pathname.match(/^\/api\/work-orders\/(\d+)\/results$/)[1];
-    const rows = db.prepare("SELECT * FROM work_order_results WHERE work_order_id=? ORDER BY result_date DESC").all(woid);
+    const rows = await db.prepare("SELECT * FROM work_order_results WHERE work_order_id=? ORDER BY result_date DESC").all(woid);
     ok(res, rows); return;
   }
   if (pathname === '/api/work-orders/daily-report' && method === 'GET') {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const date = qs.get('date') || new Date().toISOString().slice(0,10);
-    const rows = db.prepare("SELECT r.*, w.wo_number, w.product_name FROM work_order_results r JOIN work_orders w ON w.wo_id=r.work_order_id WHERE r.result_date=? ORDER BY r.created_at DESC").all(date);
-    const summary = db.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect, COALESCE(SUM(work_hours),0) AS hours FROM work_order_results WHERE result_date=?").get(date);
+    const rows = await db.prepare("SELECT r.*, w.wo_number, w.product_name FROM work_order_results r JOIN work_orders w ON w.wo_id=r.work_order_id WHERE r.result_date=? ORDER BY r.created_at DESC").all(date);
+    const summary = await db.prepare("SELECT COUNT(*) AS cnt, COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect, COALESCE(SUM(work_hours),0) AS hours FROM work_order_results WHERE result_date=?").get(date);
     ok(res, { total_good: summary.good, total_defect: summary.defect, total_hours: summary.hours, order_count: summary.cnt, results: rows }); return;
   }
 
@@ -13183,7 +13157,7 @@ async function handleRequest(req, res) {
       salesKpi.prev_month_sales=(r2.recordset[0]||{}).t||0; sources.xerp='ok';
     } catch(_){ sources.xerp='error'; }
     try {
-      await withBarShop1Pool(async(pool)=>{
+      await withBarShop1Pool(async (pool)=>{
         const r=await pool.request().input('s',s).input('e',e+' 23:59:59').query(`SELECT SUM(i.item_sale_price*i.item_count) AS rev, SUM(i.item_price*i.item_count) AS cost, COUNT(DISTINCT o.order_seq) AS cnt FROM custom_order o WITH(NOLOCK) JOIN custom_order_item i WITH(NOLOCK) ON o.order_seq=i.order_seq WHERE o.order_date>=@s AND o.order_date<=@e AND o.status_seq>=1 AND i.item_sale_price>0`);
         const row=r.recordset[0]||{}; barKpi.total_revenue=row.rev||0; barKpi.total_cost=row.cost||0; barKpi.order_count=row.cnt||0;
       }); sources.bar_shop1='ok';
@@ -13210,33 +13184,33 @@ async function handleRequest(req, res) {
     // 2) 구매 KPI
     let poKpi = { total: 0, pending: 0, overdue: 0, this_month_amount: 0 };
     try {
-      poKpi.total = (db.prepare("SELECT COUNT(*) AS c FROM po_header").get()||{}).c||0;
-      poKpi.pending = (db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE status IN ('draft','sent','confirmed','partial')").get()||{}).c||0;
-      poKpi.overdue = (db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE status IN ('sent','confirmed','partial') AND expected_date < ?").get(today)||{}).c||0;
-      const amt = db.prepare("SELECT COALESCE(SUM(pi.unit_price*pi.ordered_qty),0) AS t FROM po_header ph JOIN po_items pi ON ph.po_id=pi.po_id WHERE ph.po_date >= ?").get(monthStart.toISOString().slice(0,10));
+      poKpi.total = (await db.prepare("SELECT COUNT(*) AS c FROM po_header").get()||{}).c||0;
+      poKpi.pending = (await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE status IN ('draft','sent','confirmed','partial')").get()||{}).c||0;
+      poKpi.overdue = (await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE status IN ('sent','confirmed','partial') AND expected_date < ?").get(today)||{}).c||0;
+      const amt = await db.prepare("SELECT COALESCE(SUM(pi.unit_price*pi.ordered_qty),0) AS t FROM po_header ph JOIN po_items pi ON ph.po_id=pi.po_id WHERE ph.po_date >= ?").get(monthStart.toISOString().slice(0,10));
       poKpi.this_month_amount = amt ? amt.t : 0;
     } catch(_){}
 
     // 3) 재고 KPI
     let invKpi = { total_items: 0, low_stock: 0, expiring_soon: 0, total_value: 0 };
     try {
-      invKpi.total_items = (db.prepare("SELECT COUNT(*) AS c FROM batch_master WHERE current_qty > 0").get()||{}).c||0;
-      const lowRules = db.prepare("SELECT sr.product_code, sr.min_qty FROM safety_stock_rules sr").all();
+      invKpi.total_items = (await db.prepare("SELECT COUNT(*) AS c FROM batch_master WHERE current_qty > 0").get()||{}).c||0;
+      const lowRules = await db.prepare("SELECT sr.product_code, sr.min_qty FROM safety_stock_rules sr").all();
       for (const r of lowRules) {
-        const stock = db.prepare("SELECT COALESCE(SUM(current_qty),0) AS q FROM batch_master WHERE product_code=? AND quality_status='GOOD'").get(r.product_code);
+        const stock = await db.prepare("SELECT COALESCE(SUM(current_qty),0) AS q FROM batch_master WHERE product_code=? AND quality_status='GOOD'").get(r.product_code);
         if (stock && stock.q < r.min_qty) invKpi.low_stock++;
       }
-      invKpi.expiring_soon = (db.prepare("SELECT COUNT(*) AS c FROM batch_master WHERE exp_date IS NOT NULL AND exp_date != '' AND exp_date <= date('now','+30 days') AND current_qty > 0").get()||{}).c||0;
+      invKpi.expiring_soon = (await db.prepare("SELECT COUNT(*) AS c FROM batch_master WHERE exp_date IS NOT NULL AND exp_date != '' AND exp_date <= date('now','+30 days') AND current_qty > 0").get()||{}).c||0;
     } catch(_){}
 
     // 4) 생산 KPI
     let prodKpi = { active_wo: 0, completed_wo: 0, today_good: 0, today_defect: 0, defect_rate: 0 };
     try {
-      prodKpi.active_wo = (db.prepare("SELECT COUNT(*) AS c FROM work_orders WHERE status='in_progress'").get()||{}).c||0;
-      prodKpi.completed_wo = (db.prepare("SELECT COUNT(*) AS c FROM work_orders WHERE status='completed' AND completed_date >= ?").get(monthStart.toISOString().slice(0,10))||{}).c||0;
-      const todayProd = db.prepare("SELECT COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect FROM work_order_results WHERE result_date=?").get(today);
+      prodKpi.active_wo = (await db.prepare("SELECT COUNT(*) AS c FROM work_orders WHERE status='in_progress'").get()||{}).c||0;
+      prodKpi.completed_wo = (await db.prepare("SELECT COUNT(*) AS c FROM work_orders WHERE status='completed' AND completed_date >= ?").get(monthStart.toISOString().slice(0,10))||{}).c||0;
+      const todayProd = await db.prepare("SELECT COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect FROM work_order_results WHERE result_date=?").get(today);
       if (todayProd) { prodKpi.today_good=todayProd.good; prodKpi.today_defect=todayProd.defect; }
-      const monthProd = db.prepare("SELECT COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect FROM work_order_results WHERE result_date >= ?").get(monthStart.toISOString().slice(0,10));
+      const monthProd = await db.prepare("SELECT COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect FROM work_order_results WHERE result_date >= ?").get(monthStart.toISOString().slice(0,10));
       if (monthProd && (monthProd.good+monthProd.defect)>0) prodKpi.defect_rate = Math.round(monthProd.defect/(monthProd.good+monthProd.defect)*1000)/10;
     } catch(_){}
 
@@ -13244,47 +13218,47 @@ async function handleRequest(req, res) {
     let acctKpi = { budget_total: 0, actual_total: 0, budget_exec_rate: 0, ar_total: 0, ap_total: 0 };
     try {
       const yr = String(now.getFullYear());
-      const budSum = db.prepare("SELECT COALESCE(SUM(budget_amount),0) AS b, COALESCE(SUM(actual_amount),0) AS a FROM budgets WHERE year=?").get(yr);
+      const budSum = await db.prepare("SELECT COALESCE(SUM(budget_amount),0) AS b, COALESCE(SUM(actual_amount),0) AS a FROM budgets WHERE year=?").get(yr);
       if (budSum) { acctKpi.budget_total=budSum.b; acctKpi.actual_total=budSum.a; acctKpi.budget_exec_rate=budSum.b>0?Math.round(budSum.a/budSum.b*1000)/10:0; }
     } catch(_){}
 
     // 6) 업무 KPI
     let taskKpi = { total: 0, done: 0, in_progress: 0, overdue: 0 };
     try {
-      const ts = db.prepare("SELECT status, COUNT(*) AS c FROM tasks GROUP BY status").all();
-      ts.forEach(t => { taskKpi.total+=t.c; if(t.status==='done') taskKpi.done=t.c; if(t.status==='in_progress') taskKpi.in_progress=t.c; });
-      taskKpi.overdue = (db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE status != 'done' AND due_date < ? AND due_date IS NOT NULL AND due_date != ''").get(today)||{}).c||0;
+      const ts = await db.prepare("SELECT status, COUNT(*) AS c FROM tasks GROUP BY status").all();
+      ts.forEach(async t => { taskKpi.total+=t.c; if(t.status==='done') taskKpi.done=t.c; if(t.status==='in_progress') taskKpi.in_progress=t.c; });
+      taskKpi.overdue = (await db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE status != 'done' AND due_date < ? AND due_date IS NOT NULL AND due_date != ''").get(today)||{}).c||0;
     } catch(_){}
 
     // 7) 결재 KPI
     let approvalKpi = { pending: 0, approved_month: 0, rejected_month: 0 };
     try {
-      approvalKpi.pending = (db.prepare("SELECT COUNT(*) AS c FROM approvals WHERE status='pending'").get()||{}).c||0;
-      approvalKpi.approved_month = (db.prepare("SELECT COUNT(*) AS c FROM approvals WHERE status='approved' AND updated_at >= ?").get(monthStart.toISOString().slice(0,10))||{}).c||0;
+      approvalKpi.pending = (await db.prepare("SELECT COUNT(*) AS c FROM approvals WHERE status='pending'").get()||{}).c||0;
+      approvalKpi.approved_month = (await db.prepare("SELECT COUNT(*) AS c FROM approvals WHERE status='approved' AND updated_at >= ?").get(monthStart.toISOString().slice(0,10))||{}).c||0;
     } catch(_){}
 
     // 8) 불량 KPI
     let defectKpi = { month_count: 0, month_qty: 0, top_vendor: '' };
     try {
-      const dc = db.prepare("SELECT COUNT(*) AS c, COALESCE(SUM(defect_qty),0) AS q FROM defects WHERE created_at >= ?").get(monthStart.toISOString().slice(0,10));
+      const dc = await db.prepare("SELECT COUNT(*) AS c, COALESCE(SUM(defect_qty),0) AS q FROM defects WHERE created_at >= ?").get(monthStart.toISOString().slice(0,10));
       if (dc) { defectKpi.month_count=dc.c; defectKpi.month_qty=dc.q; }
-      const tv = db.prepare("SELECT vendor_name, COUNT(*) AS c FROM defects WHERE created_at >= ? GROUP BY vendor_name ORDER BY c DESC LIMIT 1").get(monthStart.toISOString().slice(0,10));
+      const tv = await db.prepare("SELECT vendor_name, COUNT(*) AS c FROM defects WHERE created_at >= ? GROUP BY vendor_name ORDER BY c DESC LIMIT 1").get(monthStart.toISOString().slice(0,10));
       if (tv) defectKpi.top_vendor = tv.vendor_name;
     } catch(_){}
 
     // 9) 제조원가 최신
     let costKpi = { avg_unit_cost: 0, total_material: 0, total_labor: 0 };
     try {
-      const cc = db.prepare("SELECT COALESCE(AVG(unit_cost),0) AS u, COALESCE(SUM(material_cost),0) AS m, COALESCE(SUM(labor_cost),0) AS l FROM mfg_cost_cards WHERE calc_date >= ?").get(monthStart.toISOString().slice(0,10));
+      const cc = await db.prepare("SELECT COALESCE(AVG(unit_cost),0) AS u, COALESCE(SUM(material_cost),0) AS m, COALESCE(SUM(labor_cost),0) AS l FROM mfg_cost_cards WHERE calc_date >= ?").get(monthStart.toISOString().slice(0,10));
       if (cc) { costKpi.avg_unit_cost=Math.round(cc.u); costKpi.total_material=cc.m; costKpi.total_labor=cc.l; }
     } catch(_){}
 
     // 10) 설비 가동률
     let eqKpi = { total: 0, active: 0, maintenance: 0, avg_oee: 0 };
     try {
-      eqKpi.total = (db.prepare("SELECT COUNT(*) AS c FROM equipment").get()||{}).c||0;
-      eqKpi.active = (db.prepare("SELECT COUNT(*) AS c FROM equipment WHERE status='active'").get()||{}).c||0;
-      eqKpi.maintenance = (db.prepare("SELECT COUNT(*) AS c FROM equipment WHERE status='maintenance'").get()||{}).c||0;
+      eqKpi.total = (await db.prepare("SELECT COUNT(*) AS c FROM equipment").get()||{}).c||0;
+      eqKpi.active = (await db.prepare("SELECT COUNT(*) AS c FROM equipment WHERE status='active'").get()||{}).c||0;
+      eqKpi.maintenance = (await db.prepare("SELECT COUNT(*) AS c FROM equipment WHERE status='maintenance'").get()||{}).c||0;
     } catch(_){}
 
     ok(res, {
@@ -13302,9 +13276,9 @@ async function handleRequest(req, res) {
 
   if (pathname.match(/^\/api\/pdf\/quotation\/(\d+)$/) && method === 'GET') {
     const id = pathname.match(/^\/api\/pdf\/quotation\/(\d+)$/)[1];
-    const order = db.prepare("SELECT * FROM sales_orders WHERE id=?").get(id);
+    const order = await db.prepare("SELECT * FROM sales_orders WHERE id=?").get(id);
     if (!order) { fail(res, 404, 'Not Found'); return; }
-    const items = db.prepare("SELECT * FROM sales_order_items WHERE order_id=?").all(id);
+    const items = await db.prepare("SELECT * FROM sales_order_items WHERE order_id=?").all(id);
     ok(res, { order, items, doc_type: order.order_type === 'quote' ? '견적서' : '수주확인서',
       company: { name: '바른컴퍼니(주)', tel: '02-2103-2600', fax: '02-2103-2609', addr: '서울시 용산구 한강대로 366 트윈시티남산2' }
     }); return;
@@ -13312,7 +13286,7 @@ async function handleRequest(req, res) {
 
   if (pathname.match(/^\/api\/pdf\/invoice\/(\d+)$/) && method === 'GET') {
     const id = pathname.match(/^\/api\/pdf\/invoice\/(\d+)$/)[1];
-    const doc = db.prepare("SELECT * FROM trade_document WHERE id=?").get(id);
+    const doc = await db.prepare("SELECT * FROM trade_document WHERE id=?").get(id);
     if (!doc) { fail(res, 404, 'Not Found'); return; }
     ok(res, { doc, doc_type: '거래명세서',
       company: { name: '바른컴퍼니(주)', tel: '02-2103-2600', fax: '02-2103-2609', addr: '서울시 용산구 한강대로 366 트윈시티남산2' }
@@ -13321,7 +13295,7 @@ async function handleRequest(req, res) {
 
   if (pathname.match(/^\/api\/pdf\/tax-invoice\/(\d+)$/) && method === 'GET') {
     const id = pathname.match(/^\/api\/pdf\/tax-invoice\/(\d+)$/)[1];
-    const inv = db.prepare("SELECT * FROM hometax_invoices WHERE id=?").get(id);
+    const inv = await db.prepare("SELECT * FROM hometax_invoices WHERE id=?").get(id);
     if (!inv) { fail(res, 404, 'Not Found'); return; }
     ok(res, { invoice: inv, doc_type: '세금계산서' }); return;
   }
@@ -13331,12 +13305,12 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/safety-stock' && method === 'GET') {
-    const rules = db.prepare("SELECT * FROM safety_stock_rules ORDER BY product_code").all();
+    const rules = await db.prepare("SELECT * FROM safety_stock_rules ORDER BY product_code").all();
     // 현재 재고와 조인
-    const result = rules.map(r => {
-      const stock = db.prepare("SELECT COALESCE(SUM(current_qty),0) AS qty FROM batch_master WHERE product_code=? AND quality_status='GOOD'").get(r.product_code);
+    const result = await Promise.all(rules.map(async r => {
+      const stock = await db.prepare("SELECT COALESCE(SUM(current_qty),0) AS qty FROM batch_master WHERE product_code=? AND quality_status='GOOD'").get(r.product_code);
       return { ...r, current_qty: stock ? stock.qty : 0, is_below: stock ? stock.qty < r.min_qty : false };
-    });
+    }));
     ok(res, result); return;
   }
 
@@ -13344,15 +13318,15 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const items = body.items || [body];
     const upsert = db.prepare("INSERT INTO safety_stock_rules (product_code,product_name,min_qty,reorder_qty,reorder_point,lead_time_days,warehouse,auto_po,vendor_name) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(product_code) DO UPDATE SET product_name=excluded.product_name, min_qty=excluded.min_qty, reorder_qty=excluded.reorder_qty, reorder_point=excluded.reorder_point, lead_time_days=excluded.lead_time_days, warehouse=excluded.warehouse, auto_po=excluded.auto_po, vendor_name=excluded.vendor_name, updated_at=datetime('now','localtime')");
-    items.forEach(it => upsert.run(it.product_code, it.product_name||'', it.min_qty||0, it.reorder_qty||0, it.reorder_point||0, it.lead_time_days||7, it.warehouse||'', it.auto_po?1:0, it.vendor_name||''));
+    for (const it of items) { await upsert.run(it.product_code, it.product_name||'', it.min_qty||0, it.reorder_qty||0, it.reorder_point||0, it.lead_time_days||7, it.warehouse||'', it.auto_po?1:0, it.vendor_name||''); }
     ok(res, { saved: items.length }); return;
   }
 
   if (pathname === '/api/safety-stock/check' && method === 'POST') {
-    const rules = db.prepare("SELECT * FROM safety_stock_rules").all();
+    const rules = await db.prepare("SELECT * FROM safety_stock_rules").all();
     const alerts = [];
     for (const r of rules) {
-      const stock = db.prepare("SELECT COALESCE(SUM(current_qty),0) AS qty FROM batch_master WHERE product_code=? AND quality_status='GOOD'").get(r.product_code);
+      const stock = await db.prepare("SELECT COALESCE(SUM(current_qty),0) AS qty FROM batch_master WHERE product_code=? AND quality_status='GOOD'").get(r.product_code);
       const qty = stock ? stock.qty : 0;
       if (qty <= r.reorder_point || qty < r.min_qty) {
         alerts.push({ product_code: r.product_code, product_name: r.product_name, current_qty: qty, min_qty: r.min_qty, reorder_point: r.reorder_point, shortage: r.min_qty - qty });
@@ -13371,7 +13345,7 @@ async function handleRequest(req, res) {
       let cnt = 0;
       for (const row of r.recordset||[]) {
         const minQ = Math.max(1, Math.round(row.OhQty * 0.3));
-        upsert.run(row.code, row.name, minQ, Math.round(row.OhQty * 0.5), Math.round(row.OhQty * 0.4));
+        await upsert.run(row.code, row.name, minQ, Math.round(row.OhQty * 0.5), Math.round(row.OhQty * 0.4));
         cnt++;
       }
       ok(res, { imported: cnt }); return;
@@ -13380,31 +13354,31 @@ async function handleRequest(req, res) {
 
   // 재고실사
   if (pathname === '/api/cycle-count' && method === 'GET') {
-    const plans = db.prepare("SELECT * FROM cycle_count_plans ORDER BY created_at DESC").all();
-    const result = plans.map(p => {
-      const items = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN counted_qty IS NOT NULL THEN 1 ELSE 0 END) AS counted, SUM(ABS(variance)) AS total_variance FROM cycle_count_items WHERE plan_id=?").get(p.id);
+    const plans = await db.prepare("SELECT * FROM cycle_count_plans ORDER BY created_at DESC").all();
+    const result = await Promise.all(plans.map(async p => {
+      const items = await db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN counted_qty IS NOT NULL THEN 1 ELSE 0 END) AS counted, SUM(ABS(variance)) AS total_variance FROM cycle_count_items WHERE plan_id=?").get(p.id);
       return { ...p, item_count: items.total||0, counted_count: items.counted||0, total_variance: items.total_variance||0 };
-    });
+    }));
     ok(res, result); return;
   }
 
   if (pathname === '/api/cycle-count' && method === 'POST') {
     const body = await readJSON(req);
     const planNo = 'CC-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.floor(Math.random()*900)+100);
-    const r = db.prepare("INSERT INTO cycle_count_plans (plan_no,plan_date,warehouse,note,created_by) VALUES (?,?,?,?,?)").run(planNo, body.plan_date||new Date().toISOString().slice(0,10), body.warehouse||'', body.note||'', body.created_by||'');
+    const r = await db.prepare("INSERT INTO cycle_count_plans (plan_no,plan_date,warehouse,note,created_by) VALUES (?,?,?,?,?)").run(planNo, body.plan_date||new Date().toISOString().slice(0,10), body.warehouse||'', body.note||'', body.created_by||'');
     const planId = r.lastInsertRowid;
     // 아이템 자동 생성: 해당 창고의 모든 재고품목
-    const stocks = db.prepare("SELECT product_code, product_name, COALESCE(SUM(current_qty),0) AS sys_qty FROM batch_master WHERE current_qty > 0 " + (body.warehouse ? "AND warehouse=?" : "") + " GROUP BY product_code").all(...(body.warehouse ? [body.warehouse] : []));
+    const stocks = await db.prepare("SELECT product_code, product_name, COALESCE(SUM(current_qty),0) AS sys_qty FROM batch_master WHERE current_qty > 0 " + (body.warehouse ? "AND warehouse=?" : "") + " GROUP BY product_code").all(...(body.warehouse ? [body.warehouse] : []));
     const ins = db.prepare("INSERT INTO cycle_count_items (plan_id,product_code,product_name,system_qty) VALUES (?,?,?,?)");
-    stocks.forEach(s => ins.run(planId, s.product_code, s.product_name, s.sys_qty));
+    for (const s of stocks) { await ins.run(planId, s.product_code, s.product_name, s.sys_qty); }
     ok(res, { plan_id: planId, plan_no: planNo, items: stocks.length }); return;
   }
 
   if (pathname.match(/^\/api\/cycle-count\/(\d+)$/) && method === 'GET') {
     const id = pathname.match(/^\/api\/cycle-count\/(\d+)$/)[1];
-    const plan = db.prepare("SELECT * FROM cycle_count_plans WHERE id=?").get(id);
+    const plan = await db.prepare("SELECT * FROM cycle_count_plans WHERE id=?").get(id);
     if (!plan) { fail(res, 404, 'Not Found'); return; }
-    const items = db.prepare("SELECT * FROM cycle_count_items WHERE plan_id=? ORDER BY product_code").all(id);
+    const items = await db.prepare("SELECT * FROM cycle_count_items WHERE plan_id=? ORDER BY product_code").all(id);
     ok(res, { ...plan, items }); return;
   }
 
@@ -13413,25 +13387,25 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const items = body.items || [];
     const upd = db.prepare("UPDATE cycle_count_items SET counted_qty=?, variance=?-system_qty, note=? WHERE plan_id=? AND product_code=?");
-    items.forEach(it => upd.run(it.counted_qty, it.counted_qty, it.note||'', id, it.product_code));
+    for (const it of items) { await upd.run(it.counted_qty, it.counted_qty, it.note||'', id, it.product_code); }
     ok(res, { updated: items.length }); return;
   }
 
   if (pathname.match(/^\/api\/cycle-count\/(\d+)\/complete$/) && method === 'POST') {
     const id = pathname.match(/^\/api\/cycle-count\/(\d+)\/complete$/)[1];
-    const items = db.prepare("SELECT * FROM cycle_count_items WHERE plan_id=? AND counted_qty IS NOT NULL AND variance != 0").all(id);
+    const items = await db.prepare("SELECT * FROM cycle_count_items WHERE plan_id=? AND counted_qty IS NOT NULL AND variance != 0").all(id);
     // 재고 조정 반영
     for (const it of items) {
-      const batch = db.prepare("SELECT batch_id, current_qty FROM batch_master WHERE product_code=? AND quality_status='GOOD' ORDER BY received_date DESC LIMIT 1").get(it.product_code);
+      const batch = await db.prepare("SELECT batch_id, current_qty FROM batch_master WHERE product_code=? AND quality_status='GOOD' ORDER BY received_date DESC LIMIT 1").get(it.product_code);
       if (batch) {
         const newQty = batch.current_qty + it.variance;
-        db.prepare("UPDATE batch_master SET current_qty=?, updated_at=datetime('now','localtime') WHERE batch_id=?").run(Math.max(0, newQty), batch.batch_id);
-        db.prepare("INSERT INTO batch_transactions (batch_id,batch_number,txn_type,txn_date,product_code,qty,qty_before,qty_after,reference_no,actor,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
+        await db.prepare("UPDATE batch_master SET current_qty=?, updated_at=datetime('now','localtime') WHERE batch_id=?").run(Math.max(0, newQty), batch.batch_id);
+        await db.prepare("INSERT INTO batch_transactions (batch_id,batch_number,txn_type,txn_date,product_code,qty,qty_before,qty_after,reference_no,actor,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
           batch.batch_id, '', 'adjust', new Date().toISOString().slice(0,10), it.product_code, Math.abs(it.variance), batch.current_qty, Math.max(0, newQty), 'CC-'+id, '', '재고실사 조정');
-        db.prepare("UPDATE cycle_count_items SET adjusted=1 WHERE id=?").run(it.id);
+        await db.prepare("UPDATE cycle_count_items SET adjusted=1 WHERE id=?").run(it.id);
       }
     }
-    db.prepare("UPDATE cycle_count_plans SET status='completed', completed_at=datetime('now','localtime') WHERE id=?").run(id);
+    await db.prepare("UPDATE cycle_count_plans SET status='completed', completed_at=datetime('now','localtime') WHERE id=?").run(id);
     createNotification(null, 'system', '재고실사 완료', 'CC-'+id+' 실사 완료, '+items.length+'건 조정', 'cycle-count');
     ok(res, { adjusted: items.length }); return;
   }
@@ -13441,7 +13415,7 @@ async function handleRequest(req, res) {
   // ══════════════���═════════════════════════════════════════════════════
 
   if (pathname === '/api/mfg-cost/rates' && method === 'GET') {
-    const rates = db.prepare("SELECT * FROM cost_rates ORDER BY rate_type, rate_key").all();
+    const rates = await db.prepare("SELECT * FROM cost_rates ORDER BY rate_type, rate_key").all();
     ok(res, rates); return;
   }
 
@@ -13449,7 +13423,7 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const items = body.items || [body];
     const upsert = db.prepare("INSERT INTO cost_rates (rate_type,rate_key,rate_value,unit,notes) VALUES (?,?,?,?,?) ON CONFLICT(rate_type,rate_key) DO UPDATE SET rate_value=excluded.rate_value, unit=excluded.unit, notes=excluded.notes, updated_at=datetime('now','localtime')");
-    items.forEach(it => upsert.run(it.rate_type, it.rate_key, it.rate_value||0, it.unit||'', it.notes||''));
+    for (const it of items) { await upsert.run(it.rate_type, it.rate_key, it.rate_value||0, it.unit||'', it.notes||''); }
     ok(res, { saved: items.length }); return;
   }
 
@@ -13459,23 +13433,23 @@ async function handleRequest(req, res) {
     const qty = body.qty || 1;
 
     // BOM에서 재료비 계산
-    const bom = db.prepare("SELECT * FROM bom_header WHERE product_code=?").get(productCode);
+    const bom = await db.prepare("SELECT * FROM bom_header WHERE product_code=?").get(productCode);
     if (!bom) { fail(res, 404, 'BOM not found for ' + productCode); return; }
-    const bomItems = db.prepare("SELECT * FROM bom_items WHERE bom_id=?").all(bom.bom_id);
+    const bomItems = await db.prepare("SELECT * FROM bom_items WHERE bom_id=?").all(bom.bom_id);
 
     let materialCost = 0, outsourceCost = 0;
     const materialDetails = [], processDetails = [];
     for (const item of bomItems) {
       if (item.item_type === 'material') {
         // material_prices에서 최신 단가 조회
-        const price = db.prepare("SELECT apply_price FROM material_prices WHERE product_code=? ORDER BY apply_month DESC LIMIT 1").get(item.material_code || item.product_code);
+        const price = await db.prepare("SELECT apply_price FROM material_prices WHERE product_code=? ORDER BY apply_month DESC LIMIT 1").get(item.material_code || item.product_code);
         const unitPrice = price ? price.apply_price : 0;
         const cost = unitPrice * (item.qty_per || 1) * qty;
         materialCost += cost;
         materialDetails.push({ code: item.material_code||item.product_code, name: item.material_name, qty_per: item.qty_per, unit_price: unitPrice, cost });
       } else if (item.item_type === 'process') {
         // post_process_price에서 단가 조회
-        const price = db.prepare("SELECT unit_price FROM post_process_price WHERE vendor_name=? AND process_type=? ORDER BY effective_from DESC LIMIT 1").get(item.vendor_name||'', item.process_type||'');
+        const price = await db.prepare("SELECT unit_price FROM post_process_price WHERE vendor_name=? AND process_type=? ORDER BY effective_from DESC LIMIT 1").get(item.vendor_name||'', item.process_type||'');
         const unitPrice = price ? price.unit_price : 0;
         const cost = unitPrice * (item.qty_per || 1) * qty;
         outsourceCost += cost;
@@ -13484,11 +13458,11 @@ async function handleRequest(req, res) {
     }
 
     // 노무비: work_order_results에서 실적 기반 또는 표준
-    const laborRate = (db.prepare("SELECT rate_value FROM cost_rates WHERE rate_type='labor' AND rate_key='default'").get()||{}).rate_value || 25000;
-    const overheadRate = (db.prepare("SELECT rate_value FROM cost_rates WHERE rate_type='overhead' AND rate_key='rate'").get()||{}).rate_value || 15;
+    const laborRate = (await db.prepare("SELECT rate_value FROM cost_rates WHERE rate_type='labor' AND rate_key='default'").get()||{}).rate_value || 25000;
+    const overheadRate = (await db.prepare("SELECT rate_value FROM cost_rates WHERE rate_type='overhead' AND rate_key='rate'").get()||{}).rate_value || 15;
 
     // 최근 작업지시의 실제 노무시간 기반
-    const woResult = db.prepare("SELECT COALESCE(SUM(work_hours),0) AS hours, COALESCE(SUM(good_qty),0) AS good FROM work_order_results r JOIN work_orders w ON w.wo_id=r.work_order_id WHERE w.product_code=? ORDER BY r.result_date DESC LIMIT 10").get(productCode);
+    const woResult = await db.prepare("SELECT COALESCE(SUM(work_hours),0) AS hours, COALESCE(SUM(good_qty),0) AS good FROM work_order_results r JOIN work_orders w ON w.wo_id=r.work_order_id WHERE w.product_code=? ORDER BY r.result_date DESC LIMIT 10").get(productCode);
     let laborCost = 0;
     if (woResult && woResult.good > 0) {
       const hoursPerUnit = woResult.hours / woResult.good;
@@ -13503,7 +13477,7 @@ async function handleRequest(req, res) {
 
     // 저장
     const calcDate = new Date().toISOString().slice(0,10);
-    db.prepare("INSERT INTO mfg_cost_cards (product_code,product_name,calc_date,material_cost,labor_cost,overhead_cost,outsource_cost,total_cost,unit_cost,qty,source) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(product_code,calc_date) DO UPDATE SET material_cost=excluded.material_cost, labor_cost=excluded.labor_cost, overhead_cost=excluded.overhead_cost, outsource_cost=excluded.outsource_cost, total_cost=excluded.total_cost, unit_cost=excluded.unit_cost, qty=excluded.qty").run(
+    await db.prepare("INSERT INTO mfg_cost_cards (product_code,product_name,calc_date,material_cost,labor_cost,overhead_cost,outsource_cost,total_cost,unit_cost,qty,source) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(product_code,calc_date) DO UPDATE SET material_cost=excluded.material_cost, labor_cost=excluded.labor_cost, overhead_cost=excluded.overhead_cost, outsource_cost=excluded.outsource_cost, total_cost=excluded.total_cost, unit_cost=excluded.unit_cost, qty=excluded.qty").run(
       productCode, bom.product_name||'', calcDate, materialCost, laborCost, overheadCost, outsourceCost, totalCost, unitCost, qty, 'auto');
 
     ok(res, {
@@ -13519,12 +13493,12 @@ async function handleRequest(req, res) {
   if (pathname === '/api/mfg-cost/cards' && method === 'GET') {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const from = qs.get('from') || new Date(Date.now()-90*86400000).toISOString().slice(0,10);
-    const cards = db.prepare("SELECT * FROM mfg_cost_cards WHERE calc_date >= ? ORDER BY calc_date DESC, product_code").all(from);
+    const cards = await db.prepare("SELECT * FROM mfg_cost_cards WHERE calc_date >= ? ORDER BY calc_date DESC, product_code").all(from);
     ok(res, cards); return;
   }
 
   if (pathname === '/api/mfg-cost/summary' && method === 'GET') {
-    const latest = db.prepare(`SELECT product_code, product_name, MAX(calc_date) AS calc_date,
+    const latest = await db.prepare(`SELECT product_code, product_name, MAX(calc_date) AS calc_date,
       material_cost, labor_cost, overhead_cost, outsource_cost, total_cost, unit_cost, qty
       FROM mfg_cost_cards GROUP BY product_code ORDER BY product_name`).all();
     const totals = db.prepare(`SELECT COALESCE(SUM(material_cost),0) AS material, COALESCE(SUM(labor_cost),0) AS labor,
@@ -13536,35 +13510,35 @@ async function handleRequest(req, res) {
 
   if (pathname === '/api/mfg-cost/calculate-all' && method === 'POST') {
     // 모든 BOM 제품의 원가를 일괄 계산
-    const boms = db.prepare("SELECT product_code, product_name FROM bom_header").all();
+    const boms = await db.prepare("SELECT product_code, product_name FROM bom_header").all();
     let calculated = 0;
-    const laborRate = (db.prepare("SELECT rate_value FROM cost_rates WHERE rate_type='labor' AND rate_key='default'").get()||{}).rate_value || 25000;
-    const overheadRate = (db.prepare("SELECT rate_value FROM cost_rates WHERE rate_type='overhead' AND rate_key='rate'").get()||{}).rate_value || 15;
+    const laborRate = (await db.prepare("SELECT rate_value FROM cost_rates WHERE rate_type='labor' AND rate_key='default'").get()||{}).rate_value || 25000;
+    const overheadRate = (await db.prepare("SELECT rate_value FROM cost_rates WHERE rate_type='overhead' AND rate_key='rate'").get()||{}).rate_value || 15;
     const calcDate = new Date().toISOString().slice(0,10);
 
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       for (const bom of boms) {
-        const items = db.prepare("SELECT * FROM bom_items WHERE bom_id=(SELECT bom_id FROM bom_header WHERE product_code=?)").all(bom.product_code);
+        const items = await db.prepare("SELECT * FROM bom_items WHERE bom_id=(SELECT bom_id FROM bom_header WHERE product_code=?)").all(bom.product_code);
         let mat = 0, out = 0;
         for (const it of items) {
           if (it.item_type === 'material') {
-            const p = db.prepare("SELECT apply_price FROM material_prices WHERE product_code=? ORDER BY apply_month DESC LIMIT 1").get(it.material_code||it.product_code);
+            const p = await db.prepare("SELECT apply_price FROM material_prices WHERE product_code=? ORDER BY apply_month DESC LIMIT 1").get(it.material_code||it.product_code);
             mat += (p ? p.apply_price : 0) * (it.qty_per||1);
           } else if (it.item_type === 'process') {
-            const p = db.prepare("SELECT unit_price FROM post_process_price WHERE vendor_name=? AND process_type=? ORDER BY effective_from DESC LIMIT 1").get(it.vendor_name||'', it.process_type||'');
+            const p = await db.prepare("SELECT unit_price FROM post_process_price WHERE vendor_name=? AND process_type=? ORDER BY effective_from DESC LIMIT 1").get(it.vendor_name||'', it.process_type||'');
             out += (p ? p.unit_price : 0) * (it.qty_per||1);
           }
         }
-        const wo = db.prepare("SELECT COALESCE(SUM(work_hours),0) AS h, COALESCE(SUM(good_qty),0) AS g FROM work_order_results r JOIN work_orders w ON w.wo_id=r.work_order_id WHERE w.product_code=?").get(bom.product_code);
+        const wo = await db.prepare("SELECT COALESCE(SUM(work_hours),0) AS h, COALESCE(SUM(good_qty),0) AS g FROM work_order_results r JOIN work_orders w ON w.wo_id=r.work_order_id WHERE w.product_code=?").get(bom.product_code);
         const lab = wo && wo.g > 0 ? (wo.h/wo.g)*laborRate : laborRate*0.5;
         const oh = (mat+lab)*overheadRate/100;
         const total = mat+lab+oh+out;
-        db.prepare("INSERT INTO mfg_cost_cards (product_code,product_name,calc_date,material_cost,labor_cost,overhead_cost,outsource_cost,total_cost,unit_cost,qty,source) VALUES (?,?,?,?,?,?,?,?,?,1,'batch') ON CONFLICT(product_code,calc_date) DO UPDATE SET material_cost=excluded.material_cost, labor_cost=excluded.labor_cost, overhead_cost=excluded.overhead_cost, outsource_cost=excluded.outsource_cost, total_cost=excluded.total_cost, unit_cost=excluded.unit_cost").run(
+        await db.prepare("INSERT INTO mfg_cost_cards (product_code,product_name,calc_date,material_cost,labor_cost,overhead_cost,outsource_cost,total_cost,unit_cost,qty,source) VALUES (?,?,?,?,?,?,?,?,?,1,'batch') ON CONFLICT(product_code,calc_date) DO UPDATE SET material_cost=excluded.material_cost, labor_cost=excluded.labor_cost, overhead_cost=excluded.overhead_cost, outsource_cost=excluded.outsource_cost, total_cost=excluded.total_cost, unit_cost=excluded.unit_cost").run(
           bom.product_code, bom.product_name, calcDate, mat, lab, oh, out, total, Math.round(total));
         calculated++;
       }
     });
-    tx();
+    await tx();
     ok(res, { calculated }); return;
   }
 
@@ -13573,12 +13547,12 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/rbac/roles' && method === 'GET') {
-    const roles = db.prepare("SELECT DISTINCT role FROM role_permissions ORDER BY role").all().map(r => r.role);
-    const result = roles.map(role => {
-      const perms = db.prepare("SELECT permission, resource FROM role_permissions WHERE role=? AND granted=1").all(role);
-      const userCount = (db.prepare("SELECT COUNT(*) AS c FROM users WHERE role=?").get(role)||{}).c||0;
+    const roles = (await db.prepare("SELECT DISTINCT role FROM role_permissions ORDER BY role").all()).map(r => r.role);
+    const result = await Promise.all(roles.map(async role => {
+      const perms = await db.prepare("SELECT permission, resource FROM role_permissions WHERE role=? AND granted=1").all(role);
+      const userCount = (await db.prepare("SELECT COUNT(*) AS c FROM users WHERE role=?").get(role)||{}).c||0;
       return { role, permissions: perms, user_count: userCount };
-    });
+    }));
     ok(res, result); return;
   }
 
@@ -13586,9 +13560,9 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     if (!body.role) { fail(res, 400, 'role 필수'); return; }
     // 기존 권한 삭제 후 재생성
-    db.prepare("DELETE FROM role_permissions WHERE role=?").run(body.role);
+    await db.prepare("DELETE FROM role_permissions WHERE role=?").run(body.role);
     const ins = db.prepare("INSERT INTO role_permissions (role,permission,resource) VALUES (?,?,?)");
-    (body.permissions || []).forEach(p => ins.run(body.role, p.permission||'read', p.resource||'*'));
+    for (const p of (body.permissions || [])) { await ins.run(body.role, p.permission||'read', p.resource||'*'); }
     ok(res, { saved: true }); return;
   }
 
@@ -13603,15 +13577,15 @@ async function handleRequest(req, res) {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const userId = qs.get('user_id');
     if (!userId) { fail(res, 400, 'user_id 필수'); return; }
-    const user = db.prepare("SELECT user_id, username, display_name, role FROM users WHERE user_id=?").get(userId);
+    const user = await db.prepare("SELECT user_id, username, display_name, role FROM users WHERE user_id=?").get(userId);
     if (!user) { fail(res, 404, 'User not found'); return; }
-    const perms = db.prepare("SELECT permission, resource FROM role_permissions WHERE role=? AND granted=1").all(user.role);
+    const perms = await db.prepare("SELECT permission, resource FROM role_permissions WHERE role=? AND granted=1").all(user.role);
     ok(res, { user, permissions: perms }); return;
   }
 
   if (pathname === '/api/rbac/check' && method === 'POST') {
     const body = await readJSON(req);
-    const perms = db.prepare("SELECT * FROM role_permissions WHERE role=? AND granted=1 AND (resource=? OR resource='*') AND (permission=? OR permission='*')").get(body.role||'', body.resource||'', body.permission||'read');
+    const perms = await db.prepare("SELECT * FROM role_permissions WHERE role=? AND granted=1 AND (resource=? OR resource='*') AND (permission=? OR permission='*')").get(body.role||'', body.resource||'', body.permission||'read');
     ok(res, { allowed: !!perms }); return;
   }
 
@@ -13624,10 +13598,10 @@ async function handleRequest(req, res) {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const productCode = qs.get('product_code');
     if (productCode) {
-      const routes = db.prepare("SELECT r.*, e.eq_name FROM process_routing r LEFT JOIN equipment e ON e.id=r.equipment_id WHERE r.product_code=? ORDER BY r.step_no").all(productCode);
+      const routes = await db.prepare("SELECT r.*, e.eq_name FROM process_routing r LEFT JOIN equipment e ON e.id=r.equipment_id WHERE r.product_code=? ORDER BY r.step_no").all(productCode);
       ok(res, routes);
     } else {
-      const all = db.prepare("SELECT product_code, COUNT(*) AS step_count, GROUP_CONCAT(process_name,' → ') AS flow FROM process_routing GROUP BY product_code ORDER BY product_code").all();
+      const all = await db.prepare("SELECT product_code, COUNT(*) AS step_count, GROUP_CONCAT(process_name,' → ') AS flow FROM process_routing GROUP BY product_code ORDER BY product_code").all();
       ok(res, all);
     }
     return;
@@ -13636,21 +13610,21 @@ async function handleRequest(req, res) {
   if (pathname === '/api/process-routing' && method === 'POST') {
     const body = await readJSON(req);
     if (!body.product_code || !body.steps) { fail(res, 400, 'product_code, steps 필수'); return; }
-    db.prepare("DELETE FROM process_routing WHERE product_code=?").run(body.product_code);
+    await db.prepare("DELETE FROM process_routing WHERE product_code=?").run(body.product_code);
     const ins = db.prepare("INSERT INTO process_routing (product_code,step_no,process_name,process_type,equipment_id,vendor_name,std_time_min,setup_time_min,notes) VALUES (?,?,?,?,?,?,?,?,?)");
-    body.steps.forEach((s,i) => ins.run(body.product_code, i+1, s.process_name, s.process_type||'internal', s.equipment_id||null, s.vendor_name||'', s.std_time_min||0, s.setup_time_min||0, s.notes||''));
+    for (let i = 0; i < body.steps.length; i++) { const s = body.steps[i]; await ins.run(body.product_code, i+1, s.process_name, s.process_type||'internal', s.equipment_id||null, s.vendor_name||'', s.std_time_min||0, s.setup_time_min||0, s.notes||''); }
     ok(res, { saved: body.steps.length }); return;
   }
 
   if (pathname === '/api/process-routing/import-from-bom' && method === 'POST') {
     // BOM의 공정 항목에서 자동으로 라우팅 생성
-    const boms = db.prepare("SELECT DISTINCT bom_id, product_code FROM bom_header").all();
+    const boms = await db.prepare("SELECT DISTINCT bom_id, product_code FROM bom_header").all();
     let imported = 0;
     const ins = db.prepare("INSERT OR IGNORE INTO process_routing (product_code,step_no,process_name,process_type,vendor_name,std_time_min) VALUES (?,?,?,?,?,?)");
     for (const b of boms) {
-      const procs = db.prepare("SELECT * FROM bom_items WHERE bom_id=? AND item_type='process' ORDER BY sort_order").all(b.bom_id);
-      procs.forEach((p,i) => {
-        ins.run(b.product_code, i+1, p.process_type||p.material_name||'공정'+(i+1), p.vendor_name?'outsource':'internal', p.vendor_name||'', 30);
+      const procs = await db.prepare("SELECT * FROM bom_items WHERE bom_id=? AND item_type='process' ORDER BY sort_order").all(b.bom_id);
+      procs.forEach(async (p,i) => {
+        await ins.run(b.product_code, i+1, p.process_type||p.material_name||'공정'+(i+1), p.vendor_name?'outsource':'internal', p.vendor_name||'', 30);
         imported++;
       });
     }
@@ -13660,7 +13634,7 @@ async function handleRequest(req, res) {
   // 공정별 실적
   if (pathname === '/api/process-results' && method === 'POST') {
     const body = await readJSON(req);
-    db.prepare("INSERT INTO process_results (wo_id,routing_id,step_no,process_name,equipment_id,start_time,end_time,good_qty,defect_qty,worker_name,status,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run(
+    await db.prepare("INSERT INTO process_results (wo_id,routing_id,step_no,process_name,equipment_id,start_time,end_time,good_qty,defect_qty,worker_name,status,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run(
       body.wo_id, body.routing_id||null, body.step_no, body.process_name, body.equipment_id||null, body.start_time||'', body.end_time||'', body.good_qty||0, body.defect_qty||0, body.worker_name||'', body.status||'completed', body.notes||'');
 
     // 설비 가동 로그 자동 생성
@@ -13668,18 +13642,18 @@ async function handleRequest(req, res) {
       const start = new Date(body.start_time); const end = new Date(body.end_time);
       const duration = (end - start) / 60000;
       if (duration > 0) {
-        db.prepare("INSERT INTO equipment_logs (equipment_id,log_date,log_type,start_time,end_time,duration_min,reason,worker_name) VALUES (?,?,?,?,?,?,?,?)").run(
+        await db.prepare("INSERT INTO equipment_logs (equipment_id,log_date,log_type,start_time,end_time,duration_min,reason,worker_name) VALUES (?,?,?,?,?,?,?,?)").run(
           body.equipment_id, (body.start_time||'').slice(0,10), 'production', body.start_time, body.end_time, duration, body.process_name||'', body.worker_name||'');
       }
     }
 
     // 해당 WO의 공정 진행률 업데이트
-    const routing = db.prepare("SELECT COUNT(*) AS total FROM process_routing WHERE product_code=(SELECT product_code FROM work_orders WHERE wo_id=?)").get(body.wo_id);
-    const completed = db.prepare("SELECT COUNT(DISTINCT step_no) AS done FROM process_results WHERE wo_id=? AND status='completed'").get(body.wo_id);
+    const routing = await db.prepare("SELECT COUNT(*) AS total FROM process_routing WHERE product_code=(SELECT product_code FROM work_orders WHERE wo_id=?)").get(body.wo_id);
+    const completed = await db.prepare("SELECT COUNT(DISTINCT step_no) AS done FROM process_results WHERE wo_id=? AND status='completed'").get(body.wo_id);
     if (routing && completed && routing.total > 0 && completed.done >= routing.total) {
       // 모든 공정 완료 → 작업지시 완료 처리
-      const totalGood = (db.prepare("SELECT MIN(good_qty) AS g FROM process_results WHERE wo_id=? AND status='completed'").get(body.wo_id)||{}).g||0;
-      db.prepare("UPDATE work_orders SET status='completed', produced_qty=?, completed_date=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE wo_id=?").run(totalGood, body.wo_id);
+      const totalGood = (await db.prepare("SELECT MIN(good_qty) AS g FROM process_results WHERE wo_id=? AND status='completed'").get(body.wo_id)||{}).g||0;
+      await db.prepare("UPDATE work_orders SET status='completed', produced_qty=?, completed_date=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE wo_id=?").run(totalGood, body.wo_id);
       createNotification(null, 'system', '작업지시 완료', 'WO-'+body.wo_id+' 모든 공정 완료', 'work-order');
     }
     ok(res, { saved: true }); return;
@@ -13689,10 +13663,10 @@ async function handleRequest(req, res) {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const woId = qs.get('wo_id');
     if (woId) {
-      const results = db.prepare("SELECT pr.*, e.eq_name FROM process_results pr LEFT JOIN equipment e ON e.id=pr.equipment_id WHERE pr.wo_id=? ORDER BY pr.step_no").all(woId);
+      const results = await db.prepare("SELECT pr.*, e.eq_name FROM process_results pr LEFT JOIN equipment e ON e.id=pr.equipment_id WHERE pr.wo_id=? ORDER BY pr.step_no").all(woId);
       ok(res, results);
     } else {
-      const results = db.prepare("SELECT pr.*, w.wo_number, w.product_name, e.eq_name FROM process_results pr JOIN work_orders w ON w.wo_id=pr.wo_id LEFT JOIN equipment e ON e.id=pr.equipment_id ORDER BY pr.created_at DESC LIMIT 100").all();
+      const results = await db.prepare("SELECT pr.*, w.wo_number, w.product_name, e.eq_name FROM process_results pr JOIN work_orders w ON w.wo_id=pr.wo_id LEFT JOIN equipment e ON e.id=pr.equipment_id ORDER BY pr.created_at DESC LIMIT 100").all();
       ok(res, results);
     }
     return;
@@ -13700,11 +13674,11 @@ async function handleRequest(req, res) {
 
   // 설비 관리
   if (pathname === '/api/equipment' && method === 'GET') {
-    const eqs = db.prepare("SELECT * FROM equipment ORDER BY eq_code").all();
+    const eqs = await db.prepare("SELECT * FROM equipment ORDER BY eq_code").all();
     // 각 설비의 이번달 가동 통계
     const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
-    const result = eqs.map(eq => {
-      const logs = db.prepare("SELECT log_type, COALESCE(SUM(duration_min),0) AS total_min FROM equipment_logs WHERE equipment_id=? AND log_date >= ? GROUP BY log_type").all(eq.id, monthStart);
+    const result = await Promise.all(eqs.map(async eq => {
+      const logs = await db.prepare("SELECT log_type, COALESCE(SUM(duration_min),0) AS total_min FROM equipment_logs WHERE equipment_id=? AND log_date >= ? GROUP BY log_type").all(eq.id, monthStart);
       const stats = {};
       logs.forEach(l => stats[l.log_type] = l.total_min);
       const prodMin = stats.production || 0;
@@ -13713,19 +13687,19 @@ async function handleRequest(req, res) {
       const totalMin = prodMin + downMin + maintMin;
       const availability = totalMin > 0 ? Math.round(prodMin / totalMin * 1000) / 10 : 0;
       return { ...eq, stats: { production_min: prodMin, downtime_min: downMin, maintenance_min: maintMin, availability } };
-    });
+    }));
     ok(res, result); return;
   }
 
   if (pathname === '/api/equipment' && method === 'POST') {
     const body = await readJSON(req);
     if (body.id) {
-      db.prepare("UPDATE equipment SET eq_name=?,eq_type=?,location=?,status=?,manufacturer=?,model=?,capacity_per_hour=?,notes=?,updated_at=datetime('now','localtime') WHERE id=?").run(
+      await db.prepare("UPDATE equipment SET eq_name=?,eq_type=?,location=?,status=?,manufacturer=?,model=?,capacity_per_hour=?,notes=?,updated_at=datetime('now','localtime') WHERE id=?").run(
         body.eq_name, body.eq_type||'', body.location||'', body.status||'active', body.manufacturer||'', body.model||'', body.capacity_per_hour||0, body.notes||'', body.id);
       ok(res, { updated: true }); return;
     }
     const code = body.eq_code || 'EQ-' + String(Date.now()).slice(-6);
-    db.prepare("INSERT INTO equipment (eq_code,eq_name,eq_type,location,status,purchase_date,manufacturer,model,capacity_per_hour,notes) VALUES (?,?,?,?,?,?,?,?,?,?)").run(
+    await db.prepare("INSERT INTO equipment (eq_code,eq_name,eq_type,location,status,purchase_date,manufacturer,model,capacity_per_hour,notes) VALUES (?,?,?,?,?,?,?,?,?,?)").run(
       code, body.eq_name||'', body.eq_type||'', body.location||'', body.status||'active', body.purchase_date||'', body.manufacturer||'', body.model||'', body.capacity_per_hour||0, body.notes||'');
     ok(res, { created: true, eq_code: code }); return;
   }
@@ -13735,11 +13709,11 @@ async function handleRequest(req, res) {
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const from = qs.get('from') || new Date(Date.now()-30*86400000).toISOString().slice(0,10);
     const to = qs.get('to') || new Date().toISOString().slice(0,10);
-    const eq = db.prepare("SELECT * FROM equipment WHERE id=?").get(id);
+    const eq = await db.prepare("SELECT * FROM equipment WHERE id=?").get(id);
     if (!eq) { fail(res, 404, 'Not Found'); return; }
 
     // OEE = Availability × Performance × Quality
-    const logs = db.prepare("SELECT log_type, COALESCE(SUM(duration_min),0) AS mins FROM equipment_logs WHERE equipment_id=? AND log_date BETWEEN ? AND ? GROUP BY log_type").all(id, from, to);
+    const logs = await db.prepare("SELECT log_type, COALESCE(SUM(duration_min),0) AS mins FROM equipment_logs WHERE equipment_id=? AND log_date BETWEEN ? AND ? GROUP BY log_type").all(id, from, to);
     const logMap = {}; logs.forEach(l => logMap[l.log_type] = l.mins);
     const prodMin = logMap.production || 0;
     const downMin = logMap.downtime || 0;
@@ -13747,7 +13721,7 @@ async function handleRequest(req, res) {
     const availability = plannedMin > 0 ? prodMin / plannedMin : 0;
 
     // Performance: 실제 생산량 vs 이론적 최대 생산량
-    const results = db.prepare("SELECT COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect FROM process_results WHERE equipment_id=? AND created_at >= ? AND created_at <= ?").get(id, from, to + ' 23:59:59');
+    const results = await db.prepare("SELECT COALESCE(SUM(good_qty),0) AS good, COALESCE(SUM(defect_qty),0) AS defect FROM process_results WHERE equipment_id=? AND created_at >= ? AND created_at <= ?").get(id, from, to + ' 23:59:59');
     const totalProd = (results.good||0) + (results.defect||0);
     const maxProd = eq.capacity_per_hour > 0 ? eq.capacity_per_hour * (prodMin / 60) : totalProd || 1;
     const performance = maxProd > 0 ? Math.min(1, totalProd / maxProd) : 0;
@@ -13758,7 +13732,7 @@ async function handleRequest(req, res) {
     const oee = Math.round(availability * performance * quality * 1000) / 10;
 
     // 일별 추이
-    const daily = db.prepare("SELECT log_date, log_type, SUM(duration_min) AS mins FROM equipment_logs WHERE equipment_id=? AND log_date BETWEEN ? AND ? GROUP BY log_date, log_type ORDER BY log_date").all(id, from, to);
+    const daily = await db.prepare("SELECT log_date, log_type, SUM(duration_min) AS mins FROM equipment_logs WHERE equipment_id=? AND log_date BETWEEN ? AND ? GROUP BY log_date, log_type ORDER BY log_date").all(id, from, to);
 
     ok(res, {
       equipment: eq, period: { from, to },
@@ -13772,13 +13746,13 @@ async function handleRequest(req, res) {
   if (pathname.match(/^\/api\/equipment\/(\d+)\/log$/) && method === 'POST') {
     const id = pathname.match(/^\/api\/equipment\/(\d+)\/log$/)[1];
     const body = await readJSON(req);
-    db.prepare("INSERT INTO equipment_logs (equipment_id,log_date,log_type,start_time,end_time,duration_min,reason,worker_name,notes) VALUES (?,?,?,?,?,?,?,?,?)").run(
+    await db.prepare("INSERT INTO equipment_logs (equipment_id,log_date,log_type,start_time,end_time,duration_min,reason,worker_name,notes) VALUES (?,?,?,?,?,?,?,?,?)").run(
       id, body.log_date||new Date().toISOString().slice(0,10), body.log_type||'downtime', body.start_time||'', body.end_time||'', body.duration_min||0, body.reason||'', body.worker_name||'', body.notes||'');
     // 설비 상태 자동 업데이트
     if (body.log_type === 'maintenance') {
-      db.prepare("UPDATE equipment SET status='maintenance', updated_at=datetime('now','localtime') WHERE id=?").run(id);
+      await db.prepare("UPDATE equipment SET status='maintenance', updated_at=datetime('now','localtime') WHERE id=?").run(id);
     } else if (body.log_type === 'production') {
-      db.prepare("UPDATE equipment SET status='active', updated_at=datetime('now','localtime') WHERE id=?").run(id);
+      await db.prepare("UPDATE equipment SET status='active', updated_at=datetime('now','localtime') WHERE id=?").run(id);
     }
     ok(res, { saved: true }); return;
   }
@@ -13787,7 +13761,7 @@ async function handleRequest(req, res) {
     const id = pathname.match(/^\/api\/equipment\/(\d+)\/logs$/)[1];
     const qs = new URL(req.url, 'http://localhost').searchParams;
     const from = qs.get('from') || new Date(Date.now()-30*86400000).toISOString().slice(0,10);
-    const logs = db.prepare("SELECT * FROM equipment_logs WHERE equipment_id=? AND log_date >= ? ORDER BY log_date DESC, start_time DESC").all(id, from);
+    const logs = await db.prepare("SELECT * FROM equipment_logs WHERE equipment_id=? AND log_date >= ? ORDER BY log_date DESC, start_time DESC").all(id, from);
     ok(res, logs); return;
   }
 
@@ -13816,20 +13790,20 @@ async function handleRequest(req, res) {
           acc_type=excluded.acc_type, acc_group=excluded.acc_group,
           parent_code=excluded.parent_code, depth=excluded.depth, sort_order=excluded.sort_order,
           updated_at=datetime('now','localtime')`);
-      const tx = db.transaction(() => {
+      const tx = db.transaction(async () => {
         for (const row of result.recordset) {
           const code = row.acc_code.trim();
           if (!code) continue;
           const cls = classifyAccount(code);
-          upsert.run(code, cls.acc_name, cls.acc_type, cls.acc_group, cls.parent_code, cls.depth, cls.sort_order);
+          await upsert.run(code, cls.acc_name, cls.acc_type, cls.acc_group, cls.parent_code, cls.depth, cls.sort_order);
           seeded++;
         }
       });
-      tx();
+      await tx();
     } catch (e) {
       sources.xerp = 'error: ' + e.message;
     }
-    const total = db.prepare('SELECT COUNT(*) AS cnt FROM gl_account_map').get().cnt;
+    const total = (await db.prepare('SELECT COUNT(*) AS cnt FROM gl_account_map').get()).cnt;
     ok(res, { seeded, total, sources }); return;
   }
 
@@ -13837,7 +13811,7 @@ async function handleRequest(req, res) {
   if (pathname === '/api/acct/accounts' && method === 'GET') {
     const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
     if (!decoded) { fail(res, 401, '인증 필요'); return; }
-    const accounts = db.prepare(`SELECT acc_code, acc_name, acc_type, acc_group, parent_code, depth, sort_order, is_active
+    const accounts = await db.prepare(`SELECT acc_code, acc_name, acc_type, acc_group, parent_code, depth, sort_order, is_active
       FROM gl_account_map ORDER BY sort_order, acc_code`).all();
     ok(res, { accounts, total: accounts.length }); return;
   }
@@ -13849,7 +13823,7 @@ async function handleRequest(req, res) {
     const code = decodeURIComponent(pathname.match(/^\/api\/acct\/accounts\/(.+)$/)[1]);
     const body = await readJSON(req);
     if (body.acc_name !== undefined) {
-      db.prepare(`UPDATE gl_account_map SET acc_name=?, updated_at=datetime('now','localtime') WHERE acc_code=?`).run(body.acc_name, code);
+      await db.prepare(`UPDATE gl_account_map SET acc_name=?, updated_at=datetime('now','localtime') WHERE acc_code=?`).run(body.acc_name, code);
     }
     ok(res, { message: '계정 수정 완료' }); return;
   }
@@ -13889,7 +13863,7 @@ async function handleRequest(req, res) {
     } catch (e) { sources.xerp = 'error: ' + e.message; }
     // 계정명 조인
     const accMap = {};
-    db.prepare('SELECT acc_code, acc_name, acc_type, acc_group FROM gl_account_map').all().forEach(a => { accMap[a.acc_code] = a; });
+    (await db.prepare('SELECT acc_code, acc_name, acc_type, acc_group FROM gl_account_map').all()).forEach(a => { accMap[a.acc_code] = a; });
     stats = stats.map(s => ({
       ...s,
       acc_name: (accMap[s.acc_code] || {}).acc_name || '',
@@ -13974,9 +13948,9 @@ async function handleRequest(req, res) {
     } catch (e) { sources.xerp = 'error: ' + e.message; }
     // 계정명 + 거래처명 보강
     const accMap = {};
-    db.prepare('SELECT acc_code, acc_name FROM gl_account_map').all().forEach(a => { accMap[a.acc_code] = a.acc_name; });
+    (await db.prepare('SELECT acc_code, acc_name FROM gl_account_map').all()).forEach(a => { accMap[a.acc_code] = a.acc_name; });
     const csMap = {};
-    db.prepare('SELECT cs_code, cs_name FROM cs_code_cache').all().forEach(c => { csMap[c.cs_code] = c.cs_name; });
+    (await db.prepare('SELECT cs_code, cs_name FROM cs_code_cache').all()).forEach(c => { csMap[c.cs_code] = c.cs_name; });
     items = items.map(it => ({
       ...it,
       acc_name: accMap[it.acc_code] || '',
@@ -14035,7 +14009,7 @@ async function handleRequest(req, res) {
       transactions = txResult.recordset;
     } catch (e) { sources.xerp = 'error: ' + e.message; }
     // 계정 유형 확인 (자산/비용은 Dr+, 부채/자본/수익은 Cr+)
-    const accInfo = db.prepare('SELECT acc_type, acc_name FROM gl_account_map WHERE acc_code=?').get(acc) || {};
+    const accInfo = await db.prepare('SELECT acc_type, acc_name FROM gl_account_map WHERE acc_code=?').get(acc) || {};
     const isDebitNature = ['asset', 'expense'].includes(accInfo.acc_type);
     // 잔액 누계 계산
     let runBal = isDebitNature ? (openingDr - openingCr) : (openingCr - openingDr);
@@ -14113,7 +14087,7 @@ async function handleRequest(req, res) {
     } catch (e) { sources.xerp = 'error: ' + e.message; }
     // 계정명 매핑
     const accMap = {};
-    db.prepare('SELECT acc_code, acc_name, acc_type, acc_group, sort_order FROM gl_account_map').all()
+    await db.prepare('SELECT acc_code, acc_name, acc_type, acc_group, sort_order FROM gl_account_map').all()
       .forEach(a => { accMap[a.acc_code] = a; });
     // 통합
     const allCodes = new Set([...periodData.map(p => p.acc_code), ...priorData.map(p => p.acc_code)]);
@@ -14160,9 +14134,9 @@ async function handleRequest(req, res) {
       period_dr=excluded.period_dr,period_cr=excluded.period_cr,
       closing_dr=excluded.closing_dr,closing_cr=excluded.closing_cr,
       cached_at=datetime('now','localtime')`);
-    const txBal = db.transaction(() => {
+    const txBal = db.transaction(async () => {
       const ym = year + String(month).padStart(2, '0');
-      for (const r of rows) { upsertBal.run(r.acc_code, ym, r.opening_dr, r.opening_cr, r.period_dr, r.period_cr, r.closing_dr, r.closing_cr); }
+      for (const r of rows) { await upsertBal.run(r.acc_code, ym, r.opening_dr, r.opening_cr, r.period_dr, r.period_cr, r.closing_dr, r.closing_cr); }
     });
     try { txBal(); } catch (e) { /* 캐시 저장 실패는 무시 */ }
     ok(res, resp); return;
@@ -14212,7 +14186,7 @@ async function handleRequest(req, res) {
     }
 
     const accMap = {};
-    db.prepare('SELECT acc_code, acc_name, acc_type, acc_group, sort_order FROM gl_account_map').all()
+    await db.prepare('SELECT acc_code, acc_name, acc_type, acc_group, sort_order FROM gl_account_map').all()
       .forEach(a => { accMap[a.acc_code] = a; });
 
     function buildStatement(periodArr, priorArr) {
@@ -14403,8 +14377,8 @@ async function handleRequest(req, res) {
       // entry_no 생성: JE-YYYYMMDD-NNN (트랜잭션으로 보호)
       const dateStr = entry_date.replace(/-/g, '');
       const prefix = 'JE-' + dateStr + '-';
-      const createEntry = db.transaction(() => {
-        const last = db.prepare("SELECT entry_no FROM journal_entries WHERE entry_no LIKE ? ORDER BY entry_no DESC LIMIT 1").get(prefix + '%');
+      const createEntry = db.transaction(async () => {
+        const last = await db.prepare("SELECT entry_no FROM journal_entries WHERE entry_no LIKE ? ORDER BY entry_no DESC LIMIT 1").get(prefix + '%');
         let seq = 1;
         if (last && last.entry_no) {
           const parts = last.entry_no.split('-');
@@ -14412,12 +14386,12 @@ async function handleRequest(req, res) {
         }
         const entry_no = prefix + String(seq).padStart(3, '0');
         const ins = db.prepare("INSERT INTO journal_entries (entry_no, entry_date, description, total_amount, status, created_by) VALUES (?,?,?,?,?,?)");
-        const result = ins.run(entry_no, entry_date, description || '', totalDebit, 'posted', decoded.name || decoded.username || '');
+        const result = await ins.run(entry_no, entry_date, description || '', totalDebit, 'posted', decoded.name || decoded.username || '');
         const entryId = result.lastInsertRowid;
         const insLine = db.prepare("INSERT INTO journal_entry_lines (entry_id, line_no, acc_code, acc_name, debit, credit, description) VALUES (?,?,?,?,?,?,?)");
         for (let i = 0; i < lines.length; i++) {
           const ln = lines[i];
-          insLine.run(entryId, i + 1, ln.acc_code, ln.acc_name || '', parseFloat(ln.debit) || 0, parseFloat(ln.credit) || 0, ln.description || '');
+          await insLine.run(entryId, i + 1, ln.acc_code, ln.acc_name || '', parseFloat(ln.debit) || 0, parseFloat(ln.credit) || 0, ln.description || '');
         }
         return { id: entryId, entry_no, total_amount: totalDebit };
       });
@@ -14439,12 +14413,12 @@ async function handleRequest(req, res) {
       if (from) { sql += " AND e.entry_date >= ?"; params.push(from); }
       if (to) { sql += " AND e.entry_date <= ?"; params.push(to); }
       sql += " ORDER BY e.entry_date DESC, e.id DESC";
-      const entries = db.prepare(sql).all(...params);
+      const entries = await db.prepare(sql).all(...params);
       // 각 entry에 lines 포함 (N+1 방지: 한 번에 모든 lines 조회 후 그룹핑)
       if (entries.length > 0) {
         const entryIds = entries.map(e => e.id);
         const placeholders = entryIds.map(() => '?').join(',');
-        const allLines = db.prepare("SELECT * FROM journal_entry_lines WHERE entry_id IN (" + placeholders + ") ORDER BY entry_id, line_no").all(...entryIds);
+        const allLines = await db.prepare("SELECT * FROM journal_entry_lines WHERE entry_id IN (" + placeholders + ") ORDER BY entry_id, line_no").all(...entryIds);
         const linesMap = {};
         for (const ln of allLines) {
           if (!linesMap[ln.entry_id]) linesMap[ln.entry_id] = [];
@@ -14464,11 +14438,11 @@ async function handleRequest(req, res) {
     if (!decoded) { fail(res, 401, '인증 필요'); return; }
     try {
       const id = parseInt(pathname.match(/^\/api\/acct\/journal-entries\/(\d+)$/)[1], 10);
-      const entry = db.prepare("SELECT * FROM journal_entries WHERE id=?").get(id);
+      const entry = await db.prepare("SELECT * FROM journal_entries WHERE id=?").get(id);
       if (!entry) { fail(res, 404, '분개 전표를 찾을 수 없습니다'); return; }
       if (entry.status !== 'posted') { fail(res, 400, '삭제할 수 없는 상태입니다: ' + entry.status); return; }
-      db.prepare("DELETE FROM journal_entry_lines WHERE entry_id=?").run(id);
-      db.prepare("DELETE FROM journal_entries WHERE id=?").run(id);
+      await db.prepare("DELETE FROM journal_entry_lines WHERE entry_id=?").run(id);
+      await db.prepare("DELETE FROM journal_entries WHERE id=?").run(id);
       ok(res, { deleted: id }); return;
     } catch (e) { fail(res, 500, '수동 분개 삭제 실패: ' + e.message); return; }
   }
@@ -14527,7 +14501,7 @@ async function handleRequest(req, res) {
 async function runAutoOrderScheduler() {
   console.log(`[자동발주 스케줄러] ${new Date().toLocaleString('ko-KR')} 실행 시작`);
 
-  const items = db.prepare('SELECT * FROM auto_order_items WHERE enabled=1').all();
+  const items = await db.prepare('SELECT * FROM auto_order_items WHERE enabled=1').all();
   if (!items.length) {
     console.log('[자동발주 스케줄러] 자동발주 설정 품목 없음');
     return;
@@ -14588,7 +14562,7 @@ async function runAutoOrderScheduler() {
     const vendor = item.vendor_name || '';
     if (vendor && !isUrgent) {
       if (!(vendor in weeklyVendorCountSch)) {
-        weeklyVendorCountSch[vendor] = db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date>=? AND status!='cancelled' AND status!='취소'`).get(vendor, mondayStrSch).cnt;
+        weeklyVendorCountSch[vendor] = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date>=? AND status!='cancelled' AND status!='취소'`).get(vendor, mondayStrSch)).cnt;
       }
       if (weeklyVendorCountSch[vendor] >= 6) {
         console.log(`[자동발주] 스킵: ${item.product_code} — ${vendor} 주간 한도 초과 (${weeklyVendorCountSch[vendor]}/6건)`);
@@ -14597,7 +14571,7 @@ async function runAutoOrderScheduler() {
     }
 
     // 미완료 PO 스킵 (중복발주 방지)
-    const pendingPO = db.prepare(`
+    const pendingPO = await db.prepare(`
       SELECT h.po_number, h.status FROM po_header h
       JOIN po_items i ON i.po_id = h.po_id
       WHERE i.product_code = ? AND h.status IN ('draft','발송','확인','수령중','OS등록대기','sent')
@@ -14616,17 +14590,17 @@ async function runAutoOrderScheduler() {
     // PO 생성 (status='sent'로 바로 발송 상태)
     const poNumber = generatePoNumber();
     // origin 결정
-    const _schedOriginProd = db.prepare('SELECT origin FROM products WHERE product_code=?').get(item.product_code);
+    const _schedOriginProd = await db.prepare('SELECT origin FROM products WHERE product_code=?').get(item.product_code);
     const _schedOrigin = (_schedOriginProd && _schedOriginProd.origin) || '한국';
-    const tx = db.transaction(() => {
+    const tx = db.transaction(async () => {
       const hdr = db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, material_status, process_status, origin, po_date)
         VALUES (?,?,?,?,?,?,?,?,?,date('now','localtime'))`).run(
         poNumber, '자동발주', item.vendor_name || '', 'sent', orderQty, '자동발주 스케줄러', 'sent', 'waiting', _schedOrigin
       );
-      db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?,?,?,?,?,?,?)').run(
+      await db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?,?,?,?,?,?,?)').run(
         hdr.lastInsertRowid, item.product_code, p['브랜드'] || '', '', orderQty, '', '자동발주'
       );
-      db.prepare('UPDATE auto_order_items SET last_ordered_at=? WHERE id=?').run(new Date().toISOString(), item.id);
+      await db.prepare('UPDATE auto_order_items SET last_ordered_at=? WHERE id=?').run(new Date().toISOString(), item.id);
       return { po_id: Number(hdr.lastInsertRowid), po_number: poNumber };
     });
     const result = tx();
@@ -14639,21 +14613,21 @@ async function runAutoOrderScheduler() {
     });
 
     // 거래명세서 자동 생성
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(result.po_id);
-    const poItems = db.prepare('SELECT * FROM po_items WHERE po_id=?').all(result.po_id);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(result.po_id);
+    const poItems = await db.prepare('SELECT * FROM po_items WHERE po_id=?').all(result.po_id);
     const docItems = poItems.map(it => ({
       product_code: it.product_code, product_name: it.brand || '',
       qty: it.ordered_qty, unit_price: 0, amount: 0, spec: it.spec || ''
     }));
-    const vendorRow = db.prepare('SELECT type FROM vendors WHERE name=?').get(po.vendor_name);
+    const vendorRow = await db.prepare('SELECT type FROM vendors WHERE name=?').get(po.vendor_name);
     const vendorType = vendorRow ? vendorRow.type : 'material';
     try {
-      db.prepare("INSERT INTO trade_document (po_id, po_number, vendor_name, vendor_type, items_json, status) VALUES (?,?,?,?,?,'sent')")
+      await db.prepare("INSERT INTO trade_document (po_id, po_number, vendor_name, vendor_type, items_json, status) VALUES (?,?,?,?,?,'sent')")
         .run(result.po_id, poNumber, po.vendor_name, vendorType, JSON.stringify(docItems));
     } catch(e) { console.log('[자동발주] 거래명세서 생성 오류:', e.message); }
 
     // 이메일 발송
-    const vendorInfo = db.prepare('SELECT * FROM vendors WHERE name=?').get(item.vendor_name);
+    const vendorInfo = await db.prepare('SELECT * FROM vendors WHERE name=?').get(item.vendor_name);
     if (vendorInfo && vendorInfo.email) {
       try {
         const isPost = vendorInfo.type === '후공정';
@@ -14686,7 +14660,7 @@ async function runShipmentEmailCheck() {
   console.log(`[출고일 체크] ${today} 실행`);
 
   // 오늘 출고 예정 + 아직 이메일 안 보낸 건
-  const schedules = db.prepare(
+  const schedules = await db.prepare(
     "SELECT * FROM vendor_shipment_schedule WHERE ship_date=? AND auto_email_sent=0 AND status='scheduled'"
   ).all(today);
 
@@ -14702,21 +14676,21 @@ async function runShipmentEmailCheck() {
     }
 
     // PO 정보 조회
-    const po = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(sch.po_id);
-    const items = db.prepare('SELECT * FROM po_items WHERE po_id=?').all(sch.po_id);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(sch.po_id);
+    const items = await db.prepare('SELECT * FROM po_items WHERE po_id=?').all(sch.po_id);
     if (!po) continue;
 
     // 이메일 발송 (후공정 업체에게)
     try {
-      const postVendorForCc = db.prepare('SELECT email_cc FROM vendors WHERE name=?').get(sch.post_vendor_name);
+      const postVendorForCc = await db.prepare('SELECT email_cc FROM vendors WHERE name=?').get(sch.post_vendor_name);
       const emailResult = await sendPOEmail(po, items, sch.post_vendor_email, sch.post_vendor_name, true, postVendorForCc ? postVendorForCc.email_cc : '');
       console.log(`[출고일 체크] 후공정 이메일 발송: ${sch.po_number} → ${sch.post_vendor_name} (${sch.post_vendor_email})`, emailResult);
 
       // auto_email_sent = 1 업데이트
-      db.prepare("UPDATE vendor_shipment_schedule SET auto_email_sent=1, updated_at=datetime('now','localtime') WHERE id=?").run(sch.id);
+      await db.prepare("UPDATE vendor_shipment_schedule SET auto_email_sent=1, updated_at=datetime('now','localtime') WHERE id=?").run(sch.id);
 
       // 후공정 상태 업데이트: process_status → 'sent'
-      db.prepare("UPDATE po_header SET process_status='sent' WHERE po_id=? AND process_status='waiting'").run(sch.po_id);
+      await db.prepare("UPDATE po_header SET process_status='sent' WHERE po_id=? AND process_status='waiting'").run(sch.po_id);
 
       // 활동 로그
       logPOActivity(sch.po_id, 'post_vendor_notified', {
@@ -14752,7 +14726,7 @@ async function runDeadlineAlertCheck() {
   console.log(`[납기알림] 임박 ${upcomingPOs.length}건 발견`);
 
   for (const po of upcomingPOs) {
-    const vendor = db.prepare('SELECT email, name FROM vendors WHERE name = ?').get(po.vendor_name);
+    const vendor = await db.prepare('SELECT email, name FROM vendors WHERE name = ?').get(po.vendor_name);
     if (!vendor || !vendor.email) {
       console.log(`[납기알림] ${po.po_number}: 거래처 이메일 없음 (${po.vendor_name})`);
       continue;
@@ -14835,3 +14809,7 @@ async function refreshXerpCache() {
     req.on('error', e => console.warn('[XERP 동기화] 실패:', e.message));
   } catch(e) { console.warn('[XERP 동기화] 오류:', e.message); }
 }
+
+} // end startServer()
+
+startServer().catch(e => { console.error('❌ 서버 시작 실패:', e); process.exit(1); });
