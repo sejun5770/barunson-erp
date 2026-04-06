@@ -1427,6 +1427,19 @@ await db.exec(`CREATE TABLE IF NOT EXISTS china_price_tiers (
 )`);
 await db.exec("CREATE INDEX IF NOT EXISTS idx_cpt_product ON china_price_tiers(product_code)");
 
+// ── 중국 재고 DB (매주 엑셀 업로드) ──────────────────────────────
+await db.exec(`CREATE TABLE IF NOT EXISTS china_inventory (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_code TEXT NOT NULL,
+  product_name TEXT DEFAULT '',
+  cn_stock INTEGER DEFAULT 0,
+  incoming_qty INTEGER DEFAULT 0,
+  incoming_date TEXT DEFAULT '',
+  upload_date TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(product_code)
+)`);
+await db.exec("CREATE INDEX IF NOT EXISTS idx_china_inv_code ON china_inventory(product_code)");
+
 // ── 인증/권한 테이블 (S1) ─────────────────────────────────────────
 await db.exec(`CREATE TABLE IF NOT EXISTS users (
   user_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8078,6 +8091,37 @@ async function handleRequest(req, res) {
       ok(res, { imported: totalRows, products: totalProducts });
     } catch (e) {
       fail(res, 500, '단가 업로드 오류: ' + e.message);
+    }
+    return;
+  }
+
+  // ── 중국 재고 DB API ──
+  if (pathname === '/api/china-inventory/upload' && method === 'POST') {
+    try {
+      const b = await readJSON(req);
+      const items = b.items || [];
+      if (!items.length) { fail(res, 400, 'items 배열 필요'); return; }
+      const txn = db.transaction(async () => {
+        await db.exec('DELETE FROM china_inventory');
+        const ins = db.prepare('INSERT INTO china_inventory (product_code, product_name, cn_stock, incoming_qty, incoming_date) VALUES (?,?,?,?,?)');
+        for (const r of items) {
+          await ins.run(r.product_code, r.product_name || '', r.cn_stock || 0, r.incoming_qty || 0, r.incoming_date || '');
+        }
+      });
+      await txn();
+      ok(res, { uploaded: items.length });
+    } catch (e) {
+      fail(res, 500, '중국 재고 업로드 오류: ' + e.message);
+    }
+    return;
+  }
+
+  if (pathname === '/api/china-inventory' && method === 'GET') {
+    try {
+      const rows = await db.prepare('SELECT * FROM china_inventory ORDER BY product_code').all();
+      ok(res, rows);
+    } catch (e) {
+      fail(res, 500, e.message);
     }
     return;
   }

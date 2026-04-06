@@ -2216,6 +2216,9 @@ function closeMegaMenu() { /* no-op */ }
       </div>
     </div>
 
+    <!-- 중국 쇼트 위험 영역 -->
+    <div id="chinaShortageArea" style="display:none;background:#fff5f5;border:1px solid #ffcdd2;border-radius:8px;padding:10px 14px;margin-bottom:8px"></div>
+
     <!-- 메인 3탭 -->
     <div class="tab-bar" id="invMainTabs" style="margin-bottom:6px;border-bottom:2px solid var(--border)">
       <div class="tab active" data-mtab="stock" onclick="switchInvMainTab('stock')" style="font-weight:600;font-size:13px;padding:8px 20px">재고현황</div>
@@ -4494,50 +4497,107 @@ function closeMegaMenu() { /* no-op */ }
 <div class="page" id="page-settings">
   <div class="settings-box">
     <h3>발주 가이드 설정</h3>
-    <div class="guide-section">출고 기준</div>
-    <div class="guide-row">
-      <label>출고 기준기간</label>
-      <select id="g-period" onchange="applyGuide()">
-        <option value="1">1개월</option>
-        <option value="3" selected>3개월</option>
-        <option value="6">6개월</option>
-        <option value="12">12개월</option>
-      </select>
-      <span class="desc">출고수량 합산 기간 (월사용량 = 기간출고 / 기간)</span>
+    <div style="display:flex;gap:8px;margin-bottom:16px">
+      <div class="tab-btn active" data-guide-tab="kr" onclick="switchGuideTab('kr')" style="font-size:13px;padding:6px 16px">🇰🇷 한국</div>
+      <div class="tab-btn" data-guide-tab="cn" onclick="switchGuideTab('cn')" style="font-size:13px;padding:6px 16px">🇨🇳 중국</div>
     </div>
 
-    <div class="guide-section">발주 수량</div>
-    <div class="guide-row">
-      <label>발주 기간</label>
-      <input type="number" id="g-orderMonths" value="1" min="1" max="6" onchange="applyGuide()">
-      <span class="unit">개월분</span>
-      <span class="desc">월사용량 x N개월 분량 발주</span>
-    </div>
-    <div class="guide-row">
-      <label>올림 단위</label>
-      <input type="number" id="g-roundUnit" value="1000" min="1" step="100" onchange="applyGuide()">
-      <span class="unit">단위</span>
-      <span class="desc">발주수량 올림 (예: 50단위)</span>
+    <!-- 한국 설정 -->
+    <div id="guideTab-kr">
+      <div class="guide-section">🇰🇷 한국 출고 기준</div>
+      <div class="guide-row">
+        <label>출고 기준기간</label>
+        <select id="g-period-kr" onchange="applyGuide()">
+          <option value="1">1개월</option>
+          <option value="3" selected>3개월</option>
+          <option value="6">6개월</option>
+          <option value="12">12개월</option>
+        </select>
+        <span class="desc">출고수량 합산 기간 (월사용량 = 기간출고 / 기간)</span>
+      </div>
+      <div class="guide-section">발주 수량</div>
+      <div class="guide-row">
+        <label>발주 기간</label>
+        <input type="number" id="g-orderMonths-kr" value="1" min="1" max="6" onchange="applyGuide()">
+        <span class="unit">개월분</span>
+        <span class="desc">월사용량 x N개월 분량 발주</span>
+      </div>
+      <div class="guide-row">
+        <label>올림 단위</label>
+        <input type="number" id="g-roundUnit-kr" value="10000" min="1" step="100" onchange="applyGuide()">
+        <span class="unit">단위</span>
+        <span class="desc">발주수량 올림</span>
+      </div>
+      <div class="guide-section">재고 분류 기준</div>
+      <div class="guide-row">
+        <label>위험 기준</label>
+        <input type="number" id="g-dangerRatio-kr" value="1" min="0.5" max="6" step="0.5" onchange="applyGuide()">
+        <span class="unit">x 월사용량</span>
+        <span class="desc">가용재고 ≤ (N x 월사용량)이면 위험</span>
+      </div>
+      <div class="guide-row">
+        <label>안전재고</label>
+        <input type="number" id="g-safetyMonths-kr" value="1" min="0.5" max="6" step="0.5" onchange="applyGuide()">
+        <span class="unit">개월분</span>
+        <span class="desc">안전재고 = 월사용량 x N</span>
+      </div>
+      <div class="guide-row">
+        <label>리드타임</label>
+        <input type="number" id="g-leadTimeMat-kr" value="5" min="1" max="90" onchange="applyGuide()">
+        <span class="unit">일</span>
+        <span class="desc">자재 조달 소요일</span>
+      </div>
     </div>
 
-    <div class="guide-section">재고 분류 기준</div>
-    <div class="guide-row">
-      <label>긴급</label>
-      <span class="desc" style="margin-left:0">가용재고 &lt; 0 (마이너스)</span>
-    </div>
-    <div class="guide-row">
-      <label>위험 기준</label>
-      <input type="number" id="g-dangerRatio" value="1" min="0.5" max="6" step="0.5" onchange="applyGuide()">
-      <span class="unit">x 월사용량</span>
-      <span class="desc">가용재고 &le; (N x 월사용량)</span>
-    </div>
-    <div class="guide-row">
-      <label>안전</label>
-      <span class="desc" style="margin-left:0">가용재고 &gt; 위험 기준 초과</span>
-    </div>
-    <div class="guide-row">
-      <label>출고없음</label>
-      <span class="desc" style="margin-left:0">기준기간 출고수량 = 0</span>
+    <!-- 중국 설정 -->
+    <div id="guideTab-cn" style="display:none">
+      <div class="guide-section">🇨🇳 중국 출고 기준</div>
+      <div style="background:#fff3e0;border:1px solid #ffcc80;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#e65100">
+        <b>💡 중국 발주 운영 기준:</b> 3개월 출고수량 기준 → 2개월 재고 운영 → 6개월치 발주<br>
+        리드타임 50일 (제조+선적+통관), 부족 품목 자동 알림
+      </div>
+      <div class="guide-row">
+        <label>출고 기준기간</label>
+        <select id="g-period-cn" onchange="applyGuide()">
+          <option value="1">1개월</option>
+          <option value="3" selected>3개월</option>
+          <option value="6">6개월</option>
+          <option value="12">12개월</option>
+        </select>
+        <span class="desc">출고수량 합산 기간</span>
+      </div>
+      <div class="guide-section">발주 수량</div>
+      <div class="guide-row">
+        <label>발주 기간</label>
+        <input type="number" id="g-orderMonths-cn" value="6" min="1" max="12" onchange="applyGuide()">
+        <span class="unit">개월분</span>
+        <span class="desc">중국: 6개월분 일괄 발주 (선적 리드타임 고려)</span>
+      </div>
+      <div class="guide-row">
+        <label>올림 단위</label>
+        <input type="number" id="g-roundUnit-cn" value="10000" min="1" step="100" onchange="applyGuide()">
+        <span class="unit">단위</span>
+        <span class="desc">발주수량 올림</span>
+      </div>
+      <div class="guide-section">재고 분류 기준</div>
+      <div class="guide-row">
+        <label>위험 기준</label>
+        <input type="number" id="g-dangerRatio-cn" value="2" min="0.5" max="6" step="0.5" onchange="applyGuide()">
+        <span class="unit">x 월사용량</span>
+        <span class="desc">중국: 2개월 재고 운영 (가용재고 ≤ 2x월사용량 = 위험)</span>
+      </div>
+      <div class="guide-row">
+        <label>안전재고</label>
+        <input type="number" id="g-safetyMonths-cn" value="2" min="0.5" max="6" step="0.5" onchange="applyGuide()">
+        <span class="unit">개월분</span>
+        <span class="desc">중국: 2개월 안전재고 (선적 지연 대비)</span>
+      </div>
+      <div class="guide-row">
+        <label>리드타임</label>
+        <input type="number" id="g-leadTimeMat-cn" value="50" min="1" max="120" onchange="applyGuide()">
+        <span class="unit">일</span>
+        <span class="desc">중국 제조+선적+통관 소요일</span>
+      </div>
     </div>
 
     <button class="guide-apply" onclick="applyGuide()">적용하기</button>
@@ -4554,6 +4614,23 @@ function closeMegaMenu() { /* no-op */ }
     </div>
     <div id="chinaPricePreview" style="max-height:300px;overflow-y:auto;font-size:12px"></div>
     <button class="btn btn-primary btn-sm" id="chinaPriceUploadBtn" onclick="uploadChinaPriceTiers()" style="display:none;margin-top:8px">업로드</button>
+  </div>
+
+  <!-- 중국 재고 DB 엑셀 업로드 -->
+  <div class="settings-box" style="margin-top:16px">
+    <h3>🇨🇳 중국 재고 DB 업로드</h3>
+    <div style="background:#e3f2fd;border:1px solid #90caf9;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#1565c0">
+      <b>매주 받는 중국 재고 엑셀을 업로드하세요.</b><br>
+      엑셀 형식: A=품목코드, B=품명, C=현재고, D=입고예정수량, E=입고예정일<br>
+      업로드 후 자동으로 30일 이내 소진 예정 품목 알림을 표시합니다.
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <input type="file" id="chinaInvFile" accept=".xls,.xlsx" style="font-size:12px">
+      <button class="btn btn-sm" onclick="parseChinaInvExcel()" style="white-space:nowrap">파싱</button>
+    </div>
+    <div id="chinaInvPreview" style="max-height:300px;overflow-y:auto;font-size:12px"></div>
+    <button class="btn btn-primary btn-sm" id="chinaInvUploadBtn" onclick="uploadChinaInventory()" style="display:none;margin-top:8px">업로드 및 알림 체크</button>
+    <div id="chinaInvResult" style="margin-top:8px;font-size:12px"></div>
   </div>
 
   <div class="weight-box">
@@ -6418,10 +6495,16 @@ let invoicesList=[];
 let poStatusFilter='all';
 let currentOriginContext = null; // 한국/중국/더기프트 origin 필터 컨텍스트
 
-// 발주 가이드 설정값
-let GUIDE={period:3, orderMonths:1, roundUnit:10000, dangerRatio:1, minOrderQty:10000, leadTimeMat:5, leadTimePost:7, safetyMonths:1};
-const savedGuide=localStorage.getItem('orderGuide');
-if(savedGuide)try{Object.assign(GUIDE,JSON.parse(savedGuide));}catch(e){}
+// 발주 가이드 설정값 (한국/중국 분리)
+let GUIDE_KR={period:3, orderMonths:1, roundUnit:10000, dangerRatio:1, minOrderQty:10000, leadTimeMat:5, leadTimePost:7, safetyMonths:1};
+let GUIDE_CN={period:3, orderMonths:6, roundUnit:10000, dangerRatio:2, minOrderQty:10000, leadTimeMat:50, leadTimePost:7, safetyMonths:2};
+const savedGuideKR=localStorage.getItem('orderGuide_KR')||localStorage.getItem('orderGuide');
+const savedGuideCN=localStorage.getItem('orderGuide_CN');
+if(savedGuideKR)try{Object.assign(GUIDE_KR,JSON.parse(savedGuideKR));}catch(e){}
+if(savedGuideCN)try{Object.assign(GUIDE_CN,JSON.parse(savedGuideCN));}catch(e){}
+// 하위호환: 기존 GUIDE 참조용
+let GUIDE=GUIDE_KR;
+function getGuide(origin){ return origin==='중국'?GUIDE_CN:GUIDE_KR; }
 
 // XERP 출고 실적 데이터
 let xerpUsage = {}; // {item_code: {total, monthly, daily}}
@@ -6554,27 +6637,29 @@ function shortageToR(shortage, code){
 function classifyItem(p){
   const code = p['제품코드'] || '';
   const av = typeof p['가용재고']==='number' ? p['가용재고'] : 0;
+  const origin = p._origin || originMap[code] || '한국';
+  const G = getGuide(origin);
 
   // XERP 출고 실적: 1) products에 직접 포함 2) xerpUsage 맵 3) 엑셀 fallback
   const xu = xerpUsage[code];
   const monthly = p._xerpMonthly || (xu ? xu.monthly : (() => {
-    const periodKey = GUIDE.period + '개월매출';
+    const periodKey = G.period + '개월매출';
     const sales = typeof p[periodKey]==='number' ? p[periodKey] : 0;
-    return sales > 0 ? Math.round(sales / GUIDE.period) : 0;
+    return sales > 0 ? Math.round(sales / G.period) : 0;
   })());
 
   // 리드타임재고 = 월평균 × (리드타임일수 ÷ 30)
-  const leadDays = GUIDE.leadTimeMat || 5;
+  const leadDays = G.leadTimeMat || 5;
   const leadStock = Math.round(monthly * (leadDays / 30));
 
   // 안전재고 = 월평균 × 안전개월수
-  const safetyStock = Math.round(monthly * (GUIDE.safetyMonths || 1));
+  const safetyStock = Math.round(monthly * (G.safetyMonths || 1));
 
   // 발주점 = 안전재고 + 리드타임재고
   const reorderPoint = safetyStock + leadStock;
 
   // 목표재고 = 안전재고 + 리드타임재고 + (월평균 × 발주기간)
-  const targetStock = safetyStock + leadStock + Math.round(monthly * (GUIDE.orderMonths || 1));
+  const targetStock = safetyStock + leadStock + Math.round(monthly * (G.orderMonths || 1));
 
   // 일평균 출고
   const dailyUsage = xu ? xu.daily : Math.round(monthly / 30);
@@ -6714,6 +6799,9 @@ async function processData(products){
   sortK='가용재고';sortD='asc';
   buildHeader();
   render();
+
+  // 중국 부족 품목 알림 체크 (페이지 로드 시)
+  setTimeout(checkChinaShortageAlert, 1500);
 }
 
 function updatePendingCount(){
@@ -7144,6 +7232,8 @@ async function saveProductNote(code){
 // ===== AUTO FILL ORDER (PRESERVED EXACTLY) =====
 function autoFillOrder(){
   const data=classified[currentTab]||[];
+  // origin별 설정 (현재 origin 필터 기준, 또는 각 품목별)
+  const getU = (p) => { const G=getGuide(p._origin||'한국'); return G.roundUnit||10000; };
   const u=GUIDE.roundUnit||10000;
   const minQty=GUIDE.minOrderQty||10000;
   data.forEach(p=>{
@@ -10004,12 +10094,22 @@ async function runAutoOrder(){
 // ===== MODAL =====
 function closeModal(id){document.getElementById(id).classList.remove('show');}
 
-// ===== GUIDE / SETTINGS (PRESERVED EXACTLY) =====
+// ===== GUIDE / SETTINGS =====
 function loadGuideUI(){
-  document.getElementById('g-period').value=GUIDE.period;
-  document.getElementById('g-orderMonths').value=GUIDE.orderMonths;
-  document.getElementById('g-roundUnit').value=GUIDE.roundUnit;
-  document.getElementById('g-dangerRatio').value=GUIDE.dangerRatio;
+  // 한국 설정 로드
+  const pkr = document.getElementById('g-period-kr'); if(pkr) pkr.value=GUIDE_KR.period;
+  const okr = document.getElementById('g-orderMonths-kr'); if(okr) okr.value=GUIDE_KR.orderMonths;
+  const rkr = document.getElementById('g-roundUnit-kr'); if(rkr) rkr.value=GUIDE_KR.roundUnit;
+  const dkr = document.getElementById('g-dangerRatio-kr'); if(dkr) dkr.value=GUIDE_KR.dangerRatio;
+  const skr = document.getElementById('g-safetyMonths-kr'); if(skr) skr.value=GUIDE_KR.safetyMonths;
+  const lkr = document.getElementById('g-leadTimeMat-kr'); if(lkr) lkr.value=GUIDE_KR.leadTimeMat;
+  // 중국 설정 로드
+  const pcn = document.getElementById('g-period-cn'); if(pcn) pcn.value=GUIDE_CN.period;
+  const ocn = document.getElementById('g-orderMonths-cn'); if(ocn) ocn.value=GUIDE_CN.orderMonths;
+  const rcn = document.getElementById('g-roundUnit-cn'); if(rcn) rcn.value=GUIDE_CN.roundUnit;
+  const dcn = document.getElementById('g-dangerRatio-cn'); if(dcn) dcn.value=GUIDE_CN.dangerRatio;
+  const scn = document.getElementById('g-safetyMonths-cn'); if(scn) scn.value=GUIDE_CN.safetyMonths;
+  const lcn = document.getElementById('g-leadTimeMat-cn'); if(lcn) lcn.value=GUIDE_CN.leadTimeMat;
   updateGuideInfo();
 }
 
@@ -10142,14 +10242,117 @@ async function uploadChinaPriceTiers() {
   }
 }
 
-function applyGuide(){
-  GUIDE.period=parseInt(document.getElementById('g-period').value)||3;
-  GUIDE.orderMonths=parseFloat(document.getElementById('g-orderMonths').value)||1;
-  GUIDE.roundUnit=parseInt(document.getElementById('g-roundUnit').value)||50;
-  GUIDE.dangerRatio=parseFloat(document.getElementById('g-dangerRatio').value)||1;
-  localStorage.setItem('orderGuide',JSON.stringify(GUIDE));
+// ===== 중국 재고 DB 엑셀 업로드 =====
+let chinaInvParsed = null;
+let chinaInvData = {}; // {product_code: {stock, incoming_qty, incoming_date}}
 
-  document.getElementById('guideDesc').textContent=`발주기준: ${GUIDE.period}개월 출고수량 / ${GUIDE.period} = 월사용량`;
+function parseChinaInvExcel() {
+  const fileInput = document.getElementById('chinaInvFile');
+  if (!fileInput.files.length) { alert('파일을 선택하세요'); return; }
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const wb = XLSX.read(e.target.result, {type:'array'});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+      if (rows.length < 2) { alert('데이터가 없습니다'); return; }
+
+      // 헤더 자동 감지 (첫 행이 헤더인지 데이터인지)
+      const header = rows[0];
+      let startRow = 0;
+      if (typeof header[0] === 'string' && (header[0].includes('코드') || header[0].includes('code') || header[0].includes('품목'))) {
+        startRow = 1;
+      }
+
+      chinaInvParsed = [];
+      for (let i = startRow; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r[0]) continue;
+        const code = String(r[0]).trim();
+        const name = String(r[1] || '').trim();
+        const stock = parseInt(r[2]) || 0;
+        const inQty = parseInt(r[3]) || 0;
+        const inDate = r[4] ? String(r[4]).trim() : '';
+        chinaInvParsed.push({ product_code: code, product_name: name, cn_stock: stock, incoming_qty: inQty, incoming_date: inDate });
+      }
+
+      // 미리보기
+      let html = `<div style="margin-bottom:8px;font-weight:600">${chinaInvParsed.length}개 품목 파싱 완료</div>`;
+      html += '<table class="tbl" style="width:100%"><thead><tr><th>품목코드</th><th>품명</th><th>중국재고</th><th>입고예정</th><th>입고예정일</th></tr></thead><tbody>';
+      chinaInvParsed.slice(0, 20).forEach(r => {
+        html += `<tr><td>${esc(r.product_code)}</td><td>${esc(r.product_name)}</td><td style="text-align:right">${r.cn_stock.toLocaleString()}</td><td style="text-align:right">${r.incoming_qty.toLocaleString()}</td><td>${esc(r.incoming_date)}</td></tr>`;
+      });
+      if (chinaInvParsed.length > 20) html += `<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">... 외 ${chinaInvParsed.length - 20}건</td></tr>`;
+      html += '</tbody></table>';
+      document.getElementById('chinaInvPreview').innerHTML = html;
+      document.getElementById('chinaInvUploadBtn').style.display = '';
+    } catch(e) { alert('엑셀 파싱 오류: ' + e.message); }
+  };
+  reader.readAsArrayBuffer(fileInput.files[0]);
+}
+
+async function uploadChinaInventory() {
+  if (!chinaInvParsed || !chinaInvParsed.length) { alert('먼저 엑셀을 파싱하세요'); return; }
+  try {
+    const resp = await fetch('/api/china-inventory/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: chinaInvParsed })
+    });
+    const result = await resp.json();
+
+    // 로컬 데이터 업데이트
+    chinaInvData = {};
+    chinaInvParsed.forEach(r => { chinaInvData[r.product_code] = r; });
+    localStorage.setItem('chinaInvData', JSON.stringify(chinaInvData));
+    localStorage.setItem('chinaInvDate', new Date().toISOString());
+
+    document.getElementById('chinaInvResult').innerHTML = `<span style="color:#22c55e">✅ ${chinaInvParsed.length}개 품목 업로드 완료 (${new Date().toLocaleString('ko-KR')})</span>`;
+    document.getElementById('chinaInvUploadBtn').style.display = 'none';
+
+    // 즉시 부족 품목 알림 체크
+    checkChinaShortageAlert();
+    alert(`${chinaInvParsed.length}개 중국 재고 업로드 완료!\n부족 품목 알림을 확인하세요.`);
+    chinaInvParsed = null;
+  } catch(e) {
+    alert('업로드 오류: ' + e.message);
+  }
+}
+
+// 중국 재고 데이터 로컬 복원
+try {
+  const saved = localStorage.getItem('chinaInvData');
+  if (saved) chinaInvData = JSON.parse(saved);
+} catch(e) {}
+
+function switchGuideTab(tab){
+  document.querySelectorAll('[data-guide-tab]').forEach(t=>t.classList.toggle('active',t.dataset.guideTab===tab));
+  document.getElementById('guideTab-kr').style.display=tab==='kr'?'':'none';
+  document.getElementById('guideTab-cn').style.display=tab==='cn'?'':'none';
+}
+function applyGuide(){
+  // 한국 설정 읽기
+  GUIDE_KR.period=parseInt(document.getElementById('g-period-kr')?.value)||3;
+  GUIDE_KR.orderMonths=parseFloat(document.getElementById('g-orderMonths-kr')?.value)||1;
+  GUIDE_KR.roundUnit=parseInt(document.getElementById('g-roundUnit-kr')?.value)||10000;
+  GUIDE_KR.dangerRatio=parseFloat(document.getElementById('g-dangerRatio-kr')?.value)||1;
+  GUIDE_KR.safetyMonths=parseFloat(document.getElementById('g-safetyMonths-kr')?.value)||1;
+  GUIDE_KR.leadTimeMat=parseInt(document.getElementById('g-leadTimeMat-kr')?.value)||5;
+  localStorage.setItem('orderGuide_KR',JSON.stringify(GUIDE_KR));
+
+  // 중국 설정 읽기
+  GUIDE_CN.period=parseInt(document.getElementById('g-period-cn')?.value)||3;
+  GUIDE_CN.orderMonths=parseFloat(document.getElementById('g-orderMonths-cn')?.value)||6;
+  GUIDE_CN.roundUnit=parseInt(document.getElementById('g-roundUnit-cn')?.value)||10000;
+  GUIDE_CN.dangerRatio=parseFloat(document.getElementById('g-dangerRatio-cn')?.value)||2;
+  GUIDE_CN.safetyMonths=parseFloat(document.getElementById('g-safetyMonths-cn')?.value)||2;
+  GUIDE_CN.leadTimeMat=parseInt(document.getElementById('g-leadTimeMat-cn')?.value)||50;
+  localStorage.setItem('orderGuide_CN',JSON.stringify(GUIDE_CN));
+
+  GUIDE=GUIDE_KR; // 하위호환
+
+  const gd = document.getElementById('guideDesc');
+  if(gd) gd.textContent=`한국: ${GUIDE_KR.period}개월/${GUIDE_KR.orderMonths}개월발주 | 중국: ${GUIDE_CN.period}개월/${GUIDE_CN.orderMonths}개월발주`;
 
   if(RAW.length){
     RAW.forEach(classifyItem);
@@ -10179,22 +10382,65 @@ function applyGuide(){
     const qmDef = document.getElementById('qmDefects'); if(qmDef) qmDef.textContent = classified.urgent.length + '긴급';
     // orderQty 보존 (발주 진행 중 페이지 이동 시 데이터 유지)
     render();
+    // 중국 부족 품목 알림 체크
+    checkChinaShortageAlert();
   }
   updateGuideInfo();
 }
 
 function updateGuideInfo(){
   const el=document.getElementById('guideInfo');
+  if(!el) return;
   el.innerHTML=`
-    <b>현재 적용 기준:</b><br>
-    - 월사용량 = ${GUIDE.period}개월 출고수량 합계 / ${GUIDE.period}<br>
-    - 긴급: 가용재고 &lt; 0 → 부족수량 = |가용재고| + (월사용량 x ${GUIDE.orderMonths})<br>
-    - 위험: 가용재고 &le; 월사용량 x ${GUIDE.dangerRatio} → 부족수량 = (기준-가용) + (월사용량 x ${GUIDE.orderMonths})<br>
-    - 안전: 가용재고 &gt; 월사용량 x ${GUIDE.dangerRatio}<br>
-    - 출고없음: ${GUIDE.period}개월 출고수량 = 0<br>
-    - 자동입력 발주량: 월사용량 x ${GUIDE.orderMonths}개월 → ${GUIDE.roundUnit}단위 올림<br>
-    - D 브랜드 제외, 생산지 한국, 정상판매
+    <b>🇰🇷 한국 기준:</b><br>
+    - 월사용량 = ${GUIDE_KR.period}개월 출고 / ${GUIDE_KR.period} | 발주: ${GUIDE_KR.orderMonths}개월분<br>
+    - 위험: 가용재고 ≤ ${GUIDE_KR.dangerRatio}x월사용량 | 안전재고: ${GUIDE_KR.safetyMonths}개월 | 리드타임: ${GUIDE_KR.leadTimeMat}일<br>
+    <b style="margin-top:4px;display:inline-block">🇨🇳 중국 기준:</b><br>
+    - 월사용량 = ${GUIDE_CN.period}개월 출고 / ${GUIDE_CN.period} | 발주: ${GUIDE_CN.orderMonths}개월분<br>
+    - 위험: 가용재고 ≤ ${GUIDE_CN.dangerRatio}x월사용량 | 안전재고: ${GUIDE_CN.safetyMonths}개월 | 리드타임: ${GUIDE_CN.leadTimeMat}일
   `;
+}
+
+// ===== 중국 부족 품목 (재고현황 내 표시) =====
+let _chinaShortageItems = [];
+function checkChinaShortageAlert(){
+  _chinaShortageItems = RAW.filter(p => {
+    if(p._origin !== '중국') return false;
+    if(!p._monthly || p._monthly <= 0) return false;
+    return p._remainDays !== null && p._remainDays <= 30;
+  }).sort((a,b) => (a._remainDays||0) - (b._remainDays||0));
+  // 재고현황 페이지 내 배너 업데이트
+  renderChinaShortageBanner();
+}
+
+function renderChinaShortageBanner(){
+  const container = document.getElementById('chinaShortageArea');
+  if(!container) return;
+  if(!_chinaShortageItems.length){ container.style.display='none'; return; }
+  container.style.display='';
+  let html = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer" onclick="document.getElementById('chinaShortageTable').style.display=document.getElementById('chinaShortageTable').style.display==='none'?'':'none'">
+    <span style="font-size:16px">🚨</span>
+    <b style="color:#d32f2f">중국 쇼트 위험 ${_chinaShortageItems.length}건</b>
+    <span style="font-size:11px;color:var(--text-muted)">(30일 이내 소진 예정 — 클릭하여 펼치기/접기)</span>
+  </div>`;
+  html += `<div id="chinaShortageTable" style="display:none"><table class="tbl" style="width:100%;font-size:12px"><thead><tr>`;
+  html += '<th>제품코드</th><th>제품명</th><th>가용재고</th><th>월사용량</th><th>잔여일</th><th>소진예정</th><th>부족수량</th></tr></thead><tbody>';
+  _chinaShortageItems.forEach(p => {
+    const code = p['제품코드']||'';
+    const name = (productInfo[code]||{})['품명'] || p['제품명'] || '';
+    const av = typeof p['가용재고']==='number' ? p['가용재고'] : 0;
+    const rowColor = (p._remainDays||0) <= 7 ? '#ffebee' : (p._remainDays||0) <= 14 ? '#fff3e0' : '#fffde7';
+    html += `<tr style="background:${rowColor}">`;
+    html += `<td>${esc(code)}</td><td>${esc(name)}</td>`;
+    html += `<td style="text-align:right">${av.toLocaleString()}</td>`;
+    html += `<td style="text-align:right">${(p._monthly||0).toLocaleString()}</td>`;
+    html += `<td style="text-align:right;font-weight:bold;color:${(p._remainDays||0)<=7?'#d32f2f':'#e65100'}">${p._remainDays||0}일</td>`;
+    html += `<td>${p._depletionDate||'-'}</td>`;
+    html += `<td style="text-align:right;color:#d32f2f">${(p._shortage||0).toLocaleString()}</td>`;
+    html += `</tr>`;
+  });
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
 }
 
 // ===== WEIGHT TABLE (PRESERVED EXACTLY) =====
@@ -11778,8 +12024,9 @@ function searchProductForPO(query){
 function addProductToPO(code){
   const p=RAW.find(r=>(r['제품코드']||r['품목코드'])===code) || RAW.find(r=>(r['제품코드']||r['품목코드']||'').toLowerCase()===code.toLowerCase());
   if(!p)return;
+  const G=getGuide(p._origin||'한국');
   const defQty=p._targetStock&&p['가용재고']!=null?Math.max(p._targetStock-p['가용재고'],10000):10000;
-  const qty=Math.ceil(defQty/GUIDE.roundUnit)*GUIDE.roundUnit;
+  const qty=Math.ceil(defQty/G.roundUnit)*G.roundUnit;
   orderQty[code]=qty;
   orderChecked[code]=true;
   document.getElementById('poSearchResults').style.display='none';
@@ -14317,7 +14564,7 @@ function initLegacyListeners() {
   if(si) si.addEventListener('input',render);
   if(bf) bf.addEventListener('change',render);
   if(di) di.textContent=new Date().toLocaleDateString('ko-KR');
-  if(gd) gd.textContent=`발주기준: ${GUIDE.period}개월 매출 / ${GUIDE.period} = 월사용량`;
+  if(gd) gd.textContent=`한국: ${GUIDE_KR.period}개월/${GUIDE_KR.orderMonths}개월발주 | 중국: ${GUIDE_CN.period}개월/${GUIDE_CN.orderMonths}개월발주`;
 }
 document.addEventListener('DOMContentLoaded', initLegacyListeners);
 
