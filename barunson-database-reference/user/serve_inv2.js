@@ -2847,7 +2847,7 @@ async function handleRequest(req, res) {
   }
 
   // GET /api/health — 시스템 헬스체크 (최상위 배치 — Docker 배포 안정성)
-  if (pathname === '/api/health' && method === 'GET') {
+  if ((pathname === '/api/health' || pathname === '/health') && method === 'GET') {
     const health = { status: 'ok', timestamp: new Date().toISOString(), checks: {} };
     try { db.prepare('SELECT 1').get(); health.checks.sqlite = 'ok'; }
     catch (e) { health.checks.sqlite = 'error: ' + e.message; health.status = 'degraded'; }
