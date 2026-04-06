@@ -182,19 +182,19 @@ async function exec(sql) {
 function transaction(fn) {
   return async (...args) => {
     const client = await pool.connect();
+    const prevPool = pool;
     try {
       await client.query('BEGIN');
       // transaction 내에서는 pool 대신 client 사용
-      const prevPool = pool;
       pool = { query: (...a) => client.query(...a) };
       const result = await fn(...args);
-      pool = prevPool;
       await client.query('COMMIT');
       return result;
     } catch (e) {
-      await client.query('ROLLBACK');
+      try { await client.query('ROLLBACK'); } catch(re) {}
       throw e;
     } finally {
+      pool = prevPool; // 반드시 복원 (에러 여부 무관)
       client.release();
     }
   };
