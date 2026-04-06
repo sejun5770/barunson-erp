@@ -16426,14 +16426,22 @@ let vendorPortalName='';
 
 function initVendorPortal(){
   const params=new URLSearchParams(window.location.search);
-  const email=params.get('vendor_email');
-  const token=params.get('token');
-  if(!email||!token) return false;
+  // 신규: access 토큰 방식 (이메일/이름 미노출)
+  const access=params.get('access');
+  // 레거시: email+token 방식 (하위 호환)
+  const email=access ? null : params.get('vendor_email');
+  const token=access || params.get('token');
+  if(!token || (!access && !email)) return false;
 
   vendorPortalMode=true;
-  vendorPortalEmail=email;
   vendorPortalToken=token;
-  vendorPortalName=params.get('vendor_name')||'';
+  // access 토큰에서 email/name 추출 (JWT payload는 base64)
+  if(access){
+    try{const p=JSON.parse(atob(access.split('.')[1]));vendorPortalEmail=p.email||'';vendorPortalName=p.name||'';}catch(_){return false;}
+  }else{
+    vendorPortalEmail=email;
+    vendorPortalName=params.get('vendor_name')||'';
+  }
 
   // 사이드바 숨김, 메인 풀스크린
   document.querySelector('.sidebar').style.display='none';
@@ -16464,7 +16472,7 @@ function initVendorPortal(){
 
 async function loadVendorPortal(){
   try {
-    const resp = await fetch(`/api/vendor-portal?email=${encodeURIComponent(vendorPortalEmail)}&token=${vendorPortalToken}&vendor_name=${encodeURIComponent(vendorPortalName)}`).then(r=>r.json());
+    const resp = await fetch(`/api/vendor-portal?access=${encodeURIComponent(vendorPortalToken)}`).then(r=>r.json());
     const portalPage=document.getElementById('page-vendor-portal');
     if(!resp.ok){
       portalPage.innerHTML=`<div class="card-box" style="padding:40px;text-align:center">
@@ -16686,7 +16694,7 @@ async function loadVendorPortal(){
         const val=this.value;
         try {
           await fetch('/api/vendor-portal/item-ship-date',{method:'POST',headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({po_id:poId,item_id:itemId,ship_date:val,email:vendorPortalEmail,token:vendorPortalToken})});
+            body:JSON.stringify({po_id:poId,item_id:itemId,ship_date:val,access:vendorPortalToken})});
           this.style.background='#ecfdf5'; setTimeout(()=>{this.style.background='';},1000);
         } catch(e){ this.style.background='#fef2f2'; }
       });
@@ -16711,7 +16719,7 @@ function vendorConfirmPO(poId){
   fetch(`/api/vendor-portal/po/${poId}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({email:vendorPortalEmail,token:vendorPortalToken,action:'confirm'})
+    body:JSON.stringify({access:vendorPortalToken,action:'confirm'})
   }).then(r=>r.json()).then(d=>{
     if(d.ok){alert('✅ 발주 확인 완료!');loadVendorPortal();}
     else alert('처리 실패: '+(d.error||''));
@@ -16725,7 +16733,7 @@ function vendorShipPO(poId){
   fetch(`/api/vendor-portal/po/${poId}`,{
     method:'PATCH',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({email:vendorPortalEmail,token:vendorPortalToken,action:'ship'})
+    body:JSON.stringify({access:vendorPortalToken,action:'ship'})
   }).then(r=>r.json()).then(d=>{
     if(d.ok){
       let msg='✅ 발송 처리 완료!';
@@ -16744,7 +16752,7 @@ function vendorEditShip(poId){
   fetch(`/api/vendor-portal/po/${poId}/reset-ship`,{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({email:vendorPortalEmail,token:vendorPortalToken})
+    body:JSON.stringify({access:vendorPortalToken})
   }).then(r=>r.json()).then(d=>{
     if(d.ok){alert('수정 모드로 전환되었습니다.');loadVendorPortal();}
     else alert('실패: '+(d.error||''));
@@ -16776,7 +16784,7 @@ async function loadVendorLeadTimes() {
   if (!container) return;
   try {
     const resp = await fetch(
-      `/api/vendor-portal/lead-time?email=${encodeURIComponent(vendorPortalEmail)}&token=${vendorPortalToken}&vendor_name=${encodeURIComponent(vendorPortalName)}`
+      `/api/vendor-portal/lead-time?access=${encodeURIComponent(vendorPortalToken)}`
     );
     const d = await resp.json();
     if (!d.ok) { container.textContent = '리드타임 데이터를 불러오지 못했습니다.'; return; }
@@ -16860,7 +16868,7 @@ async function saveVendorLeadTimes() {
     const resp = await fetch('/api/vendor-portal/lead-time', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: vendorPortalEmail, token: vendorPortalToken, vendor_name: vendorPortalName, lead_times })
+      body: JSON.stringify({ access: vendorPortalToken, lead_times })
     });
     const d = await resp.json();
     if (d.ok) {
@@ -16885,7 +16893,7 @@ async function loadVendorTradeDoc(poId, isShippedLock=false) {
   const container = document.getElementById('tradeDoc_' + poId);
   if (!container) return;
   try {
-    const resp = await fetch(`/api/vendor-portal/trade-doc?po_id=${poId}&email=${encodeURIComponent(vendorPortalEmail)}&token=${vendorPortalToken}`);
+    const resp = await fetch(`/api/vendor-portal/trade-doc?po_id=${poId}&access=${encodeURIComponent(vendorPortalToken)}`);
     const d = await resp.json();
     const doc = d.data || d;
     if (!doc || !doc.id) {

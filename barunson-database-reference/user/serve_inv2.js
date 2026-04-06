@@ -358,23 +358,44 @@ function generateVendorTokenLegacy(email) {
   return crypto.createHash('sha256').update(email + PORTAL_SECRET).digest('hex').slice(0, 16);
 }
 
-function generateVendorToken(email) {
+function generateVendorToken(email, vendorName) {
   try {
-    return jwt.sign({ email, type: 'vendor' }, VENDOR_JWT_SECRET, { expiresIn: '7d' });
+    return jwt.sign({ email, name: vendorName || '', type: 'vendor' }, VENDOR_JWT_SECRET, { expiresIn: '90d' });
   } catch (e) {
     console.warn('JWT 생성 실패, 레거시 토큰 사용:', e.message);
     return generateVendorTokenLegacy(email);
   }
 }
 
-function verifyVendorToken(email, token) {
-  // 1. JWT 검증 시도
+function decodeVendorToken(token) {
   try {
     const decoded = jwt.verify(token, VENDOR_JWT_SECRET);
-    if (decoded && decoded.email === email && decoded.type === 'vendor') return true;
+    if (decoded && decoded.type === 'vendor') return decoded;
   } catch (_) {}
+  return null;
+}
+
+function verifyVendorToken(email, token) {
+  // 1. JWT 검증 시도 (access 토큰: email 파라미터 없이 토큰만으로 검증)
+  const decoded = decodeVendorToken(token);
+  if (decoded) {
+    if (!email) return true;
+    if (decoded.email === email) return true;
+  }
   // 2. 레거시 해시 토큰 폴백 (하위 호환)
-  return generateVendorTokenLegacy(email) === token;
+  if (email) return generateVendorTokenLegacy(email) === token;
+  return false;
+}
+
+// vendor-portal 공통 인증 헬퍼 (access 토큰 또는 레거시 email+token)
+function extractVendorAuth(params) {
+  // params: { access, email, token, vendor_name } (body 또는 querystring에서 추출)
+  const accessToken = params.access || params.token || '';
+  const decoded = decodeVendorToken(accessToken);
+  const email = decoded ? decoded.email : (params.email || '');
+  const vendorName = decoded ? (decoded.name || '') : (params.vendor_name || '');
+  if (!email || !verifyVendorToken(email, accessToken)) return null;
+  return { email, vendorName, token: accessToken };
 }
 
 // product_info.json 로드 (원자재코드, 원재료명, 절 조회용)
@@ -431,8 +452,8 @@ function logPOActivity(poId, action, opts = {}) {
 async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, emailCc) {
 
   const pInfo = getProductInfo();
-  const token = generateVendorToken(vendorEmail);
-  const portalUrl = `${BASE_URL}/?vendor_email=${encodeURIComponent(vendorEmail)}&vendor_name=${encodeURIComponent(vendorName)}&token=${token}`;
+  const token = generateVendorToken(vendorEmail, vendorName);
+  const portalUrl = `${BASE_URL}/?access=${token}`;
 
   const typeLabel = isPostProcess ? '후공정' : '원재료';
   const subject = `[바른컴퍼니] ${typeLabel} 발주서 - ${po.po_number} (${vendorName})`;
@@ -4991,10 +5012,12 @@ async function handleRequest(req, res) {
   // GET /api/vendor-portal — 업체 전용 PO 목록
   if (pathname === '/api/vendor-portal' && method === 'GET') {
     const qs = new URL(req.url, `http://${req.headers.host}`).searchParams;
-    const email = qs.get('email') || '';
-    const token = qs.get('token') || '';
-    const vendorNameParam = qs.get('vendor_name') || '';
-    if (!email || !token || !verifyVendorToken(email, token)) {
+    // access 토큰 방식 (신규) 또는 email+token 방식 (레거시)
+    const accessToken = qs.get('access') || qs.get('token') || '';
+    const decoded = decodeVendorToken(accessToken);
+    const email = decoded ? decoded.email : (qs.get('email') || '');
+    const vendorNameParam = decoded ? (decoded.name || '') : (qs.get('vendor_name') || '');
+    if (!email || !verifyVendorToken(email, accessToken)) {
       fail(res, 403, '인증 실패'); return;
     }
     // vendor_name 파라미터가 있으면 이름으로 정확 매칭, 없으면 이메일로 조회
@@ -5065,11 +5088,9 @@ async function handleRequest(req, res) {
   if (vpPatch && method === 'PATCH') {
     const poId = parseInt(vpPatch[1]);
     const body = await readJSON(req);
-    const email = body.email || '';
-    const token = body.token || '';
-    if (!email || !token || !verifyVendorToken(email, token)) {
-      fail(res, 403, '인증 실패'); return;
-    }
+    const auth = extractVendorAuth(body);
+    if (!auth) { fail(res, 403, '인증 실패'); return; }
+    const email = auth.email;
     // 이메일로 등록된 업체 확인 (같은 이메일로 여러 업체 가능)
     const vendorsWithEmail = db.prepare('SELECT * FROM vendors WHERE email = ?').all(email);
     if (!vendorsWithEmail.length) { fail(res, 404, '등록된 업체가 아닙니다'); return; }
@@ -5190,9 +5211,8 @@ async function handleRequest(req, res) {
   if (resetShipMatch && method === 'POST') {
     const poId = parseInt(resetShipMatch[1]);
     const body = await readJSON(req);
-    const email = body.email || '';
-    const token = body.token || '';
-    if (!verifyVendorToken(email, token)) { fail(res, 403, '인증 실패'); return; }
+    const auth = extractVendorAuth(body);
+    if (!auth) { fail(res, 403, '인증 실패'); return; }
     const po = db.prepare('SELECT * FROM po_header WHERE po_id=?').get(poId);
     if (!po) { fail(res, 404, 'PO 없음'); return; }
     // shipped_at 초기화 (발송 처리 전 상태로)
@@ -5306,8 +5326,9 @@ async function handleRequest(req, res) {
   // POST /api/vendor-portal/item-ship-date — 품목별 출고일 저장
   if (pathname === '/api/vendor-portal/item-ship-date' && method === 'POST') {
     const body = await readJSON(req);
-    const { po_id, item_id, ship_date, email, token } = body;
-    if (email && token && !verifyVendorToken(email, token)) { fail(res, 403, '인증 실패'); return; }
+    const { po_id, item_id, ship_date } = body;
+    const authItem = extractVendorAuth(body);
+    if (body.access && !authItem) { fail(res, 403, '인증 실패'); return; }
     if (!po_id || !ship_date) { fail(res, 400, '필수 항목 누락'); return; }
     if (item_id !== undefined && item_id !== null) {
       db.prepare('UPDATE po_items SET ship_date=? WHERE po_id=? AND item_id=?').run(ship_date, po_id, item_id);
@@ -5321,8 +5342,9 @@ async function handleRequest(req, res) {
   // POST /api/vendor-portal/items-ship-dates — 품목별 출고일 일괄 저장
   if (pathname === '/api/vendor-portal/items-ship-dates' && method === 'POST') {
     const body = await readJSON(req);
-    const { po_id, dates, email, token } = body;
-    if (email && token && !verifyVendorToken(email, token)) { fail(res, 403, '인증 실패'); return; }
+    const { po_id, dates } = body;
+    const authDates = extractVendorAuth(body);
+    if (body.access && !authDates) { fail(res, 403, '인증 실패'); return; }
     if (!po_id || !Array.isArray(dates)) { fail(res, 400, '필수 항목 누락'); return; }
     const stmt = db.prepare('UPDATE po_items SET ship_date=? WHERE po_id=? AND item_id=?');
     const tx = db.transaction(() => { for (const d of dates) stmt.run(d.ship_date, po_id, d.item_id); });
@@ -5346,10 +5368,10 @@ async function handleRequest(req, res) {
 
   // GET /api/vendor-portal/lead-time — 벤더 포털 공정 리드타임 조회
   if (pathname === '/api/vendor-portal/lead-time' && method === 'GET') {
-    const email = parsed.searchParams.get('email') || '';
-    const token = parsed.searchParams.get('token') || '';
-    const vendorName = parsed.searchParams.get('vendor_name') || '';
-    if (!email || !token || !verifyVendorToken(email, token)) { fail(res, 403, '인증 실패'); return; }
+    const qsLt = Object.fromEntries(parsed.searchParams);
+    const authLt = extractVendorAuth(qsLt);
+    if (!authLt) { fail(res, 403, '인증 실패'); return; }
+    const vendorName = authLt.vendorName || parsed.searchParams.get('vendor_name') || '';
     if (!vendorName) { fail(res, 400, 'vendor_name 필수'); return; }
 
     const DEFAULT_LEAD_TIMES = [
@@ -5385,8 +5407,10 @@ async function handleRequest(req, res) {
   // POST /api/vendor-portal/lead-time — 벤더 포털 공정 리드타임 저장
   if (pathname === '/api/vendor-portal/lead-time' && method === 'POST') {
     const body = await readJSON(req);
-    const { email, token, vendor_name, lead_times } = body;
-    if (!email || !token || !verifyVendorToken(email, token)) { fail(res, 403, '인증 실패'); return; }
+    const authLtPost = extractVendorAuth(body);
+    if (!authLtPost) { fail(res, 403, '인증 실패'); return; }
+    const vendor_name = authLtPost.vendorName || body.vendor_name || '';
+    const lead_times = body.lead_times;
     if (!vendor_name) { fail(res, 400, 'vendor_name 필수'); return; }
     if (!Array.isArray(lead_times) || lead_times.length === 0) { fail(res, 400, 'lead_times 필수'); return; }
 
@@ -5426,9 +5450,9 @@ async function handleRequest(req, res) {
   // GET /api/vendor-portal/trade-doc — 업체 포털 거래명세서 조회
   if (pathname === '/api/vendor-portal/trade-doc' && method === 'GET') {
     const poId = parsed.searchParams.get('po_id');
-    const email = parsed.searchParams.get('email') || '';
-    const token = parsed.searchParams.get('token') || '';
-    if (!verifyVendorToken(email, token)) { fail(res, 403, '인증 실패'); return; }
+    const qsTd = Object.fromEntries(parsed.searchParams);
+    const authTd = extractVendorAuth(qsTd);
+    if (!authTd) { fail(res, 403, '인증 실패'); return; }
     const doc = db.prepare('SELECT * FROM trade_document WHERE po_id=? ORDER BY id DESC LIMIT 1').get(poId);
     if (!doc) { ok(res, null); return; }
     doc.items = JSON.parse(doc.items_json || '[]');
@@ -5440,8 +5464,9 @@ async function handleRequest(req, res) {
   // POST /api/vendor-portal/update-trade-doc — 업체 포털 거래명세서 단가 수정
   if (pathname === '/api/vendor-portal/update-trade-doc' && method === 'POST') {
     const body = await readJSON(req);
-    const { doc_id, email, token, modified_items, memo } = body;
-    if (!verifyVendorToken(email || '', token || '')) { fail(res, 403, '인증 실패'); return; }
+    const { doc_id, modified_items, memo } = body;
+    const authUtd = extractVendorAuth(body);
+    if (!authUtd) { fail(res, 403, '인증 실패'); return; }
     if (!doc_id) { fail(res, 400, 'doc_id 필수'); return; }
     const doc = db.prepare('SELECT * FROM trade_document WHERE id=?').get(doc_id);
     if (!doc) { fail(res, 404, '문서 없음'); return; }
