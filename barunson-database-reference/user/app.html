@@ -20074,42 +20074,94 @@ async function editReport(id) {
 }
 
 // 새 보고서 생성 + 저장
-async function generateAndSaveReport() {
-  var listView = document.getElementById('reportListView');
-  var detailView = document.getElementById('reportDetailView');
-  var c = document.getElementById('reportContent');
-  listView.style.display = 'none';
-  detailView.style.display = 'block';
+function generateAndSaveReport() {
+  // 보고서 유형 선택 모달 표시
+  var overlay = document.createElement('div');
+  overlay.id = 'newReportModal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  var types = [
+    {type:'raw-material', icon:'📦', name:'원재료 매입현황', desc:'거래처별 매입금액·단가 비교 분석'},
+    {type:'weekly', icon:'📋', name:'주간보고', desc:'금주 실적·이슈·차주 계획'},
+    {type:'inventory', icon:'📊', name:'재고현황 보고서', desc:'현재 재고 상태·긴급/위험 품목'},
+    {type:'purchase', icon:'🛒', name:'매입현황 보고서', desc:'기간별 발주·입고 실적'},
+    {type:'production', icon:'🏭', name:'생산현황 보고서', desc:'생산계획 대비 실적'},
+    {type:'custom', icon:'✏️', name:'커스텀 보고서', desc:'직접 제목·내용 작성'}
+  ];
+  var h = '<div style="background:#fff;border-radius:12px;padding:24px;width:520px;max-height:80vh;overflow-y:auto;color:#111">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><h2 style="margin:0;font-size:18px;font-weight:700">새 보고서 생성</h2><button onclick="document.getElementById(\'newReportModal\').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#666">✕</button></div>';
+  h += '<div style="display:flex;flex-direction:column;gap:8px">';
+  types.forEach(function(t) {
+    h += '<div onclick="createNewReport(\''+t.type+'\',\''+t.name+'\')" style="cursor:pointer;padding:14px 16px;border:1px solid #e2e8f0;border-radius:8px;display:flex;align-items:center;gap:12px;transition:all .15s" onmouseover="this.style.background=\'#f0f9ff\';this.style.borderColor=\'#3b82f6\'" onmouseout="this.style.background=\'#fff\';this.style.borderColor=\'#e2e8f0\'">';
+    h += '<span style="font-size:28px">'+t.icon+'</span>';
+    h += '<div><div style="font-size:14px;font-weight:700;color:#111">'+t.name+'</div>';
+    h += '<div style="font-size:12px;color:#666;margin-top:2px">'+t.desc+'</div></div>';
+    h += '</div>';
+  });
+  h += '</div></div>';
+  overlay.innerHTML = h;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });
+}
 
-  // loadReport()가 reportContent에 렌더링
-  await loadReport();
+async function createNewReport(type, typeName) {
+  var modal = document.getElementById('newReportModal');
+  if(modal) modal.remove();
 
-  // 렌더링된 HTML 캡처 후 서버에 저장
-  var renderedHTML = c.innerHTML;
-  if (!renderedHTML || renderedHTML.indexOf('오류') > -1) return;
+  if(type === 'custom') {
+    // 커스텀: 제목 입력 후 빈 보고서 생성
+    var title = prompt('보고서 제목을 입력하세요:');
+    if(!title) return;
+    try {
+      var resp = await fetch('/api/reports', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ title: title, subtitle: new Date().toLocaleDateString('ko-KR'), report_type: 'custom', content: JSON.stringify({html:'<div style="padding:20px;color:#666;text-align:center">내용을 작성하세요 (수정 버튼 클릭)</div>', generated: new Date().toLocaleDateString('ko-KR')}) })
+      }).then(function(r){return r.json();});
+      if(resp.data && resp.data.id) { whToast('✅ 보고서 생성 완료'); loadReportList(); }
+    } catch(e) { alert('생성 실패: ' + e.message); }
+    return;
+  }
 
-  try {
-    var today = new Date().toLocaleDateString('ko-KR');
-    var resp = await fetch('/api/reports', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: '대한통상 단가 협상의 건',
-        subtitle: '원재료 매입 현황 분석 · ' + today,
-        report_type: 'raw-material',
-        content: JSON.stringify({ html: renderedHTML, generated: today })
-      })
-    }).then(function(r){return r.json();}).catch(function(){return null;});
+  if(type === 'raw-material') {
+    // 기존 대한통상 보고서 생성
+    var listView = document.getElementById('reportListView');
+    var detailView = document.getElementById('reportDetailView');
+    var c = document.getElementById('reportContent');
+    listView.style.display = 'none';
+    detailView.style.display = 'block';
+    await loadReport();
+    var renderedHTML = c.innerHTML;
+    if (!renderedHTML || renderedHTML.indexOf('오류') > -1) return;
+    try {
+      var today = new Date().toLocaleDateString('ko-KR');
+      var resp = await fetch('/api/reports', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ title: '원재료 매입현황 분석', subtitle: '거래처별 매입 현황 · ' + today, report_type: 'raw-material', content: JSON.stringify({html: renderedHTML, generated: today}) })
+      }).then(function(r){return r.json();}).catch(function(){return null;});
+      var savedId = (resp && resp.data) ? resp.data.id : (resp ? resp.id : null);
+      if(savedId) whToast('✅ 보고서 저장 (#' + savedId + ')');
+    } catch(e) { console.error(e); }
+    return;
+  }
 
-    var savedId = (resp && resp.data) ? resp.data.id : (resp ? resp.id : null);
-    if (savedId) {
-      var notice = document.createElement('div');
-      notice.style.cssText = 'position:fixed;top:60px;right:20px;padding:10px 16px;background:#16a34a;color:#fff;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,.2)';
-      notice.textContent = '✅ 보고서가 저장되었습니다 (#' + savedId + ')';
-      document.body.appendChild(notice);
-      setTimeout(function(){ notice.remove(); }, 3000);
-    }
-  } catch(e) { console.error('보고서 저장 실패:', e); }
+  // 나머지 유형: 보고서 빌더로 이동
+  if(type === 'weekly') {
+    // 주간보고 생성
+    var weekTitle = prompt('주간보고 제목:', new Date().toLocaleDateString('ko-KR') + ' 주간보고');
+    if(!weekTitle) return;
+    try {
+      var resp = await fetch('/api/reports', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ title: weekTitle, subtitle: new Date().toLocaleDateString('ko-KR'), report_type: 'weekly',
+          content: JSON.stringify({html: '<div style="padding:24px;color:#111"><h1 style="font-size:22px;font-weight:800;border-bottom:3px solid #ccc;padding-bottom:12px;margin-bottom:20px">'+esc(weekTitle)+'</h1><h2 style="font-size:16px;font-weight:700;border-left:4px solid #3b82f6;padding-left:10px;margin:20px 0 10px">1. 금주 실적</h2><ul style="line-height:2;font-size:14px"><li>실적 내용을 작성하세요</li></ul><h2 style="font-size:16px;font-weight:700;border-left:4px solid #f59e0b;padding-left:10px;margin:20px 0 10px">2. 주요 이슈</h2><ul style="line-height:2;font-size:14px"><li>이슈 내용을 작성하세요</li></ul><h2 style="font-size:16px;font-weight:700;border-left:4px solid #10b981;padding-left:10px;margin:20px 0 10px">3. 차주 계획</h2><ul style="line-height:2;font-size:14px"><li>계획 내용을 작성하세요</li></ul></div>', generated: new Date().toLocaleDateString('ko-KR')}) })
+      }).then(function(r){return r.json();});
+      if(resp.data && resp.data.id) { whToast('✅ 주간보고 생성 완료'); openReport(resp.data.id); }
+    } catch(e) { alert('생성 실패: ' + e.message); }
+    return;
+  }
+
+  // inventory, purchase, production → 보고서 빌더로 이동
+  whToast('보고서 빌더로 이동합니다');
+  showPage('report-builder');
 }
 
 // loadReport — 보고서 생성 (generateAndSaveReport에서도 호출)
