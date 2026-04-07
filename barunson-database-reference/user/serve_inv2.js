@@ -3775,7 +3775,7 @@ async function handleRequest(req, res) {
                SUM(i.ordered_qty - COALESCE(i.received_qty,0)) as pending_qty,
                GROUP_CONCAT(DISTINCT h.os_number) as os_numbers,
                GROUP_CONCAT(DISTINCT h.po_number) as po_numbers,
-               MIN(h.expected_date) as earliest_due,
+               MIN(h.due_date) as earliest_due,
                h.status as latest_status,
                MAX(h.po_date) as latest_po_date
         FROM po_items i
@@ -4574,8 +4574,8 @@ async function handleRequest(req, res) {
       const total = await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=?").get(org);
       const byStatus = await db.prepare("SELECT status, COUNT(*) AS c FROM po_header WHERE origin=? GROUP BY status").all(org);
       const partial = await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=? AND status='partial'").get(org);
-      const overdue = await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=? AND status NOT IN ('received','cancelled','completed') AND expected_date < date('now','localtime') AND expected_date != ''").get(org);
-      const recentPo = await db.prepare("SELECT po_id, po_number, vendor_name, status, expected_date, po_date, total_qty FROM po_header WHERE origin=? ORDER BY created_at DESC LIMIT 5").all(org);
+      const overdue = await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE origin=? AND status NOT IN ('received','cancelled','completed') AND due_date < date('now','localtime') AND due_date != ''").get(org);
+      const recentPo = await db.prepare("SELECT po_id, po_number, vendor_name, status, due_date as expected_date, po_date, total_qty FROM po_header WHERE origin=? ORDER BY created_at DESC LIMIT 5").all(org);
       // 입고율 (전체 아이템 기준)
       const rcvRate = db.prepare(`
         SELECT COALESCE(SUM(i.received_qty),0) AS received, COALESCE(SUM(i.ordered_qty),0) AS ordered
@@ -4608,7 +4608,7 @@ async function handleRequest(req, res) {
     if (status) { where += " AND h.status=?"; params.push(status); }
     else { where += " AND h.status NOT IN ('cancelled','draft')"; }
     const rows = await db.prepare(`
-      SELECT h.po_id, h.po_number, h.origin, h.vendor_name, h.status, h.po_date, h.expected_date,
+      SELECT h.po_id, h.po_number, h.origin, h.vendor_name, h.status, h.po_date, h.due_date as expected_date,
              h.po_type, h.material_status, h.process_status, h.process_step, h.notes,
              i.item_id, i.product_code, i.brand, i.process_type, i.ordered_qty, i.received_qty, i.spec
       FROM po_header h JOIN po_items i ON h.po_id = i.po_id ${where}
@@ -4864,7 +4864,7 @@ async function handleRequest(req, res) {
     }
     const poNum = 'PO-KR-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.random()).slice(2,5);
     const totalQty = body.items.reduce((s, i) => s + (i.ordered_qty || 0), 0);
-    const info = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status, expected_date, total_qty, notes, origin, po_date, tolerance_pct) VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?)`)
+    const info = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status, due_date, total_qty, notes, origin, po_date, tolerance_pct) VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?)`)
       .run(poNum, '후공정', body.material_vendor, body.material_vendor, body.process_vendor, 'sent', body.expected_date || '', totalQty, body.notes || '', '한국', body.tolerance_pct || 5.0);
     const poId = info.lastInsertRowid;
     const stmt = db.prepare("INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec) VALUES (?,?,?,?,?,?)");
@@ -4958,7 +4958,7 @@ async function handleRequest(req, res) {
     if (origin && stages[origin]) {
       const pos = await db.prepare(`
         SELECT po_id, po_number, vendor_name, status, material_status, process_status,
-               expected_date, po_date, total_qty, notes, process_step,
+               due_date as expected_date, po_date, total_qty, notes, process_step,
                material_vendor_name, process_vendor_name, material_send_date,
                material_confirmed_at, process_email_sent, force_completed,
                tolerance_pct, order_type, vendor_confirmed_date
@@ -5286,9 +5286,10 @@ async function handleRequest(req, res) {
 
     // 새 PO 생성
     const totalQty = oldItems.reduce((s, it) => s + (it.ordered_qty || 0), 0);
-    const info = db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, expected_date, total_qty, notes, origin, po_date)
+    const info = db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, origin, po_date)
       VALUES (?, ?, ?, 'sent', ?, ?, ?, ?, date('now','localtime'))`).run(
-      poNumber, oldPO.po_type, oldPO.vendor_name, oldPO.expected_date || '', totalQty, `재발주 (원본: ${oldPO.po_number})`, oldPO.origin || ''
+      poNumber, oldPO.po_type, oldPO.vendor_name, oldPO.due_date || oldPO.expected_date || '', totalQty, `재발주 (원본: ${oldPO.po_number})`, oldPO.origin || ''
+
     );
     const newPoId = info.lastInsertRowid;
 
@@ -6317,7 +6318,7 @@ async function handleRequest(req, res) {
     // 납기 준수율 및 평균 리드타임 계산
     const result = await Promise.all(rows.map(async r => {
       const ltRows = await db.prepare(`
-        SELECT po_date, updated_at, expected_date FROM po_header
+        SELECT po_date, updated_at, due_date as expected_date FROM po_header
         WHERE vendor_name = ? AND po_date >= ? AND po_date <= ?
           AND status IN ('received','os_pending') AND po_date IS NOT NULL AND updated_at IS NOT NULL
       `).all(r.vendor_name, from, to);
@@ -6509,12 +6510,12 @@ async function handleRequest(req, res) {
     }
 
     const tx = db.transaction(async () => {
-      const info = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, expected_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, po_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now','localtime'))`).run(
+      const info = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, po_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now','localtime'))`).run(
         poNumber,
         body.po_type || 'material',
         vendorName,
         body.status || '대기',
-        body.expected_date || '',
+        body.expected_date || body.due_date || '',
         totalQty,
         body.notes || '',
         body.process_step || 0,
@@ -6960,9 +6961,9 @@ async function handleRequest(req, res) {
 
     // 6. 알림 (안전재고 미달 = urgent 품목 수, 납기 초과, 미승인 PO)
     const pendingPO = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE status IN ('draft','sent')`).get()).cnt;
-    const overdueCount = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE expected_date < date('now') AND status NOT IN ('received','cancelled','os_pending')`).get()).cnt;
+    const overdueCount = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE due_date < date('now') AND status NOT IN ('received','cancelled','os_pending')`).get()).cnt;
     // 납기 임박 (D-3 이내)
-    const upcomingDeadlineCount = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE expected_date >= date('now') AND expected_date <= date('now','+3 days') AND status NOT IN ('received','cancelled','os_pending')`).get()).cnt;
+    const upcomingDeadlineCount = (await db.prepare(`SELECT COUNT(*) as cnt FROM po_header WHERE due_date >= date('now') AND due_date <= date('now','+3 days') AND status NOT IN ('received','cancelled','os_pending')`).get()).cnt;
 
     ok(res, {
       monthlyPO, vendorShare, statusDist, avgLeadTime, vendorLeadTime,
@@ -6977,7 +6978,7 @@ async function handleRequest(req, res) {
     const type = pathname.split('/').pop();
     let rows = [], filename = '', headers = [];
     if (type === 'po') {
-      rows = await db.prepare('SELECT po_id, po_number, po_date, vendor_name, po_type, status, total_qty, expected_date, notes, created_at FROM po_header ORDER BY po_date DESC').all();
+      rows = await db.prepare('SELECT po_id, po_number, po_date, vendor_name, po_type, status, total_qty, due_date as expected_date, notes, created_at FROM po_header ORDER BY po_date DESC').all();
       filename = 'po_list.csv';
       headers = ['발주ID', '발주번호', '발주일', '거래처', '유형', '상태', '수량', '납기일', '비고', '생성일'];
     } else if (type === 'vendors') {
@@ -9243,7 +9244,7 @@ async function handleRequest(req, res) {
       if (!vendor_name) continue;
       // 납기 준수율
       const totalPO = (await db.prepare("SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date LIKE ? AND status != 'cancelled'").get(vendor_name, monthLike)).cnt;
-      const ontimePO = (await db.prepare("SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date LIKE ? AND status IN ('received','os_pending') AND (expected_date IS NULL OR updated_at <= expected_date || ' 23:59:59')").get(vendor_name, monthLike)).cnt;
+      const ontimePO = (await db.prepare("SELECT COUNT(*) as cnt FROM po_header WHERE vendor_name=? AND po_date LIKE ? AND status IN ('received','os_pending') AND (due_date IS NULL OR updated_at <= due_date || ' 23:59:59')").get(vendor_name, monthLike)).cnt;
       const deliveryScore = totalPO > 0 ? Math.round(ontimePO / totalPO * 100) : 100;
       // 품질 점수
       const defectCount = (await db.prepare("SELECT COUNT(*) as cnt FROM defects WHERE vendor_name=? AND defect_date LIKE ?").get(vendor_name, monthLike)).cnt;
@@ -13560,7 +13561,7 @@ async function handleRequest(req, res) {
     try {
       poKpi.total = (await db.prepare("SELECT COUNT(*) AS c FROM po_header").get()||{}).c||0;
       poKpi.pending = (await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE status IN ('draft','sent','confirmed','partial')").get()||{}).c||0;
-      poKpi.overdue = (await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE status IN ('sent','confirmed','partial') AND expected_date < ?").get(today)||{}).c||0;
+      poKpi.overdue = (await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE status IN ('sent','confirmed','partial') AND due_date < ?").get(today)||{}).c||0;
       const amt = await db.prepare("SELECT COALESCE(SUM(pi.unit_price*pi.ordered_qty),0) AS t FROM po_header ph JOIN po_items pi ON ph.po_id=pi.po_id WHERE ph.po_date >= ?").get(monthStart.toISOString().slice(0,10));
       poKpi.this_month_amount = amt ? amt.t : 0;
     } catch(_){}
@@ -15084,11 +15085,11 @@ async function runDeadlineAlertCheck() {
   const today = new Date().toISOString().slice(0, 10);
   console.log(`[납기알림] ${today} 실행`);
 
-  // expected_date가 오늘~3일 후인 미완료 PO 조회
+  // due_date가 오늘~3일 후인 미완료 PO 조회
   const upcomingPOs = db.prepare(`
-    SELECT h.po_id, h.po_number, h.vendor_name, h.expected_date, h.total_qty, h.po_date
+    SELECT h.po_id, h.po_number, h.vendor_name, h.due_date as expected_date, h.total_qty, h.po_date
     FROM po_header h
-    WHERE h.expected_date >= date('now') AND h.expected_date <= date('now','+3 days')
+    WHERE h.due_date >= date('now') AND h.due_date <= date('now','+3 days')
       AND h.status NOT IN ('received','cancelled','os_pending')
   `).all();
 

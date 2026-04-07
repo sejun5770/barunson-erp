@@ -82,7 +82,7 @@ body{font-family:'Malgun Gothic',-apple-system,sans-serif;background:#f8fafc;col
 </head>
 <body>
 
-<div id="loginScreen" class="login-wrap">
+<div id="loginScreen" class="login-wrap" style="display:none">
   <div style="font-size:48px;margin-bottom:16px">🎁</div>
   <h2>더기프트 생산재고</h2>
   <p>Google 계정으로 로그인하세요</p>
@@ -90,7 +90,7 @@ body{font-family:'Malgun Gothic',-apple-system,sans-serif;background:#f8fafc;col
   <div id="loginError" style="color:#ef4444;font-size:13px;margin-top:16px;display:none"></div>
 </div>
 
-<div id="appScreen" style="display:none">
+<div id="appScreen">
   <div class="header">
     <h1>🎁 더기프트 생산재고</h1>
     <div class="user-info">
@@ -175,6 +175,10 @@ body{font-family:'Malgun Gothic',-apple-system,sans-serif;background:#f8fafc;col
       <button onclick="addQty(10)">+10</button>
       <button onclick="addQty(50)">+50</button>
     </div>
+    <div id="sheetExpiryWrap" style="margin-top:10px">
+      <label style="font-size:13px;font-weight:600;color:#334155;display:block;margin-bottom:4px">소비기한</label>
+      <input type="date" id="sheetExpiry" style="width:100%;padding:12px;border:2px solid #e2e8f0;border-radius:10px;font-size:16px;outline:none">
+    </div>
     <input type="text" class="memo-input" id="sheetMemo" placeholder="메모 (선택)">
     <button class="btn confirm-btn" id="sheetConfirmBtn" onclick="confirmTx()">확인</button>
     <button class="btn btn-gray" style="margin-top:8px" onclick="closeSheet()">취소</button>
@@ -228,34 +232,9 @@ let capacityData = [];
 
 // ── Auth ──
 async function initApp() {
-  // 로컬 환경: local-bypass로 자동 로그인 (서버 배포 시 이 블록 제거)
-  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-    try {
-      const bypass = await apiFetch('/api/auth/local-bypass');
-      if (bypass && bypass.token) {
-        authToken = bypass.token;
-        localStorage.setItem('gs_token', authToken);
-        currentUser = bypass.user || { display_name: '관리자', username: 'admin' };
-        showApp();
-        return;
-      }
-    } catch(e) {}
-  }
-
-  const config = await apiFetch('/api/auth/config');
-  if (config && config.google_client_id) {
-    loadGoogleSignIn(config.google_client_id);
-  }
-  if (authToken) {
-    const me = await apiFetch('/api/auth/me');
-    if (me && me.user) {
-      currentUser = me.user;
-      showApp();
-    } else {
-      authToken = '';
-      localStorage.removeItem('gs_token');
-    }
-  }
+  // 직원용 페이지: 로그인 없이 바로 사용 가능
+  currentUser = { display_name: '직원', username: 'staff' };
+  showApp();
 }
 
 function loadGoogleSignIn(clientId) {
@@ -384,6 +363,19 @@ function renderSetCards() {
         </div>
       </div>
       ${needMore > 0 ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#dc2626;font-weight:700;text-align:center">⚠️ ${needMore.toLocaleString()}개 추가 생산 필요</div>` : ''}
+      ${(() => {
+        if (!s.expiry_date) return '';
+        const today = new Date().toISOString().slice(0,10);
+        const dLeft = Math.ceil((new Date(s.expiry_date) - new Date(today)) / 86400000);
+        const isExpired = dLeft <= 0;
+        const isUrgent = dLeft > 0 && dLeft <= 30;
+        const bgColor = isExpired ? '#fef2f2' : isUrgent ? '#fffbeb' : '#f0fdf4';
+        const bdColor = isExpired ? '#fecaca' : isUrgent ? '#fde68a' : '#bbf7d0';
+        const txColor = isExpired ? '#dc2626' : isUrgent ? '#d97706' : '#16a34a';
+        const icon = isExpired ? '🚨' : isUrgent ? '⏰' : '✅';
+        const label = isExpired ? '소비기한 만료' : isUrgent ? '소비기한 임박' : '소비기한';
+        return `<div style="background:${bgColor};border:1px solid ${bdColor};border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:${txColor};font-weight:700;text-align:center;display:flex;align-items:center;justify-content:center;gap:6px">${icon} ${label}: ${s.expiry_date} (D${dLeft <= 0 ? '+' + Math.abs(dLeft) : '-' + dLeft})</div>`;
+      })()}
       ${upcoming.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px">${upcoming.map(d => `<span style="padding:2px 6px;background:#fffbeb;border:1px solid #fde68a;border-radius:4px;font-size:10px"><b>${d.ship_date.slice(5)}</b> ${d.qty}개</span>`).join('')}</div>` : ''}
       <div class="btn-row">
         <button class="btn btn-green" onclick="openSheet(${s.id},'assembly','${esc(s.set_name)}')">+ 조립입고</button>
@@ -405,6 +397,9 @@ function openSheet(setId, txType, setName) {
   document.getElementById('sheetTitle').textContent = `${setName} — ${labels[txType]}`;
   document.getElementById('sheetConfirmBtn').style.background = colors[txType];
   document.getElementById('sheetConfirmBtn').className = 'btn confirm-btn';
+  // 소비기한 필드: 조립입고/기초재고일 때만 표시
+  document.getElementById('sheetExpiryWrap').style.display = (txType === 'assembly' || txType === 'base') ? '' : 'none';
+  document.getElementById('sheetExpiry').value = '';
   document.getElementById('sheetBg').classList.add('show');
   setTimeout(() => document.getElementById('sheetQty').focus(), 200);
 }
@@ -423,8 +418,9 @@ async function confirmTx() {
   const memo = document.getElementById('sheetMemo').value;
   if (!qty || qty <= 0) { alert('수량을 입력하세요'); return; }
   const operator = currentUser ? (currentUser.display_name || currentUser.username) : '';
+  const expiry_date = document.getElementById('sheetExpiry').value || '';
   const resp = await apiFetch(`/api/gift-sets/${setId}/transaction`, {
-    method: 'POST', body: JSON.stringify({ tx_type: txType, qty, operator, memo })
+    method: 'POST', body: JSON.stringify({ tx_type: txType, qty, operator, memo, expiry_date })
   });
   if (resp && resp.new_stock !== undefined) {
     closeSheet();
