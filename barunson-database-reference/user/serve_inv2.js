@@ -900,6 +900,21 @@ await db.exec(`
     updated_at   TEXT DEFAULT (datetime('now','localtime'))
   );
 `);
+try { await db.exec("ALTER TABLE product_notes ADD COLUMN op_category TEXT DEFAULT ''"); } catch(_) {}
+
+// ── 원장 매핑 테이블 (거래처 품목코드 ↔ XERP 품목코드) ──
+await db.exec(`
+  CREATE TABLE IF NOT EXISTS ledger_code_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_code TEXT NOT NULL,
+    vendor_item_code TEXT NOT NULL,
+    vendor_item_name TEXT DEFAULT '',
+    xerp_item_code TEXT NOT NULL,
+    xerp_item_name TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(vendor_code, vendor_item_code)
+  );
+`);
 
 // ── 필수 자동발주 테이블 ─────────────────────────────────────────────
 await db.exec(`
@@ -1439,6 +1454,14 @@ await db.exec(`CREATE TABLE IF NOT EXISTS china_inventory (
   UNIQUE(product_code)
 )`);
 await db.exec("CREATE INDEX IF NOT EXISTS idx_china_inv_code ON china_inventory(product_code)");
+// china_inventory 컬럼 확장 (PO 양식)
+try { await db.exec("ALTER TABLE china_inventory ADD COLUMN po_no TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE china_inventory ADD COLUMN order_qty INTEGER DEFAULT 0"); } catch(_) {}
+try { await db.exec("ALTER TABLE china_inventory ADD COLUMN order_date TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE china_inventory ADD COLUMN due_date TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE china_inventory ADD COLUMN received_qty INTEGER DEFAULT 0"); } catch(_) {}
+try { await db.exec("ALTER TABLE china_inventory ADD COLUMN unproduced_qty INTEGER DEFAULT 0"); } catch(_) {}
+try { await db.exec("ALTER TABLE china_inventory ADD COLUMN is_complete TEXT DEFAULT 'N'"); } catch(_) {}
 
 // ── 인증/권한 테이블 (S1) ─────────────────────────────────────────
 await db.exec(`CREATE TABLE IF NOT EXISTS users (
@@ -1781,6 +1804,10 @@ await db.exec("CREATE INDEX IF NOT EXISTS idx_gss_set ON gift_shipment_schedule(
 await db.exec("CREATE INDEX IF NOT EXISTS idx_gss_date ON gift_shipment_schedule(ship_date)");
 await db.exec("CREATE INDEX IF NOT EXISTS idx_gss_status ON gift_shipment_schedule(status)");
 
+// 소비기한 관리 컬럼 추가
+try { await db.exec("ALTER TABLE gift_sets ADD COLUMN expiry_date TEXT DEFAULT ''"); } catch(e) {}
+try { await db.exec("ALTER TABLE gift_set_transactions ADD COLUMN expiry_date TEXT DEFAULT ''"); } catch(e) {}
+
 // ── 더기프트 품목 자동 등록 (gift_sets + BOM → products) ──
 try {
   const giftSets = await db.prepare("SELECT set_code, set_name FROM gift_sets").all();
@@ -1791,10 +1818,10 @@ try {
   if (allGiftCodes.size > 0) {
     const upsert = db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, status)
       VALUES (?, ?, '바른손카드', '더기프트', 'active')
-      ON CONFLICT(product_code) DO UPDATE SET origin='더기프트', status='active', updated_at=datetime('now','localtime')
-      WHERE origin != '더기프트'`);
-    const tx = db.transaction(() => { for (const [code, name] of allGiftCodes) upsert.run(code, name || ''); });
-    tx();
+      ON CONFLICT(product_code) DO UPDATE SET origin='더기프트', status='active', updated_at=NOW()
+      WHERE products.origin != '더기프트'`);
+    const tx = db.transaction(async () => { for (const [code, name] of allGiftCodes) await upsert.run(code, name || ''); });
+    await tx();
     console.log(`더기프트 품목 자동 등록/업데이트: ${allGiftCodes.size}건`);
   }
 } catch(e) { console.warn('더기프트 품목 자동등록 실패:', e.message); }
@@ -3495,7 +3522,14 @@ async function handleRequest(req, res) {
   const prodDel = pathname.match(/^\/api\/products\/(\d+)$/);
   if (prodDel && method === 'DELETE') {
     const id = parseInt(prodDel[1]);
-    await db.prepare('DELETE FROM products WHERE id = ?').run(id);
+    // 삭제 전 origin 확인 — DD/XERP 동기화 데이터는 삭제 차단
+    const prod = await db.prepare('SELECT id, origin, product_name FROM products WHERE id = ?').get(id);
+    if (!prod) { fail(res, 404, '품목을 찾을 수 없습니다'); return; }
+    if (prod.origin && prod.origin !== 'manual') {
+      fail(res, 403, `외부 동기화 데이터(${prod.origin})는 삭제할 수 없습니다. 원본 시스템에서 관리하세요.`);
+      return;
+    }
+    await db.prepare('DELETE FROM products WHERE id = ? AND (origin IS NULL OR origin = "manual")').run(id);
     ok(res, { deleted: id });
     return;
   }
@@ -5010,6 +5044,17 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
   //  VENDOR PORTAL API (업체 포털)
   // ════════════════════════════════════════════════════════════════════
+
+  // GET /api/vendor-portal/generate-token — 관리자가 거래처 포탈 접속 토큰 생성
+  if (pathname === '/api/vendor-portal/generate-token' && method === 'GET') {
+    const qs = new URL(req.url, `http://${req.headers.host}`).searchParams;
+    const email = qs.get('email') || '';
+    const name = qs.get('name') || '';
+    if (!email) { fail(res, 400, '이메일 필요'); return; }
+    const token = generateVendorToken(email, name);
+    ok(res, { access: token });
+    return;
+  }
 
   // GET /api/vendor-portal — 업체 전용 PO 목록
   if (pathname === '/api/vendor-portal' && method === 'GET') {
@@ -7601,8 +7646,10 @@ async function handleRequest(req, res) {
     if (from) { sql += ' AND note_date >= ?'; params.push(from); }
     if (to) { sql += ' AND note_date <= ?'; params.push(to); }
     if (q) { sql += ' AND (title LIKE ? OR content LIKE ?)'; params.push('%'+q+'%', '%'+q+'%'); }
-    sql += ' ORDER BY note_date DESC, note_id DESC';
+    sql += ' ORDER BY note_date DESC, id DESC';
     const rows = await db.prepare(sql).all(...params);
+    // note_id 호환: id를 note_id로도 매핑
+    rows.forEach(r => { if(!r.note_id) r.note_id = r.id; });
     ok(res, rows);
     return;
   }
@@ -7610,7 +7657,7 @@ async function handleRequest(req, res) {
   const noteGet = pathname.match(/^\/api\/notes\/(\d+)$/);
   if (noteGet && method === 'GET') {
     const id = parseInt(noteGet[1]);
-    const note = await db.prepare('SELECT * FROM vendor_notes WHERE note_id = ?').get(id);
+    const note = await db.prepare('SELECT * FROM vendor_notes WHERE id = ?').get(id);
     if (!note) { fail(res, 404, 'Note not found'); return; }
     ok(res, note);
     return;
@@ -7644,7 +7691,7 @@ async function handleRequest(req, res) {
     }
     if (fields.length === 0) { fail(res, 400, 'No fields to update'); return; }
     fields.push(`updated_at = datetime('now','localtime')`);
-    await db.prepare(`UPDATE vendor_notes SET ${fields.join(', ')} WHERE note_id = @id`).run(params);
+    await db.prepare(`UPDATE vendor_notes SET ${fields.join(', ')} WHERE id = @id`).run(params);
     ok(res, { note_id: id });
     return;
   }
@@ -7652,8 +7699,8 @@ async function handleRequest(req, res) {
   const noteDel = pathname.match(/^\/api\/notes\/(\d+)$/);
   if (noteDel && method === 'DELETE') {
     const id = parseInt(noteDel[1]);
-    await db.prepare('DELETE FROM note_comments WHERE note_id = ?').run(id);
-    await db.prepare('DELETE FROM vendor_notes WHERE note_id = ?').run(id);
+    try { await db.prepare('DELETE FROM note_comments WHERE note_id = ?').run(id); } catch(_) {}
+    await db.prepare('DELETE FROM vendor_notes WHERE id = ?').run(id);
     ok(res, { deleted: id });
     return;
   }
@@ -8105,9 +8152,13 @@ async function handleRequest(req, res) {
       if (!items.length) { fail(res, 400, 'items 배열 필요'); return; }
       const txn = db.transaction(async () => {
         await db.exec('DELETE FROM china_inventory');
-        const ins = db.prepare('INSERT INTO china_inventory (product_code, product_name, cn_stock, incoming_qty, incoming_date) VALUES (?,?,?,?,?)');
+        const ins = db.prepare('INSERT INTO china_inventory (product_code, product_name, cn_stock, incoming_qty, incoming_date, po_no, order_qty, order_date, due_date, received_qty, unproduced_qty, is_complete) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
         for (const r of items) {
-          await ins.run(r.product_code, r.product_name || '', r.cn_stock || 0, r.incoming_qty || 0, r.incoming_date || '');
+          await ins.run(
+            r.product_code, r.product_name || '', r.cn_stock || 0, r.incoming_qty || 0, r.incoming_date || '',
+            r.po_no || '', r.order_qty || 0, r.order_date || '', r.due_date || '',
+            r.received_qty || 0, r.unproduced_qty || 0, r.is_complete || 'N'
+          );
         }
       });
       await txn();
@@ -8733,7 +8784,7 @@ async function handleRequest(req, res) {
   if (pathname === '/api/product-notes' && method === 'GET') {
     const rows = await db.prepare('SELECT * FROM product_notes').all();
     const map = {};
-    rows.forEach(r => { map[r.product_code] = { note_type: r.note_type, note_text: r.note_text }; });
+    rows.forEach(r => { map[r.product_code] = { note_type: r.note_type, note_text: r.note_text, op_category: r.op_category || '' }; });
     ok(res, map);
     return;
   }
@@ -8744,12 +8795,55 @@ async function handleRequest(req, res) {
     const b = await readJSON(req);
     const noteType = b.note_type || '';
     const noteText = b.note_text || '';
-    if (!noteType && !noteText) {
+    const opCategory = b.op_category || '';
+    if (!noteType && !noteText && !opCategory) {
       await db.prepare('DELETE FROM product_notes WHERE product_code=?').run(code);
     } else {
-      await db.prepare('INSERT INTO product_notes (product_code, note_type, note_text, updated_at) VALUES (?,?,?,datetime(\'now\',\'localtime\')) ON CONFLICT(product_code) DO UPDATE SET note_type=excluded.note_type, note_text=excluded.note_text, updated_at=excluded.updated_at').run(code, noteType, noteText);
+      await db.prepare("INSERT INTO product_notes (product_code, note_type, note_text, op_category, updated_at) VALUES (?,?,?,?,datetime('now','localtime')) ON CONFLICT(product_code) DO UPDATE SET note_type=excluded.note_type, note_text=excluded.note_text, op_category=excluded.op_category, updated_at=excluded.updated_at").run(code, noteType, noteText, opCategory);
     }
     ok(res, { saved: true, product_code: code });
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  원장 매핑 API (ledger_code_map)
+  // ════════════════════════════════════════════════════════════════════
+
+  if (pathname === '/api/ledger-map' && method === 'GET') {
+    try {
+      const vendorCode = parsed.searchParams.get('vendor_code') || '';
+      let rows;
+      if (vendorCode) {
+        rows = await db.prepare('SELECT * FROM ledger_code_map WHERE vendor_code=? ORDER BY vendor_item_code').all(vendorCode);
+      } else {
+        rows = await db.prepare('SELECT * FROM ledger_code_map ORDER BY vendor_code, vendor_item_code').all();
+      }
+      ok(res, rows);
+    } catch (e) { fail(res, 500, e.message); }
+    return;
+  }
+
+  if (pathname === '/api/ledger-map' && method === 'POST') {
+    try {
+      const b = await readJSON(req);
+      const items = b.items || [];
+      for (const it of items) {
+        if (!it.vendor_code || !it.vendor_item_code || !it.xerp_item_code) continue;
+        await db.prepare("INSERT INTO ledger_code_map (vendor_code, vendor_item_code, vendor_item_name, xerp_item_code, xerp_item_name) VALUES (?,?,?,?,?) ON CONFLICT(vendor_code, vendor_item_code) DO UPDATE SET xerp_item_code=excluded.xerp_item_code, xerp_item_name=excluded.xerp_item_name, vendor_item_name=excluded.vendor_item_name").run(
+          it.vendor_code, it.vendor_item_code, it.vendor_item_name || '', it.xerp_item_code, it.xerp_item_name || ''
+        );
+      }
+      ok(res, { saved: items.length });
+    } catch (e) { fail(res, 500, e.message); }
+    return;
+  }
+
+  if (pathname === '/api/ledger-map' && method === 'DELETE') {
+    try {
+      const b = await readJSON(req);
+      await db.prepare('DELETE FROM ledger_code_map WHERE vendor_code=? AND vendor_item_code=?').run(b.vendor_code, b.vendor_item_code);
+      ok(res, { deleted: true });
+    } catch (e) { fail(res, 500, e.message); }
     return;
   }
 
@@ -9582,7 +9676,7 @@ async function handleRequest(req, res) {
     // 생산재고 = 전체 assembly 합산
     const totalAssemblyStmt = db.prepare("SELECT COALESCE(SUM(qty),0) as total FROM gift_set_transactions WHERE set_id=? AND tx_type='assembly'");
     // 오늘 생산량
-    const todayAssemblyStmt = db.prepare("SELECT COALESCE(SUM(qty),0) as total FROM gift_set_transactions WHERE set_id=? AND tx_type='assembly' AND date(created_at)=date('now','localtime')");
+    const todayAssemblyStmt = db.prepare("SELECT COALESCE(SUM(qty),0) as total FROM gift_set_transactions WHERE set_id=? AND tx_type='assembly' AND created_at::date=CURRENT_DATE");
 
     // XERP 출고재고: 캐시 사용 (10분 간격 갱신)
     const now = Date.now();
@@ -9616,21 +9710,23 @@ async function handleRequest(req, res) {
     const xerpShipments = giftSetShipmentCache;
 
     // 금일 출고 (오늘 날짜 shipped된 스케줄)
-    const todayShipStmt = db.prepare("SELECT COALESCE(SUM(shipped_qty),0) as total FROM gift_shipment_schedule WHERE set_id=? AND ship_date=date('now','localtime') AND status='shipped'");
+    const todayStr = new Date().toLocaleDateString('en-CA');
+    const day7Str = new Date(Date.now() + 7*86400000).toLocaleDateString('en-CA');
+    const todayShipStmt = db.prepare("SELECT COALESCE(SUM(shipped_qty),0) as total FROM gift_shipment_schedule WHERE set_id=? AND ship_date=? AND status='shipped'");
     // 출고 예정 (오늘~7일, 미출고 planned)
-    const upcomingShipStmt = db.prepare("SELECT ship_date, SUM(planned_qty) as qty FROM gift_shipment_schedule WHERE set_id=? AND status='planned' AND ship_date >= date('now','localtime') AND ship_date <= date('now','localtime','+7 days') GROUP BY ship_date ORDER BY ship_date");
-    const upcomingTotalStmt = db.prepare("SELECT COALESCE(SUM(planned_qty),0) as total FROM gift_shipment_schedule WHERE set_id=? AND status='planned' AND ship_date >= date('now','localtime') AND ship_date <= date('now','localtime','+7 days')");
+    const upcomingShipStmt = db.prepare("SELECT ship_date, SUM(planned_qty) as qty FROM gift_shipment_schedule WHERE set_id=? AND status='planned' AND ship_date >= ? AND ship_date <= ? GROUP BY ship_date ORDER BY ship_date");
+    const upcomingTotalStmt = db.prepare("SELECT COALESCE(SUM(planned_qty),0) as total FROM gift_shipment_schedule WHERE set_id=? AND status='planned' AND ship_date >= ? AND ship_date <= ?");
 
     for (const s of sets) {
       s.bom = await bomStmt.all(s.id);
-      const totalAssembly = await totalAssemblyStmt.get(s.id).total;
-      const todayAssembly = await todayAssemblyStmt.get(s.id).total;
+      const totalAssembly = (await totalAssemblyStmt.get(s.id))?.total || 0;
+      const todayAssembly = (await todayAssemblyStmt.get(s.id))?.total || 0;
       const xerpCode = (s.xerp_code || '').trim();
       const totalShipped = xerpCode ? (xerpShipments[xerpCode] || 0) : 0;
       // 금일 출고 + 출고예정
-      const todayShipped = await todayShipStmt.get(s.id).total;
-      const upcomingDays = await upcomingShipStmt.all(s.id);
-      const upcomingTotal = await upcomingTotalStmt.get(s.id).total;
+      const todayShipped = (await todayShipStmt.get(s.id, todayStr))?.total || 0;
+      const upcomingDays = await upcomingShipStmt.all(s.id, todayStr, day7Str);
+      const upcomingTotal = (await upcomingTotalStmt.get(s.id, todayStr, day7Str))?.total || 0;
       // 재고 계산
       s.production_stock = totalAssembly;                              // 생산재고 (조립 누적)
       s.shipped_stock = totalShipped;                                  // 출고재고 (XERP 누적)
@@ -9641,6 +9737,14 @@ async function handleRequest(req, res) {
       s.remaining_stock = s.base_stock + totalAssembly - totalShipped; // 잔여재고
       s.available_stock = s.remaining_stock - upcomingTotal;           // 가용재고 (잔여 - 출고예정)
       s.current_stock = s.remaining_stock;
+      // 소비기한 관련: 최소 소비기한과 D-day 계산
+      const expiryRows = await db.prepare("SELECT expiry_date, SUM(qty) as qty FROM gift_set_transactions WHERE set_id=? AND tx_type IN ('assembly','base') AND expiry_date!='' AND expiry_date IS NOT NULL GROUP BY expiry_date ORDER BY expiry_date").all(s.id);
+      s.expiry_batches = expiryRows.filter(r => r.expiry_date);
+      if (s.expiry_date) {
+        const today = new Date().toISOString().slice(0, 10);
+        const daysLeft = Math.ceil((new Date(s.expiry_date) - new Date(today)) / 86400000);
+        s.expiry_days_left = daysLeft;
+      }
     }
     ok(res, sets);
     return;
@@ -9649,13 +9753,13 @@ async function handleRequest(req, res) {
   // POST /api/gift-sets — 세트 등록
   if (pathname === '/api/gift-sets' && method === 'POST') {
     const body = await readJSON(req);
-    const { set_code, set_name, description, base_stock, xerp_code, bom } = body;
+    const { set_code, set_name, description, base_stock, xerp_code, bom, expiry_date } = body;
     if (!set_code || !set_name) { fail(res, 400, '세트코드와 이름은 필수입니다'); return; }
     const existing = await db.prepare('SELECT id FROM gift_sets WHERE set_code=?').get(set_code);
     if (existing) { fail(res, 409, '이미 존재하는 세트코드입니다'); return; }
     const initStock = parseInt(base_stock) || 0;
-    const result = await db.prepare('INSERT INTO gift_sets (set_code, set_name, description, base_stock, current_stock, xerp_code) VALUES (?,?,?,?,?,?)').run(set_code, set_name, description || '', initStock, initStock, xerp_code || '');
-    const setId = result.lastInsertRowid;
+    const result = await db.prepare('INSERT INTO gift_sets (set_code, set_name, description, base_stock, current_stock, xerp_code, expiry_date) VALUES (?,?,?,?,?,?,?) RETURNING id').get(set_code, set_name, description || '', initStock, initStock, xerp_code || '', expiry_date || '');
+    const setId = result.id;
     if (initStock > 0) {
       await db.prepare('INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)').run(setId, 'base', initStock, body.operator || '', '기초재고 설정');
     }
@@ -9697,14 +9801,21 @@ async function handleRequest(req, res) {
   if (gsTx && method === 'POST') {
     const id = parseInt(gsTx[1]);
     const body = await readJSON(req);
-    const { tx_type, qty, operator, memo } = body;
+    const { tx_type, qty, operator, memo, expiry_date } = body;
     if (!['base', 'assembly', 'shipment', 'adjust'].includes(tx_type)) { fail(res, 400, '유효하지 않은 거래유형'); return; }
     const amount = parseInt(qty);
     if (!amount || amount <= 0) { fail(res, 400, '수량은 1 이상이어야 합니다'); return; }
     const gs = await db.prepare('SELECT * FROM gift_sets WHERE id=?').get(id);
     if (!gs) { fail(res, 404, '세트를 찾을 수 없습니다'); return; }
     const txRun = db.transaction(async () => {
-      await db.prepare('INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)').run(id, tx_type, amount, operator || '', memo || '');
+      await db.prepare('INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo, expiry_date) VALUES (?,?,?,?,?,?)').run(id, tx_type, amount, operator || '', memo || '', expiry_date || '');
+      // 소비기한 갱신: 가장 가까운 소비기한을 세트에 저장 (assembly 입고 시)
+      if (expiry_date && (tx_type === 'assembly' || tx_type === 'base')) {
+        const currentExpiry = gs.expiry_date || '';
+        if (!currentExpiry || expiry_date < currentExpiry) {
+          await db.prepare("UPDATE gift_sets SET expiry_date=? WHERE id=?").run(expiry_date, id);
+        }
+      }
       let newStock;
       if (tx_type === 'base') {
         newStock = amount;
@@ -10442,10 +10553,17 @@ async function handleRequest(req, res) {
       result.sameMonthLastYear.gift = { sales: 0, orders: 0, qty: 0 };
     }
 
-    // 합산 + MoM/YoY (XERP + DD + 더기프트)
-    result.today.total = { sales: (result.today.xerp.sales || 0) + (result.today.dd.sales || 0) + (result.today.gift.sales || 0), orders: (result.today.xerp.orders || 0) + (result.today.dd.orders || 0) + (result.today.gift.orders || 0) };
-    result.thisMonth.total = { sales: (result.thisMonth.xerp.sales || 0) + (result.thisMonth.dd.sales || 0) + (result.thisMonth.gift.sales || 0), orders: (result.thisMonth.xerp.orders || 0) + (result.thisMonth.dd.orders || 0) + (result.thisMonth.gift.orders || 0) };
-    result.lastMonth.total = { sales: (result.lastMonth.xerp.sales || 0) + (result.lastMonth.dd.sales || 0) + (result.lastMonth.gift.sales || 0), orders: (result.lastMonth.xerp.orders || 0) + (result.lastMonth.dd.orders || 0) + (result.lastMonth.gift.orders || 0) };
+    // 법인별 분리 합산 (바른손 = XERP + 더기프트, 디얼디어 = DD)
+    result.today.barunson = { sales: (result.today.xerp.sales||0) + (result.today.gift.sales||0), orders: (result.today.xerp.orders||0) + (result.today.gift.orders||0) };
+    result.today.deardear = { sales: result.today.dd.sales||0, orders: result.today.dd.orders||0 };
+    result.thisMonth.barunson = { sales: (result.thisMonth.xerp.sales||0) + (result.thisMonth.gift.sales||0), orders: (result.thisMonth.xerp.orders||0) + (result.thisMonth.gift.orders||0) };
+    result.thisMonth.deardear = { sales: result.thisMonth.dd.sales||0, orders: result.thisMonth.dd.orders||0 };
+    result.lastMonth.barunson = { sales: (result.lastMonth.xerp.sales||0) + (result.lastMonth.gift.sales||0), orders: (result.lastMonth.xerp.orders||0) + (result.lastMonth.gift.orders||0) };
+    result.lastMonth.deardear = { sales: result.lastMonth.dd.sales||0, orders: result.lastMonth.dd.orders||0 };
+    // 그룹 합계 (참고용 — UI에서는 법인별 분리 표시)
+    result.today.total = { sales: result.today.barunson.sales + result.today.deardear.sales, orders: result.today.barunson.orders + result.today.deardear.orders };
+    result.thisMonth.total = { sales: result.thisMonth.barunson.sales + result.thisMonth.deardear.sales, orders: result.thisMonth.barunson.orders + result.thisMonth.deardear.orders };
+    result.lastMonth.total = { sales: result.lastMonth.barunson.sales + result.lastMonth.deardear.sales, orders: result.lastMonth.barunson.orders + result.lastMonth.deardear.orders };
     result.sameMonthLastYear.total = { sales: (result.sameMonthLastYear.xerp.sales || 0) + (result.sameMonthLastYear.dd.sales || 0) + (result.sameMonthLastYear.gift.sales || 0), orders: (result.sameMonthLastYear.xerp.orders || 0) + (result.sameMonthLastYear.dd.orders || 0) + (result.sameMonthLastYear.gift.orders || 0) };
     const tmSales = result.thisMonth.total.sales, lmSales = result.lastMonth.total.sales;
     const sylySales = result.sameMonthLastYear.total.sales;
@@ -12485,14 +12603,59 @@ async function handleRequest(req, res) {
     const search = qs.get('search') || '';
     let where = '1=1';
     const params = [];
-    if (vendor) { where += ' AND vendor_name = ?'; params.push(vendor); }
-    if (search) { where += ' AND (product_code LIKE ? OR product_name LIKE ?)'; params.push('%'+search+'%','%'+search+'%'); }
-    const items = db.prepare(`SELECT m.* FROM material_prices m
+    if (vendor) { where += ' AND m.vendor_name = ?'; params.push(vendor); }
+    if (search) { where += ' AND (m.product_code LIKE ? OR m.product_name LIKE ?)'; params.push('%'+search+'%','%'+search+'%'); }
+    const items = await db.prepare(`SELECT m.* FROM material_prices m
       INNER JOIN (SELECT product_code, vendor_name, MAX(apply_month) AS max_month FROM material_prices GROUP BY product_code, vendor_name) g
       ON m.product_code=g.product_code AND m.vendor_name=g.vendor_name AND m.apply_month=g.max_month
       WHERE ${where} ORDER BY m.vendor_name, m.product_code`).all(...params);
     const vendors = (await db.prepare('SELECT DISTINCT vendor_name FROM material_prices ORDER BY vendor_name').all()).map(r => r.vendor_name);
     ok(res, { items, vendors, count: items.length }); return;
+  }
+
+  // ── GET /api/material-price/trend ── 품목별 단가추이 (월별)
+  if (pathname === '/api/material-price/trend' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    try {
+      // 모든 적용월 가져오기
+      const monthRows = await db.prepare('SELECT DISTINCT apply_month FROM material_prices WHERE apply_month != \'\' ORDER BY apply_month').all();
+      const months = monthRows.map(r => r.apply_month);
+
+      // 품목별+제지사별 전체 이력
+      const allRows = await db.prepare(`
+        SELECT product_code, product_name, vendor_name, apply_month, apply_price, list_price
+        FROM material_prices WHERE apply_month != '' ORDER BY product_code, vendor_name, apply_month
+      `).all();
+
+      // 그룹핑: product_code + vendor_name 조합별
+      const groups = {};
+      for (const r of allRows) {
+        const key = r.product_code + '||' + r.vendor_name;
+        if (!groups[key]) groups[key] = { product_code: r.product_code, product_name: r.product_name, vendor_name: r.vendor_name, monthly_prices: {} };
+        groups[key].monthly_prices[r.apply_month] = r.apply_price || r.list_price || 0;
+        if (r.product_name) groups[key].product_name = r.product_name;
+      }
+
+      // 변동 계산 (최초 vs 최종)
+      const items = Object.values(groups).map(g => {
+        const validMonths = months.filter(m => g.monthly_prices[m] && g.monthly_prices[m] > 0);
+        let change = null, change_pct = null;
+        if (validMonths.length >= 2) {
+          const first = g.monthly_prices[validMonths[0]];
+          const last = g.monthly_prices[validMonths[validMonths.length - 1]];
+          change = Math.round(last - first);
+          change_pct = first > 0 ? Math.round((last - first) / first * 1000) / 10 : null;
+        }
+        return { ...g, change, change_pct };
+      });
+
+      ok(res, { months, items, count: items.length });
+    } catch (e) {
+      console.error('material-price/trend 오류:', e.message);
+      fail(res, 500, e.message);
+    }
+    return;
   }
 
   // ── GET /api/material-price/compare ── XERP 실매입가 vs 단가표 비교
@@ -12557,6 +12720,89 @@ async function handleRequest(req, res) {
     });
 
     ok(res, { comparison, sources, from, to, totalXerp: xerpItems.length, totalMatched: comparison.filter(c=>c.matched).length }); return;
+  }
+
+  // ── GET /api/material-price/xerp-trend ── XERP 실매입 단가 월별 추이 (거래처별/품목별)
+  if (pathname === '/api/material-price/xerp-trend' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증 필요'); return; }
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const months = parseInt(qs.get('months') || '12');
+    const vendorFilter = qs.get('vendor') || '';
+    const search = qs.get('search') || '';
+    // 거래처 코드→이름 매핑
+    const vendorCodeMap = {'2015259':'대한통상','2100005':'두성종이','2100013':'삼원특수지상사','2100006':'서경','2013391':'한솔PNS'};
+    const vendorCodes = Object.keys(vendorCodeMap);
+    try {
+      const pool = await ensureXerpPool();
+      const now = new Date();
+      const startDate = new Date(now.getFullYear(), now.getMonth() - months + 1, 1);
+      const from = startDate.getFullYear() + String(startDate.getMonth()+1).padStart(2,'0') + '01';
+      const to = now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') + String(now.getDate()).padStart(2,'0');
+
+      const req2 = pool.request().input('from', from).input('to', to);
+      let extraWhere = '';
+      if (vendorFilter) {
+        // 거래처명으로 코드 역매핑
+        const matchCode = Object.entries(vendorCodeMap).find(([c,n]) => n.includes(vendorFilter));
+        if (matchCode) { extraWhere += " AND RTRIM(h.CsCode) = @vendorCode"; req2.input('vendorCode', matchCode[0]); }
+      }
+      if (search) { extraWhere += " AND (RTRIM(i.ItemCode) LIKE @search OR RTRIM(i.ItemSpec) LIKE @search)"; req2.input('search', '%'+search+'%'); }
+
+      const r = await req2.query(`
+        SELECT RTRIM(h.CsCode) AS vendor_code, RTRIM(i.ItemCode) AS item_code,
+               MAX(RTRIM(i.ItemSpec)) AS item_spec,
+               LEFT(h.OrderDate,6) AS ym,
+               SUM(i.OrderQty) AS total_qty, SUM(i.OrderAmnt) AS total_amt,
+               CASE WHEN SUM(i.OrderQty)>0 THEN SUM(i.OrderAmnt)/SUM(i.OrderQty) ELSE 0 END AS avg_price
+        FROM poOrderHeader h WITH(NOLOCK)
+        JOIN poOrderItem i WITH(NOLOCK) ON h.SiteCode=i.SiteCode AND h.OrderNo=i.OrderNo
+        WHERE h.SiteCode='BK10' AND h.OrderDate>=@from AND h.OrderDate<=@to
+          AND RTRIM(h.CsCode) IN ('2015259','2100005','2100013','2100006','2013391') ${extraWhere}
+        GROUP BY RTRIM(h.CsCode), RTRIM(i.ItemCode), LEFT(h.OrderDate,6)
+        ORDER BY RTRIM(h.CsCode), RTRIM(i.ItemCode), LEFT(h.OrderDate,6)
+      `);
+
+      // 품목명 보충
+      const pi = getProductInfo();
+      const nameMap = {};
+      if (pi) { for (const [, info] of Object.entries(pi)) { const mc=(info['원자재코드']||'').trim(); const mn=(info['원재료용지명']||info['원재료명']||'').trim(); if(mc&&mn&&!nameMap[mc]) nameMap[mc]=mn; } }
+
+      // 월 목록
+      const monthSet = new Set();
+      const rows = r.recordset || [];
+      rows.forEach(row => monthSet.add(row.ym));
+      const monthList = [...monthSet].sort();
+
+      // 그룹핑: vendor_code + item_code
+      const groups = {};
+      for (const row of rows) {
+        const vName = vendorCodeMap[row.vendor_code] || row.vendor_code;
+        const key = vName + '||' + row.item_code;
+        if (!groups[key]) groups[key] = { item_code: row.item_code, item_name: nameMap[row.item_code] || row.item_spec || row.item_code, vendor_name: vName, monthly: {} };
+        groups[key].monthly[row.ym] = { qty: row.total_qty, amt: row.total_amt, avg_price: Math.round(row.avg_price) };
+      }
+
+      // 변동 계산
+      const items = Object.values(groups).map(g => {
+        const validMonths = monthList.filter(m => g.monthly[m] && g.monthly[m].avg_price > 0);
+        let change = null, change_pct = null;
+        if (validMonths.length >= 2) {
+          const first = g.monthly[validMonths[0]].avg_price;
+          const last = g.monthly[validMonths[validMonths.length - 1]].avg_price;
+          change = last - first;
+          change_pct = first > 0 ? Math.round((last - first) / first * 1000) / 10 : null;
+        }
+        return { ...g, change, change_pct };
+      });
+
+      const vendors = [...new Set(Object.values(groups).map(g => g.vendor_name))].sort();
+      ok(res, { months: monthList, items, vendors, count: items.length, from, to });
+    } catch (e) {
+      console.error('material-price/xerp-trend 오류:', e.message);
+      fail(res, 500, 'XERP 매입단가 조회 실패: ' + e.message);
+    }
+    return;
   }
 
   // ── DELETE /api/material-price ── 원재료 단가 삭제
@@ -13293,7 +13539,10 @@ async function handleRequest(req, res) {
       }
     } catch(_){ sources.dd='error'; }
 
-    const totalSales = salesKpi.total_sales + barKpi.total_revenue + ddKpi.total_sales;
+    // 법인별 매출 분리 (바른손 vs 디얼디어)
+    const barunsonSales = salesKpi.total_sales + barKpi.total_revenue;  // 바른손 법인
+    const ddSales = ddKpi.total_sales;                                   // 디얼디어 법인
+    const totalSales = barunsonSales + ddSales;                          // 그룹 합계(참고용)
     const totalCost = barKpi.total_cost + salesKpi.total_fee;
     const grossProfit = totalSales - totalCost;
     const marginRate = totalSales > 0 ? Math.round(grossProfit/totalSales*1000)/10 : 0;
@@ -13381,7 +13630,7 @@ async function handleRequest(req, res) {
 
     ok(res, {
       sources, period: { start: s, end: e, month: (now.getMonth()+1)+'월', year: now.getFullYear() },
-      sales: { ...salesKpi, bar: barKpi, dd: ddKpi, total: totalSales, gross_profit: grossProfit, margin_rate: marginRate, growth: salesGrowth },
+      sales: { ...salesKpi, bar: barKpi, dd: ddKpi, total: totalSales, barunson_total: barunsonSales, dd_total: ddSales, gross_profit: grossProfit, margin_rate: marginRate, growth: salesGrowth },
       purchasing: poKpi, inventory: invKpi, production: prodKpi,
       accounting: acctKpi, tasks: taskKpi, approvals: approvalKpi,
       quality: defectKpi, cost: costKpi, equipment: eqKpi
