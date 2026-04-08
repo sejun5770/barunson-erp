@@ -1102,11 +1102,25 @@ try {
 } catch(e) { console.warn('[entity-migration] DD 정리 오류:', e.message); }
 
 // ── 기존 거래 데이터 backfill (legal_entity NULL/'' → 'barunson') ──
-try {
-  for (const tbl of _entityTables) {
+for (const tbl of _entityTables) {
+  try {
     await db.prepare(`UPDATE ${tbl} SET legal_entity='barunson' WHERE legal_entity IS NULL OR legal_entity=''`).run();
-  }
-} catch(e) { console.warn('[entity-migration] backfill 오류:', e.message); }
+  } catch(e) { /* 컬럼 없으면 무시 */ }
+}
+
+// ── 컬럼 존재 여부 점검 (PG 권한 부족으로 ALTER 실패한 테이블 대응) ──
+// 운영 PG의 일부 테이블은 owner가 아니라서 ALTER TABLE이 silent fail함.
+// 컬럼이 실제로 있는 테이블만 entity 필터/저장을 적용해서 페이지 깨짐을 방지.
+const _hasEntity = {};
+for (const tbl of _entityTables) {
+  try {
+    const r = await db.prepare(
+      "SELECT 1 AS x FROM information_schema.columns WHERE table_name=? AND column_name='legal_entity'"
+    ).get(tbl);
+    _hasEntity[tbl] = !!r;
+  } catch(e) { _hasEntity[tbl] = false; }
+}
+console.log('[entity] legal_entity 컬럼 존재 여부:', _hasEntity);
 
 // ── 납품 스케줄 테이블 ──
 await db.exec(`CREATE TABLE IF NOT EXISTS vendor_shipment_schedule (
@@ -3684,11 +3698,11 @@ async function handleRequest(req, res) {
     const entity = parsed.searchParams.get('entity') || '';
     let sql = 'SELECT * FROM products';
     const params = [];
-    if (entity && entity !== 'all') {
+    if (entity && entity !== 'all' && _hasEntity.products) {
       sql += ' WHERE legal_entity=?';
       params.push(entity);
     }
-    sql += ' ORDER BY legal_entity, origin, product_code';
+    sql += ' ORDER BY origin, product_code';
     const rows = await db.prepare(sql).all(...params);
     ok(res, rows);
     return;
@@ -3699,10 +3713,18 @@ async function handleRequest(req, res) {
     if (!b.product_code) { fail(res, 400, 'product_code required'); return; }
     const entity = (b.legal_entity === 'dd') ? 'dd' : 'barunson';
     try {
-      const info = await db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo, legal_entity) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        b.product_code, b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', entity
-      );
+      let info;
+      if (_hasEntity.products) {
+        info = await db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo, legal_entity) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          b.product_code, b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
+          b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', entity
+        );
+      } else {
+        info = await db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          b.product_code, b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
+          b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||''
+        );
+      }
       ok(res, { id: info.lastInsertRowid });
     } catch(e) {
       fail(res, 400, e.message.includes('UNIQUE') ? '이미 등록된 품목코드입니다' : e.message);
@@ -3715,10 +3737,17 @@ async function handleRequest(req, res) {
     const id = parseInt(prodPut[1]);
     const b = await readJSON(req);
     const entity = (b.legal_entity === 'dd') ? 'dd' : 'barunson';
-    await db.prepare(`UPDATE products SET product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?, legal_entity=?, updated_at=datetime('now','localtime') WHERE id=?`).run(
-      b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-      b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', entity, id
-    );
+    if (_hasEntity.products) {
+      await db.prepare(`UPDATE products SET product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?, legal_entity=?, updated_at=datetime('now','localtime') WHERE id=?`).run(
+        b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
+        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', entity, id
+      );
+    } else {
+      await db.prepare(`UPDATE products SET product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?, updated_at=datetime('now','localtime') WHERE id=?`).run(
+        b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
+        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', id
+      );
+    }
     // op_category → product_notes 동기화
     if (b.op_category) {
       const prod = await db.prepare('SELECT product_code FROM products WHERE id=?').get(id);
@@ -3753,7 +3782,8 @@ async function handleRequest(req, res) {
     const items = body.items || [];
     if (!items.length) { fail(res, 400, 'items required'); return; }
 
-    const upsert = db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, memo, op_category, legal_entity)
+    const upsert = _hasEntity.products
+      ? db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, memo, op_category, legal_entity)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(product_code) DO UPDATE SET
         product_name=CASE WHEN excluded.product_name='' THEN products.product_name ELSE excluded.product_name END,
@@ -3767,6 +3797,20 @@ async function handleRequest(req, res) {
         memo=CASE WHEN excluded.memo='' THEN products.memo ELSE excluded.memo END,
         op_category=CASE WHEN excluded.op_category='' THEN products.op_category ELSE excluded.op_category END,
         legal_entity=CASE WHEN excluded.legal_entity='' THEN products.legal_entity ELSE excluded.legal_entity END,
+        updated_at=datetime('now','localtime')`)
+      : db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, memo, op_category)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(product_code) DO UPDATE SET
+        product_name=CASE WHEN excluded.product_name='' THEN products.product_name ELSE excluded.product_name END,
+        brand=CASE WHEN excluded.brand='' THEN products.brand ELSE excluded.brand END,
+        origin=CASE WHEN excluded.origin='' THEN products.origin ELSE excluded.origin END,
+        material_code=CASE WHEN excluded.material_code='' THEN products.material_code ELSE excluded.material_code END,
+        material_name=CASE WHEN excluded.material_name='' THEN products.material_name ELSE excluded.material_name END,
+        cut_spec=CASE WHEN excluded.cut_spec='' THEN products.cut_spec ELSE excluded.cut_spec END,
+        jopan=CASE WHEN excluded.jopan='' THEN products.jopan ELSE excluded.jopan END,
+        paper_maker=CASE WHEN excluded.paper_maker='' THEN products.paper_maker ELSE excluded.paper_maker END,
+        memo=CASE WHEN excluded.memo='' THEN products.memo ELSE excluded.memo END,
+        op_category=CASE WHEN excluded.op_category='' THEN products.op_category ELSE excluded.op_category END,
         updated_at=datetime('now','localtime')`);
 
     // op_category → product_notes 동기화용
@@ -3778,12 +3822,13 @@ async function handleRequest(req, res) {
       for (const it of items) {
         if (!it.product_code) continue;
         const existing = await db.prepare('SELECT id FROM products WHERE product_code=?').get(it.product_code);
-        await upsert.run(
+        const _bArgs = [
           it.product_code, it.product_name||'', it.brand||'', it.origin||'한국',
           it.material_code||'', it.material_name||'', it.cut_spec||'', it.jopan||'',
-          it.paper_maker||'', it.memo||'', it.op_category||'',
-          (it.legal_entity === 'dd') ? 'dd' : 'barunson'
-        );
+          it.paper_maker||'', it.memo||'', it.op_category||''
+        ];
+        if (_hasEntity.products) _bArgs.push((it.legal_entity === 'dd') ? 'dd' : 'barunson');
+        await upsert.run(..._bArgs);
         // op_category가 있으면 product_notes에도 동기화
         if (it.op_category) await upsertNote.run(it.product_code, it.op_category);
         if (existing) updated++; else inserted++;
@@ -4637,13 +4682,15 @@ async function handleRequest(req, res) {
       // PO 생성
       const poNumber = await generatePoNumber();
       // origin 결정
-      const _aoOriginProd = await db.prepare('SELECT origin, legal_entity FROM products WHERE product_code=?').get(item.product_code);
+      const _aoOriginProd = await db.prepare(`SELECT ${_hasEntity.products ? 'origin, legal_entity' : 'origin'} FROM products WHERE product_code=?`).get(item.product_code);
       const _aoOrigin = (_aoOriginProd && _aoOriginProd.origin) || '한국';
       const _aoEntity = (_aoOriginProd && _aoOriginProd.legal_entity === 'dd') ? 'dd' : 'barunson';
       const tx = db.transaction(async () => {
-        const hdr = await db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, legal_entity, po_date) VALUES (?,?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(
-          poNumber, '자동발주', resolvedVendor, 'draft', orderQty, '필수 자동발주', _aoOrigin, _aoEntity
-        );
+        const hdr = _hasEntity.po_header
+          ? await db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, legal_entity, po_date) VALUES (?,?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(
+              poNumber, '자동발주', resolvedVendor, 'draft', orderQty, '필수 자동발주', _aoOrigin, _aoEntity)
+          : await db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, po_date) VALUES (?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(
+              poNumber, '자동발주', resolvedVendor, 'draft', orderQty, '필수 자동발주', _aoOrigin);
         await db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?,?,?,?,?,?,?)').run(
           hdr.lastInsertRowid, item.product_code, p['브랜드'] || '', '', orderQty, '', '자동발주'
         );
@@ -4801,8 +4848,9 @@ async function handleRequest(req, res) {
   // GET /api/procurement/dashboard — origin별 파이프라인 요약 (entity 필터 지원)
   if (pathname === '/api/procurement/dashboard' && method === 'GET') {
     const entity = parsed.searchParams.get('entity') || 'all';
-    const entityClause = (entity && entity !== 'all') ? ' AND legal_entity=?' : '';
-    const entityParams = (entity && entity !== 'all') ? [entity] : [];
+    const _useEnt = _hasEntity.po_header && entity && entity !== 'all';
+    const entityClause = _useEnt ? ' AND legal_entity=?' : '';
+    const entityParams = _useEnt ? [entity] : [];
     // 디디는 더기프트가 없음
     const origins = (entity === 'dd') ? ['한국', '중국'] : ['한국', '중국', '더기프트'];
     const result = {};
@@ -4811,7 +4859,10 @@ async function handleRequest(req, res) {
       const byStatus = await db.prepare(`SELECT status, COUNT(*) AS c FROM po_header WHERE origin=?${entityClause} GROUP BY status`).all(org, ...entityParams);
       const partial = await db.prepare(`SELECT COUNT(*) AS c FROM po_header WHERE origin=? AND status='partial'${entityClause}`).get(org, ...entityParams);
       const overdue = await db.prepare(`SELECT COUNT(*) AS c FROM po_header WHERE origin=? AND status NOT IN ('received','cancelled','completed') AND due_date != '' AND due_date::date < CURRENT_DATE${entityClause}`).get(org, ...entityParams);
-      const recentPo = await db.prepare(`SELECT po_id, po_number, vendor_name, status, due_date as expected_date, po_date, total_qty, legal_entity FROM po_header WHERE origin=?${entityClause} ORDER BY created_at DESC LIMIT 5`).all(org, ...entityParams);
+      const _recentCols = _hasEntity.po_header
+        ? 'po_id, po_number, vendor_name, status, due_date as expected_date, po_date, total_qty, legal_entity'
+        : 'po_id, po_number, vendor_name, status, due_date as expected_date, po_date, total_qty';
+      const recentPo = await db.prepare(`SELECT ${_recentCols} FROM po_header WHERE origin=?${entityClause} ORDER BY created_at DESC LIMIT 5`).all(org, ...entityParams);
       const rcvRate = await db.prepare(`
         SELECT COALESCE(SUM(i.received_qty),0) AS received, COALESCE(SUM(i.ordered_qty),0) AS ordered
         FROM po_items i JOIN po_header h ON h.po_id=i.po_id WHERE h.origin=? AND h.status NOT IN ('cancelled','draft')${entityClause.replace('legal_entity','h.legal_entity')}
@@ -4825,11 +4876,13 @@ async function handleRequest(req, res) {
         recent: recentPo
       };
     }
-    // 법인별 합계
-    const entityTotals = {};
-    for (const ent of ['barunson', 'dd']) {
-      const r = await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE legal_entity=?").get(ent);
-      entityTotals[ent] = Number(r.c);
+    // 법인별 합계 (컬럼 있을 때만)
+    const entityTotals = { barunson: 0, dd: 0 };
+    if (_hasEntity.po_header) {
+      for (const ent of ['barunson', 'dd']) {
+        const r = await db.prepare("SELECT COUNT(*) AS c FROM po_header WHERE legal_entity=?").get(ent);
+        entityTotals[ent] = Number(r.c);
+      }
     }
     // 중국 선적/더기프트 포장 (바른컴퍼니 전용)
     const shipments = (entity === 'dd') ? [] : await db.prepare("SELECT * FROM china_shipment_log WHERE status NOT IN ('completed','cancelled') ORDER BY eta_date ASC LIMIT 10").all();
@@ -4846,7 +4899,7 @@ async function handleRequest(req, res) {
     let where = "WHERE 1=1";
     const params = [];
     if (origin) { where += " AND h.origin=?"; params.push(origin); }
-    if (entity && entity !== 'all') { where += " AND h.legal_entity=?"; params.push(entity); }
+    if (entity && entity !== 'all' && _hasEntity.po_header) { where += " AND h.legal_entity=?"; params.push(entity); }
     if (status) { where += " AND h.status=?"; params.push(status); }
     else { where += " AND h.status NOT IN ('cancelled','draft')"; }
     const rows = await db.prepare(`
@@ -5528,10 +5581,13 @@ async function handleRequest(req, res) {
 
     // 새 PO 생성
     const totalQty = oldItems.reduce((s, it) => s + (it.ordered_qty || 0), 0);
-    const info = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, origin, legal_entity, po_date)
-      VALUES (?, ?, ?, 'sent', ?, ?, ?, ?, ?, date('now','localtime'))`).run(
-      poNumber, oldPO.po_type, oldPO.vendor_name, oldPO.due_date || oldPO.expected_date || '', totalQty, `재발주 (원본: ${oldPO.po_number})`, oldPO.origin || '', oldPO.legal_entity || 'barunson'
-    );
+    const info = _hasEntity.po_header
+      ? await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, origin, legal_entity, po_date)
+          VALUES (?, ?, ?, 'sent', ?, ?, ?, ?, ?, date('now','localtime'))`).run(
+          poNumber, oldPO.po_type, oldPO.vendor_name, oldPO.due_date || oldPO.expected_date || '', totalQty, `재발주 (원본: ${oldPO.po_number})`, oldPO.origin || '', oldPO.legal_entity || 'barunson')
+      : await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, origin, po_date)
+          VALUES (?, ?, ?, 'sent', ?, ?, ?, ?, date('now','localtime'))`).run(
+          poNumber, oldPO.po_type, oldPO.vendor_name, oldPO.due_date || oldPO.expected_date || '', totalQty, `재발주 (원본: ${oldPO.po_number})`, oldPO.origin || '');
     const newPoId = info.lastInsertRowid;
 
     // 품목 복사
@@ -6085,7 +6141,7 @@ async function handleRequest(req, res) {
     if (parsed.searchParams.get('vendor_name')) { q += ' AND vendor_name=?'; args.push(parsed.searchParams.get('vendor_name')); }
     if (parsed.searchParams.get('po_id')) { q += ' AND po_id=?'; args.push(parsed.searchParams.get('po_id')); }
     const _tdEnt = parsed.searchParams.get('entity');
-    if (_tdEnt && _tdEnt !== 'all') { q += ' AND legal_entity=?'; args.push(_tdEnt); }
+    if (_tdEnt && _tdEnt !== 'all' && _hasEntity.trade_document) { q += ' AND legal_entity=?'; args.push(_tdEnt); }
     q += ' ORDER BY created_at DESC';
     ok(res, await db.prepare(q).all(...args));
     return;
@@ -6849,7 +6905,7 @@ async function handleRequest(req, res) {
     if (from) { sql += ' AND po_date >= ?'; params.push(from); }
     if (to) { sql += ' AND po_date <= ?'; params.push(to); }
     if (origin) { sql += ' AND origin = ?'; params.push(origin); }
-    if (entity && entity !== 'all') { sql += ' AND legal_entity = ?'; params.push(entity); }
+    if (entity && entity !== 'all' && _hasEntity.po_header) { sql += ' AND legal_entity = ?'; params.push(entity); }
     sql += ' ORDER BY po_date DESC, po_id DESC';
     const rows = await db.prepare(sql).all(...params);
     // 상태 영→한 정규화
@@ -6903,14 +6959,17 @@ async function handleRequest(req, res) {
         const poNumber = await generatePoNumber();
         const totalQty = vendorItems.reduce((s, it) => s + (parseInt(it.qty) || 0), 0);
         // origin/legal_entity: 첫 번째 품목 기준
-        const _bulkFirstProd = await db.prepare('SELECT origin, legal_entity FROM products WHERE product_code=?').get(vendorItems[0].product_code || '');
+        const _bulkFirstProd = await db.prepare(`SELECT ${_hasEntity.products ? 'origin, legal_entity' : 'origin'} FROM products WHERE product_code=?`).get(vendorItems[0].product_code || '');
         const _bulkOrigin = (_bulkFirstProd && _bulkFirstProd.origin) || '';
         const _bulkEntity = (_bulkFirstProd && _bulkFirstProd.legal_entity === 'dd') ? 'dd' : 'barunson';
         const tx = db.transaction(async () => {
-          const hdr = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, material_status, process_status, origin, legal_entity, po_date)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
-            poNumber, '원재료', vendorName, 'draft', totalQty, '엑셀 일괄 발주', 'sent', 'waiting', _bulkOrigin, _bulkEntity, today
-          );
+          const hdr = _hasEntity.po_header
+            ? await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, material_status, process_status, origin, legal_entity, po_date)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+                poNumber, '원재료', vendorName, 'draft', totalQty, '엑셀 일괄 발주', 'sent', 'waiting', _bulkOrigin, _bulkEntity, today)
+            : await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, material_status, process_status, origin, po_date)
+                VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+                poNumber, '원재료', vendorName, 'draft', totalQty, '엑셀 일괄 발주', 'sent', 'waiting', _bulkOrigin, today);
           for (const it of vendorItems) {
             await db.prepare('INSERT INTO po_items (po_id, product_code, ordered_qty, notes) VALUES (?,?,?,?)').run(
               hdr.lastInsertRowid, it.product_code || '', parseInt(it.qty) || 0, '엑셀 일괄'
@@ -6951,7 +7010,8 @@ async function handleRequest(req, res) {
     let poOrigin = body.origin || '';
     let poEntity = body.legal_entity || '';
     if ((!poOrigin || !poEntity) && items.length) {
-      const firstProd = await db.prepare('SELECT origin, legal_entity FROM products WHERE product_code=?').get(items[0].product_code || '');
+      const _selCols = _hasEntity.products ? 'origin, legal_entity' : 'origin';
+      const firstProd = await db.prepare(`SELECT ${_selCols} FROM products WHERE product_code=?`).get(items[0].product_code || '');
       if (firstProd) {
         if (!poOrigin && firstProd.origin) poOrigin = firstProd.origin;
         if (!poEntity && firstProd.legal_entity) poEntity = firstProd.legal_entity;
@@ -6977,7 +7037,10 @@ async function handleRequest(req, res) {
     const poNumber = await generatePoNumber();
 
     const tx = db.transaction(async () => {
-      const info = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, legal_entity, po_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now','localtime'))`).run(
+      const _poSql = _hasEntity.po_header
+        ? `INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, legal_entity, po_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now','localtime'))`
+        : `INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, po_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now','localtime'))`;
+      const _poArgs = [
         poNumber,
         body.po_type || 'material',
         vendorName,
@@ -6988,9 +7051,10 @@ async function handleRequest(req, res) {
         body.process_step || 0,
         body.parent_po_id || null,
         body.process_chain || '',
-        poOrigin,
-        poEntity
-      );
+        poOrigin
+      ];
+      if (_hasEntity.po_header) _poArgs.push(poEntity);
+      const info = await db.prepare(_poSql).run(..._poArgs);
       const poId = info.lastInsertRowid;
       const itemStmt = db.prepare(`INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?, ?, ?, ?, ?, ?, ?)`);
       for (const it of items) {
@@ -7181,9 +7245,10 @@ async function handleRequest(req, res) {
 
   if (pathname === '/api/receipts' && method === 'GET') {
     const qs = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
+    const _rcvEntCol = _hasEntity.po_header ? ', h.legal_entity' : '';
     let sql = `
       SELECT r.id as receipt_id, r.po_id, r.receipt_date, r.received_by, r.notes, r.created_at,
-             r.batch_no, h.po_number, h.vendor_name, h.origin, h.legal_entity
+             r.batch_no, h.po_number, h.vendor_name, h.origin${_rcvEntCol}
       FROM receipts r
       LEFT JOIN po_header h ON r.po_id = h.po_id
     `;
@@ -7191,7 +7256,7 @@ async function handleRequest(req, res) {
     const params = [];
     if (qs.po_id) { conditions.push('r.po_id = $' + (params.length+1)); params.push(parseInt(qs.po_id)); }
     if (qs.origin) { conditions.push('h.origin = $' + (params.length+1)); params.push(qs.origin); }
-    if (qs.entity && qs.entity !== 'all') { conditions.push('h.legal_entity = $' + (params.length+1)); params.push(qs.entity); }
+    if (qs.entity && qs.entity !== 'all' && _hasEntity.po_header) { conditions.push('h.legal_entity = $' + (params.length+1)); params.push(qs.entity); }
     if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
     sql += ' ORDER BY r.created_at DESC';
     const rows = params.length ? await db.prepare(sql).all(...params) : await db.prepare(sql).all();
@@ -9056,10 +9121,13 @@ async function handleRequest(req, res) {
         const poNum = `PO-${today}-${String(seq++).padStart(3,'0')}`;
         const totalQty = items.reduce((s,i) => s + i.order_qty, 0);
         // origin/legal_entity: 첫 번째 품목 기준
-        const _mrpFirstProd = await db.prepare('SELECT origin, legal_entity FROM products WHERE product_code=?').get(items[0].product_code || '');
+        const _mrpSelCols = _hasEntity.products ? 'origin, legal_entity' : 'origin';
+        const _mrpFirstProd = await db.prepare(`SELECT ${_mrpSelCols} FROM products WHERE product_code=?`).get(items[0].product_code || '');
         const _mrpOrigin = (_mrpFirstProd && _mrpFirstProd.origin) || '';
         const _mrpEntity = (_mrpFirstProd && _mrpFirstProd.legal_entity === 'dd') ? 'dd' : 'barunson';
-        const r = await db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, legal_entity, po_date) VALUES (?,?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(poNum, poType, vendor, '대기', totalQty, 'MRP 자동생성', _mrpOrigin, _mrpEntity);
+        const r = _hasEntity.po_header
+          ? await db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, legal_entity, po_date) VALUES (?,?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(poNum, poType, vendor, '대기', totalQty, 'MRP 자동생성', _mrpOrigin, _mrpEntity)
+          : await db.prepare('INSERT INTO po_header (po_number, po_type, vendor_name, status, total_qty, notes, origin, po_date) VALUES (?,?,?,?,?,?,?,date(\'now\',\'localtime\'))').run(poNum, poType, vendor, '대기', totalQty, 'MRP 자동생성', _mrpOrigin);
         const poId = r.lastInsertRowid;
         for (const item of items) {
           await db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec) VALUES (?,?,?,?,?,?)').run(poId, item.product_code, '', item.process_type, item.order_qty, item.material_name);
@@ -9324,7 +9392,7 @@ async function handleRequest(req, res) {
     if (sp.get('product_code')) { q += ' AND product_code=?'; args.push(sp.get('product_code')); }
     if (sp.get('from_date'))    { q += ' AND defect_date>=?'; args.push(sp.get('from_date')); }
     if (sp.get('to_date'))      { q += ' AND defect_date<=?'; args.push(sp.get('to_date')); }
-    if (sp.get('entity') && sp.get('entity') !== 'all') { q += ' AND legal_entity=?'; args.push(sp.get('entity')); }
+    if (sp.get('entity') && sp.get('entity') !== 'all' && _hasEntity.defects) { q += ' AND legal_entity=?'; args.push(sp.get('entity')); }
     q += ' ORDER BY defect_date DESC, created_at DESC LIMIT 200';
     ok(res, await db.prepare(q).all(...args));
     return;
@@ -13856,7 +13924,7 @@ async function handleRequest(req, res) {
     if (warehouse) where += " AND warehouse='" + warehouse.replace(/'/g,'') + "'";
     if (status) where += " AND quality_status='" + status.replace(/'/g,'') + "'";
     if (search) where += " AND (batch_number LIKE '%" + search.replace(/'/g,'') + "%' OR product_name LIKE '%" + search.replace(/'/g,'') + "%')";
-    if (entity && entity !== 'all') where += " AND legal_entity='" + entity.replace(/'/g,'') + "'";
+    if (entity && entity !== 'all' && _hasEntity.batch_master) where += " AND legal_entity='" + entity.replace(/'/g,'') + "'";
     const rows = await db.prepare('SELECT *, batch_id AS id, quality_status AS status, exp_date AS expiry_date FROM batch_master WHERE '+where+' ORDER BY created_at DESC LIMIT 300').all();
     ok(res, rows); return;
   }
