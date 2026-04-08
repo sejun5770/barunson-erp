@@ -1344,13 +1344,8 @@ tbody tr:nth-child(even):hover { background: var(--sidebar-bg); }
 <nav class="sidebar-nav" id="sidebarNav">
   <div class="sb-header" style="cursor:pointer">
     <div class="sb-logo" id="sbCompanyLogo" onclick="showPage('dashboard')" title="홈으로">B</div>
-    <select id="companySelector" class="sb-logo-text sb-hide"
-      onchange="switchCompany(this.value)"
-      style="font-size:14px;font-weight:700;border:none;background:transparent;cursor:pointer;outline:none;color:var(--text-primary);padding:0;-webkit-appearance:auto;appearance:auto;max-width:130px">
-      <option value="all">◎ 전체 법인</option>
-      <option value="barunson">B 바른컴퍼니</option>
-      <option value="dd">D 디얼디어</option>
-    </select>
+    <div id="companyLabel" class="sb-logo-text sb-hide"
+      style="font-size:14px;font-weight:700;color:var(--text-primary);padding:0;max-width:140px;white-space:nowrap">바른컴퍼니/디디</div>
     <div class="sb-toggle sb-hide" onclick="event.stopPropagation();toggleSidebarCollapse()" title="사이드바 접기">&#9776;</div>
   </div>
   <div class="sb-user sb-hide" id="userInfoBar" style="display:none">
@@ -2261,6 +2256,11 @@ function closeMegaMenu() { /* no-op */ }
       </div>
       <div style="flex:1"></div>
       <!-- 재고운영 카테고리 -->
+      <select id="legalEntityFilter" onchange="render()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;color:#7c3aed;font-weight:600">
+        <option value="">전체 법인</option>
+        <option value="barunson">바른컴퍼니</option>
+        <option value="dd">디디</option>
+      </select>
       <select id="shipmentFilter" onchange="render()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;color:#0891b2;font-weight:600">
         <option value="">전체 출고이력</option>
         <option value="active">출고있음 (활성)</option>
@@ -6473,7 +6473,9 @@ const COMPANY_CONFIG = {
     title: '디얼디어 재고운영시스템'
   }
 };
-let _currentCompany = localStorage.getItem('erp_company') || 'all';
+// 법인 통합 모드 — 항상 'all' 고정 (바른컴퍼니 + 디디 합쳐서 표시)
+localStorage.setItem('erp_company', 'all');
+let _currentCompany = 'all';
 
 function switchCompany(companyKey) {
   if (!COMPANY_CONFIG[companyKey]) return;
@@ -7489,10 +7491,17 @@ function render(){
   const brand=document.getElementById('brandFilter')?.value||'';
   const opCat=document.getElementById('opCategoryFilter')?.value||'';
   const shipFilter=document.getElementById('shipmentFilter')?.value||'';
+  const legalEntity=document.getElementById('legalEntityFilter')?.value||'';
   let data=classified[currentTab]||[];
 
   let f=data.filter(p=>{
     if(currentOrigin!=='all'&&p._origin!==currentOrigin)return false;
+    // 법인 필터 (바른컴퍼니=한국/중국/더기프트, 디디=DD)
+    if(legalEntity){
+      const isDD=(p._origin==='DD'||p['생산지']==='DD'||p['브랜드']==='DD');
+      if(legalEntity==='dd' && !isDD)return false;
+      if(legalEntity==='barunson' && isDD)return false;
+    }
     if(brand&&(p['브랜드']||'')!==brand)return false;
     if(q){
       const c=(p['제품코드']||'').toLowerCase();
