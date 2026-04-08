@@ -1347,8 +1347,9 @@ tbody tr:nth-child(even):hover { background: var(--sidebar-bg); }
     <select id="companySelector" class="sb-logo-text sb-hide"
       onchange="switchCompany(this.value)"
       style="font-size:14px;font-weight:700;border:none;background:transparent;cursor:pointer;outline:none;color:var(--text-primary);padding:0;-webkit-appearance:auto;appearance:auto;max-width:130px">
-      <option value="barunson">바른컴퍼니</option>
-      <option value="dd">디얼디어</option>
+      <option value="all">◎ 전체 법인</option>
+      <option value="barunson">B 바른컴퍼니</option>
+      <option value="dd">D 디얼디어</option>
     </select>
     <div class="sb-toggle sb-hide" onclick="event.stopPropagation();toggleSidebarCollapse()" title="사이드바 접기">&#9776;</div>
   </div>
@@ -1521,7 +1522,8 @@ function renderSidebar() {
     var cat = _megaData[catKey]; if (!cat) return;
     // 메뉴 활성화 + 권한 체크: 카테고리 내 접근 가능 항목이 하나도 없으면 숨김
     var hasAccess = cat.items.some(function(it) {
-      if (it.companies && it.companies.indexOf(_currentCompany) < 0) return false;
+      // 법인 필터: 'all'이면 모두 표시, 특정 법인 선택 시에만 필터
+      if (_currentCompany !== 'all' && it.companies && it.companies.indexOf(_currentCompany) < 0) return false;
       if (!isMenuEnabled(it.page)) return false;
       if (typeof canAccess !== 'function') return true;
       if (it.page === 'user-mgmt') return currentAuthUser && currentAuthUser.role === 'admin';
@@ -1536,8 +1538,8 @@ function renderSidebar() {
     h += '</div>';
     h += '<div class="sb-cat-items'+(isOpen?'':' collapsed')+'" id="sbCat_'+catKey+'" style="max-height:'+(isOpen?'500px':'0')+'">';
     cat.items.forEach(function(it) {
-      // 법인 필터링 — 다른 법인 전용 메뉴 숨김
-      if (it.companies && it.companies.indexOf(_currentCompany) < 0) return;
+      // 법인 필터링 — 'all'이면 모두 표시, 특정 법인 선택 시에만 필터
+      if (_currentCompany !== 'all' && it.companies && it.companies.indexOf(_currentCompany) < 0) return;
       // 메뉴 비활성화 체크
       if (!isMenuEnabled(it.page)) return;
       // 권한 체크
@@ -6385,7 +6387,15 @@ if (_BASE_PATH) {
 }
 
 // ===== 법인 분리 (Company Separation) =====
+// B안: 모든 메뉴/데이터 통합 + 행 단위 뱃지/색으로 구분, 상단 필터로 선택적 필터링
 const COMPANY_CONFIG = {
+  all: {
+    key: 'all', name: '전체 법인', short: '전체', logo: '◎',
+    logoGradient: 'linear-gradient(135deg,#64748b,#334155)',
+    color: '#475569',
+    origins: ['한국', '중국', '더기프트', 'DD'],
+    title: '바른손 통합 재고운영시스템'
+  },
   barunson: {
     key: 'barunson', name: '바른컴퍼니', short: '바른손', logo: 'B',
     logoGradient: 'linear-gradient(135deg,#2F81F7,#1A6DE0)',
@@ -6401,7 +6411,7 @@ const COMPANY_CONFIG = {
     title: '디얼디어 재고운영시스템'
   }
 };
-let _currentCompany = localStorage.getItem('erp_company') || 'barunson';
+let _currentCompany = localStorage.getItem('erp_company') || 'all';
 
 function switchCompany(companyKey) {
   if (!COMPANY_CONFIG[companyKey]) return;
@@ -6438,6 +6448,11 @@ function getCompanyCfg() { return COMPANY_CONFIG[_currentCompany] || COMPANY_CON
 
 // 홈 대시보드 메가메뉴 법인 필터링
 function filterHomeMegaByCompany() {
+  // 'all' 모드면 전부 표시
+  if (_currentCompany === 'all') {
+    document.querySelectorAll('.hm-item[data-page]').forEach(el => { el.style.display = ''; });
+    return;
+  }
   // _megaData에서 companies 필드가 있는 아이템의 page를 수집
   const hiddenPages = new Set();
   Object.values(_megaData || {}).forEach(cat => {
@@ -7460,8 +7475,12 @@ function render(){
   const show=f.slice(0,300);
   tb.innerHTML=show.map(p=>{
     const code=p['제품코드']||'';
-    const rowBg=p._status==='urgent'?'background:#fff5f5':p._status==='danger'?'background:#fffbeb':'';
-    return`<tr style="${rowBg}">`+cols.map(c=>renderCell(c,p)).join('')+'</tr>';
+    const isDD=(p['생산지']==='DD'||p['운영구분']==='DD'||p['브랜드']==='DD');
+    let rowBg=p._status==='urgent'?'background:#fff5f5':p._status==='danger'?'background:#fffbeb':'';
+    // DD 법인 품목은 좌측에 핑크 보더로 시각적 구분 (전체 모드에서 바른손과 섞였을 때 즉시 식별)
+    const ddBorder=isDD?'border-left:3px solid #ec4899;':'';
+    if(isDD && !rowBg) rowBg='background:#fdf2f8;';
+    return`<tr style="${ddBorder}${rowBg}">`+cols.map(c=>renderCell(c,p)).join('')+'</tr>';
   }).join('');
 
   const orderedCount=Object.entries(orderQty).filter(([k,v])=>v>0).length;
@@ -17662,19 +17681,20 @@ function switchPMTab(tab){
 
 // 회사 전환 시 품목관리 탭/버튼 가시성 업데이트
 function applyPMCompanyFilter(){
-  const company = (typeof _currentCompany !== 'undefined') ? _currentCompany : 'barunson';
-  // 탭 가시성
+  const company = (typeof _currentCompany !== 'undefined') ? _currentCompany : 'all';
+  const isAll = company === 'all';
+  // 탭 가시성 — all 모드면 전부 표시
   document.querySelectorAll('#pmTabBar [data-pm-company]').forEach(el=>{
-    el.style.display = (el.dataset.pmCompany === company) ? '' : 'none';
+    el.style.display = (isAll || el.dataset.pmCompany === company) ? '' : 'none';
   });
-  // 동기화 버튼 가시성
+  // 동기화 버튼 가시성 — all 모드면 전부 표시
   document.querySelectorAll('#pmSyncButtons [data-pm-company]').forEach(el=>{
-    el.style.display = (el.dataset.pmCompany === company) ? '' : 'none';
+    el.style.display = (isAll || el.dataset.pmCompany === company) ? '' : 'none';
   });
-  // 현재 활성 탭이 해당 회사 탭이 아니면 첫 번째 가시 탭으로 전환
+  // 현재 활성 탭이 숨겨진 경우만 첫 번째 가시 탭으로 전환
   const activeTab = document.querySelector('#pmTabBar .tab.active');
-  if(!activeTab || activeTab.dataset.pmCompany !== company){
-    const firstVisible = document.querySelector(`#pmTabBar [data-pm-company="${company}"]`);
+  if(activeTab && activeTab.style.display === 'none'){
+    const firstVisible = Array.from(document.querySelectorAll('#pmTabBar [data-pm-tab]')).find(el=>el.style.display !== 'none');
     if(firstVisible){
       switchPMTab(firstVisible.dataset.pmTab);
     }
@@ -18057,7 +18077,9 @@ function renderProductMgmt(){
     const opCat = p.op_category || '';
     const opColors = {'운영품목':['#059669','#ecfdf5'],'소진후단종':['#dc2626','#fef2f2'],'이력없음':['#d97706','#fffbeb'],'기타':['#6b7280','#f3f4f6']};
     const [opFg,opBg] = opColors[opCat] || ['#94a3b8','#f8fafc'];
-    return`<tr>
+    const isDD = p.origin === 'DD';
+    const trStyle = isDD ? 'background:#fdf2f8;border-left:3px solid #ec4899' : '';
+    return`<tr style="${trStyle}">
       <td style="${cellStyle};font-weight:600" title="${esc(p.product_code)}">${esc(p.product_code)}</td>
       <td style="${cellStyle}" title="${esc(p.product_name||'')}">${esc(p.product_name||'')}${newBadge}</td>
       <td style="${cellStyle}">${esc(p.brand||'')}</td>

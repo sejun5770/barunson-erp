@@ -3754,9 +3754,12 @@ async function handleRequest(req, res) {
   if (pathname === '/api/xerp-inventory' && method === 'GET') {
     if (!await ensureXerpPool()) { fail(res, 503, 'XERP 데이터베이스 미연결 (재연결 시도 중)'); return; }
 
-    // 법인 파라미터 (barunson/dd)
-    const company = parsed.searchParams.get('company') || 'barunson';
-    const originFilter = company === 'dd' ? "origin = 'DD'" : "origin != 'DD'";
+    // 법인 파라미터 (all/barunson/dd)
+    const company = parsed.searchParams.get('company') || 'all';
+    // all = 모두, dd = DD만, barunson = DD 제외
+    const originFilter = company === 'dd'
+      ? "origin = 'DD'"
+      : (company === 'barunson' ? "origin != 'DD'" : "1=1");
 
     // 10분 캐시 — 법인별 분리
     const now = Date.now();
@@ -3771,7 +3774,10 @@ async function handleRequest(req, res) {
     try {
       // 품목관리 DB에서 등록된 제품코드 리스트 로드 (법인별 필터)
       // DD는 inactive 품목도 포함 (DD 동기화 시 is_display='F'인 제품은 inactive로 등록됨)
-      const statusFilter = company === 'dd' ? "status IN ('active','inactive')" : "status = 'active'";
+      // all 모드: 바른컴퍼니는 active만, DD는 active+inactive 모두
+      const statusFilter = (company === 'dd' || company === 'all')
+        ? "(status = 'active' OR (status = 'inactive' AND origin = 'DD'))"
+        : "status = 'active'";
       const registeredProducts = await db.prepare(`SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products WHERE ${statusFilter} AND ${originFilter}`).all();
       if (!registeredProducts.length) {
         ok(res, { products: [], updated: new Date().toISOString(), count: 0, message: '품목관리에 등록된 제품이 없습니다. 먼저 품목을 등록해주세요.' });
