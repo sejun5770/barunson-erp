@@ -5074,6 +5074,7 @@ function closeMegaMenu() { /* no-op */ }
     <div class="tab" data-defect-tab="inspection" onclick="switchDefectTab('inspection')">🔍 수입검사</div>
     <div class="tab" data-defect-tab="ncr" onclick="switchDefectTab('ncr')">📋 부적합(NCR)</div>
     <div class="tab" data-defect-tab="scorecard" onclick="switchDefectTab('scorecard')">⭐ 협력사 평가</div>
+    <div class="tab" data-defect-tab="settlement" onclick="switchDefectTab('settlement')">💰 정산관리</div>
   </div>
 
   <!-- TAB: 불량 현황 -->
@@ -5327,6 +5328,50 @@ function closeMegaMenu() { /* no-op */ }
       <button class="btn btn-primary btn-sm" onclick="calculateScorecard()">📊 평가 실행</button>
     </div>
     <div id="scorecardContent"></div>
+  </div>
+
+  <!-- TAB: 정산관리 -->
+  <div id="defect-tab-settlement" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 style="font-size:16px;font-weight:600;margin:0">불량 클레임 자동 상계</h3>
+      <div style="display:flex;gap:8px">
+        <select id="settlementFilterStatus" onchange="loadSettlements()">
+          <option value="">전체 상태</option>
+          <option value="open" selected>미정산</option>
+          <option value="partial">부분정산</option>
+          <option value="closed">완료</option>
+          <option value="cancelled">취소</option>
+        </select>
+        <button class="btn btn-sm" onclick="syncSettlements()">🔄 동기화</button>
+        <button class="btn btn-primary btn-sm" onclick="loadSettlements()">조회</button>
+      </div>
+    </div>
+    <div id="settlementKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px"></div>
+    <div id="settlementContent"></div>
+  </div>
+
+  <!-- 정산 적용 모달 -->
+  <div id="settlementApplyModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center">
+    <div style="background:#fff;border-radius:8px;padding:24px;width:480px;max-width:90vw">
+      <h3 style="margin:0 0 16px;font-size:16px;font-weight:600">정산 적용</h3>
+      <div id="settlementApplyInfo" style="background:#f8fafc;padding:12px;border-radius:6px;margin-bottom:16px;font-size:13px"></div>
+      <div class="form-group">
+        <label>적용 발주번호 (선택)</label>
+        <input type="text" id="settlementApplyPo" placeholder="예: PO-20260408-001">
+      </div>
+      <div class="form-group">
+        <label>정산 금액 *</label>
+        <input type="number" id="settlementApplyAmount" min="0" step="1">
+      </div>
+      <div class="form-group">
+        <label>메모</label>
+        <textarea id="settlementApplyNotes" rows="2" placeholder="처리 사유"></textarea>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn" onclick="document.getElementById('settlementApplyModal').style.display='none'">취소</button>
+        <button class="btn btn-primary" onclick="confirmApplySettlement()">정산 적용</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -15496,6 +15541,7 @@ async function loadTradeDocManagement() {
                 <span style="font-size:11px;padding:1px 6px;border-radius:3px;background:${statusBg};font-weight:600">${statusLabel}</span>
                 ${doc.has_price_change ? '<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:#fef2f2;color:#dc2626;font-weight:600">🔴 단가변동</span>' : ''}
                 ${doc.price_diff ? '<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:#fef3c7;color:#92400e">⚠️수정</span>' : ''}
+                <button onclick="event.stopPropagation();reverseTradeDocToPO(${doc.id})" title="이 명세서로 신규 발주서 생성" style="font-size:11px;padding:2px 8px;border-radius:4px;background:#6366f1;color:#fff;border:none;cursor:pointer;font-weight:600">↩ 발주서 생성</button>
               </div>
               <div style="text-align:right;font-size:12px">
                 <span style="font-weight:700">${doc.total_amount.toLocaleString()}</span>
@@ -15532,6 +15578,26 @@ async function loadTradeDocManagement() {
   } catch(e) {
     container.innerHTML = `<div style="text-align:center;color:#ef4444;padding:40px">오류: ${e.message}</div>`;
   }
+}
+
+// 거래명세서 → 신규 발주서 역변환
+async function reverseTradeDocToPO(docId) {
+  if (!confirm('이 거래명세서로 신규 발주서를 생성하시겠습니까?\n(수정된 단가가 있으면 그 단가로 생성됩니다)')) return;
+  try {
+    const res = await fetch(`/api/trade-document/${docId}/create-po`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const d = await res.json();
+    if (d.ok) {
+      const data = d.data || d;
+      alert(`신규 발주서가 생성되었습니다.\n발주번호: ${data.po_number}\n품목 ${data.items_count}건, 총수량 ${data.total_qty}`);
+      loadTradeDocManagement();
+    } else {
+      alert('실패: ' + (d.error || '알 수 없는 오류'));
+    }
+  } catch(e) { alert('오류: ' + e.message); }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -20025,7 +20091,7 @@ function renderDefectList(defects) {
 }
 
 function switchDefectTab(tab) {
-  ['list','register','detail','inspection','ncr','scorecard'].forEach(t => {
+  ['list','register','detail','inspection','ncr','scorecard','settlement'].forEach(t => {
     const el = document.getElementById('defect-tab-' + t);
     if (el) el.style.display = (t === tab) ? '' : 'none';
     const tabEl = document.querySelector(`[data-defect-tab="${t}"]`);
@@ -20037,6 +20103,172 @@ function switchDefectTab(tab) {
   if (tab === 'inspection') loadInspections();
   if (tab === 'ncr') loadNCRList();
   if (tab === 'scorecard') loadScorecard();
+  if (tab === 'settlement') loadSettlements();
+}
+
+// ========== 정산관리 ==========
+async function loadSettlements() {
+  const status = document.getElementById('settlementFilterStatus').value;
+  const kpiEl = document.getElementById('settlementKpi');
+  const contentEl = document.getElementById('settlementContent');
+  contentEl.innerHTML = '<div style="text-align:center;padding:40px;color:#94a3b8">불러오는 중...</div>';
+  try {
+    const [sumRes, listRes] = await Promise.all([
+      fetch('/api/settlements/summary').then(r => r.json()),
+      fetch('/api/settlements' + (status ? '?status=' + status : '')).then(r => r.json())
+    ]);
+    const sumPayload = sumRes.data || sumRes;
+    const listPayload = listRes.data || listRes;
+    renderSettlementKpi(sumPayload);
+    renderSettlementTable(listPayload.items || listPayload || []);
+  } catch(e) {
+    contentEl.innerHTML = '<div style="color:#ef4444;padding:20px">오류: ' + e.message + '</div>';
+  }
+}
+
+function renderSettlementKpi(s) {
+  const t = (s && s.totals) || {};
+  const byVendor = (s && s.byVendor) || [];
+  const totalClaim   = byVendor.reduce((a,b) => a + Number(b.total_claim||0), 0);
+  const totalSettled = byVendor.reduce((a,b) => a + Number(b.total_settled||0), 0);
+  const won = n => Number(n).toLocaleString('ko-KR') + '원';
+  document.getElementById('settlementKpi').innerHTML = `
+    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px"><div style="font-size:11px;color:#64748b">미정산 업체</div><div style="font-size:22px;font-weight:700">${Number(t.vendors||0)}</div></div>
+    <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:14px"><div style="font-size:11px;color:#991b1b">미정산 건수</div><div style="font-size:22px;font-weight:700;color:#b91c1c">${Number(t.open_count||0)}</div></div>
+    <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:14px"><div style="font-size:11px;color:#991b1b">미정산 잔액</div><div style="font-size:18px;font-weight:700;color:#b91c1c">${won(t.open_balance||0)}</div></div>
+    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px"><div style="font-size:11px;color:#64748b">총 청구액</div><div style="font-size:18px;font-weight:700">${won(totalClaim)}</div></div>
+    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#166534">정산 완료액</div><div style="font-size:18px;font-weight:700;color:#15803d">${won(totalSettled)}</div></div>
+  `;
+}
+
+function renderSettlementTable(items) {
+  const contentEl = document.getElementById('settlementContent');
+  if (!items || items.length === 0) {
+    contentEl.innerHTML = '<div style="text-align:center;padding:40px;color:#94a3b8">정산 데이터가 없습니다. "🔄 동기화" 버튼으로 기존 불량에서 가져올 수 있습니다.</div>';
+    return;
+  }
+  // 거래처별 그룹
+  const grouped = {};
+  items.forEach(it => {
+    const v = it.vendor_name || '미지정';
+    if (!grouped[v]) grouped[v] = [];
+    grouped[v].push(it);
+  });
+  const won = n => Number(n || 0).toLocaleString('ko-KR');
+  const statusBadge = s => {
+    const map = { open:['#fee2e2','#991b1b','미정산'], partial:['#fef3c7','#92400e','부분정산'], closed:['#dcfce7','#166534','완료'], cancelled:['#f1f5f9','#64748b','취소'] };
+    const m = map[s] || ['#f1f5f9','#64748b',s];
+    return `<span style="background:${m[0]};color:${m[1]};padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600">${m[2]}</span>`;
+  };
+  const esc = v => String(v||'').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+  let html = '';
+  Object.keys(grouped).sort().forEach(vendor => {
+    const list = grouped[vendor];
+    const sumOpen = list.reduce((a,b) => a + Number(b.balance || 0), 0);
+    html += `
+      <div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:12px">
+        <div style="padding:12px 16px;border-bottom:1px solid #e5e7eb;background:#f8fafc;display:flex;justify-content:space-between;align-items:center">
+          <div style="font-weight:600">${esc(vendor)} <span style="font-size:11px;color:#64748b">(${list.length}건)</span></div>
+          <div style="font-size:13px"><span style="color:#64748b">미정산 합계: </span><span style="font-weight:700;color:#b91c1c">${won(sumOpen)}원</span></div>
+        </div>
+        <table style="width:100%;font-size:13px">
+          <thead><tr style="background:#f8fafc;color:#64748b;font-size:11px">
+            <th style="padding:8px;text-align:left">불량번호</th>
+            <th style="padding:8px;text-align:right">청구액</th>
+            <th style="padding:8px;text-align:right">정산액</th>
+            <th style="padding:8px;text-align:right">잔액</th>
+            <th style="padding:8px;text-align:center">상태</th>
+            <th style="padding:8px;text-align:left">적용 발주</th>
+            <th style="padding:8px;text-align:center">작업</th>
+          </tr></thead>
+          <tbody>
+            ${list.map(it => `
+              <tr style="border-top:1px solid #f1f5f9">
+                <td style="padding:8px">${esc(it.defect_number || '-')}</td>
+                <td style="padding:8px;text-align:right">${won(it.claim_amount)}</td>
+                <td style="padding:8px;text-align:right;color:#15803d">${won(it.settled_amount)}</td>
+                <td style="padding:8px;text-align:right;font-weight:600;color:#b91c1c">${won(it.balance)}</td>
+                <td style="padding:8px;text-align:center">${statusBadge(it.status)}</td>
+                <td style="padding:8px;font-size:11px;color:#64748b">${esc(it.applied_po_number || '-')}</td>
+                <td style="padding:8px;text-align:center">
+                  ${it.status === 'open' || it.status === 'partial' ? `
+                    <button class="btn btn-sm btn-primary" onclick="openApplyModal(${it.id}, ${Number(it.balance)||0}, '${esc(it.defect_number)}', '${esc(vendor)}')">정산</button>
+                    <button class="btn btn-sm" onclick="cancelSettlement(${it.id})" style="color:#b91c1c">취소</button>
+                  ` : '-'}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  });
+  contentEl.innerHTML = html;
+}
+
+let _currentSettlementId = null;
+function openApplyModal(id, balance, defectNo, vendor) {
+  _currentSettlementId = id;
+  document.getElementById('settlementApplyInfo').innerHTML = `
+    <div><strong>${defectNo}</strong> · ${vendor}</div>
+    <div style="margin-top:4px">잔액: <strong style="color:#b91c1c">${Number(balance).toLocaleString('ko-KR')}원</strong></div>
+  `;
+  document.getElementById('settlementApplyAmount').value = balance;
+  document.getElementById('settlementApplyAmount').max = balance;
+  document.getElementById('settlementApplyPo').value = '';
+  document.getElementById('settlementApplyNotes').value = '';
+  document.getElementById('settlementApplyModal').style.display = 'flex';
+}
+
+async function confirmApplySettlement() {
+  const amount = Number(document.getElementById('settlementApplyAmount').value) || 0;
+  if (amount <= 0) { alert('정산 금액을 입력하세요.'); return; }
+  const body = {
+    amount,
+    po_number: document.getElementById('settlementApplyPo').value.trim(),
+    notes: document.getElementById('settlementApplyNotes').value.trim()
+  };
+  try {
+    const res = await fetch(`/api/settlements/${_currentSettlementId}/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('settlementApplyModal').style.display = 'none';
+      loadSettlements();
+    } else {
+      alert('실패: ' + (data.error || '알 수 없는 오류'));
+    }
+  } catch(e) {
+    alert('오류: ' + e.message);
+  }
+}
+
+async function cancelSettlement(id) {
+  if (!confirm('이 정산 건을 취소하시겠습니까?')) return;
+  try {
+    const res = await fetch(`/api/settlements/${id}/cancel`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) loadSettlements();
+    else alert('실패: ' + (data.error || ''));
+  } catch(e) { alert('오류: ' + e.message); }
+}
+
+async function syncSettlements() {
+  if (!confirm('기존 불량에서 미생성 정산을 동기화합니다. 진행하시겠습니까?')) return;
+  try {
+    const res = await fetch('/api/settlements/sync', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      const created = (data.data && data.data.created) || data.created || 0;
+      alert(`${created}건 추가되었습니다.`);
+      loadSettlements();
+    } else {
+      alert('실패: ' + (data.error || ''));
+    }
+  } catch(e) { alert('오류: ' + e.message); }
 }
 
 async function submitDefect() {

@@ -1699,6 +1699,28 @@ await db.exec(`CREATE TABLE IF NOT EXISTS po_drafts (
 
 try { await db.exec("ALTER TABLE vendor_notes ADD COLUMN status TEXT DEFAULT 'open'"); } catch(_) {}
 
+// ── 불량 클레임 정산 (defect settlements) ──
+await db.exec(`CREATE TABLE IF NOT EXISTS defect_settlements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  defect_id INTEGER NOT NULL,
+  defect_number TEXT DEFAULT '',
+  vendor_name TEXT NOT NULL,
+  claim_amount REAL DEFAULT 0,
+  settled_amount REAL DEFAULT 0,
+  balance REAL DEFAULT 0,
+  status TEXT DEFAULT 'open',
+  applied_po_id INTEGER,
+  applied_po_number TEXT DEFAULT '',
+  applied_at TEXT DEFAULT '',
+  applied_by TEXT DEFAULT '',
+  notes TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+)`);
+await db.exec("CREATE INDEX IF NOT EXISTS idx_settle_vendor ON defect_settlements(vendor_name)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_settle_status ON defect_settlements(status)");
+await db.exec("CREATE INDEX IF NOT EXISTS idx_settle_defect ON defect_settlements(defect_id)");
+
 await db.exec(`CREATE TABLE IF NOT EXISTS note_comments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   note_id INTEGER NOT NULL,
@@ -6070,6 +6092,75 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // POST /api/trade-document/:id/create-po — 거래명세서 → 신규 발주서 역변환
+  // (단가 수정된 거래명세서 또는 외부 업로드 명세서로부터 새 PO 생성)
+  const tdCreatePoMatch = pathname.match(/^\/api\/trade-document\/(\d+)\/create-po$/);
+  if (tdCreatePoMatch && method === 'POST') {
+    const docId = parseInt(tdCreatePoMatch[1]);
+    const body = await readJSON(req).catch(() => ({}));
+    const doc = await db.prepare('SELECT * FROM trade_document WHERE id=?').get(docId);
+    if (!doc) { fail(res, 404, '거래명세서 없음'); return; }
+    // 우선순위: 사용자 전달 items > vendor_modified > items_json
+    let items = [];
+    try {
+      if (body.items && Array.isArray(body.items)) items = body.items;
+      else if (doc.vendor_modified_json) items = JSON.parse(doc.vendor_modified_json) || [];
+      else items = JSON.parse(doc.items_json || '[]');
+    } catch (e) { fail(res, 400, '명세서 items 파싱 실패: ' + e.message); return; }
+    if (!items.length) { fail(res, 400, 'items가 비어있습니다'); return; }
+    const vendor = body.vendor_name || doc.vendor_name || '';
+    if (!vendor) { fail(res, 400, 'vendor_name 없음'); return; }
+    const poType = body.po_type || (doc.vendor_type === 'process' ? '후공정' : '원재료');
+    const totalQty = items.reduce((s, i) => s + (Number(i.ordered_qty || i.qty || 0)), 0);
+    const totalAmt = items.reduce((s, i) => s + (Number(i.ordered_qty || i.qty || 0) * Number(i.unit_price || 0)), 0);
+    const poNum = 'PO-RV-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.floor(Math.random()*900)+100);
+    const notes = (body.notes || `거래명세서 #${docId} 역변환`) + (totalAmt ? ` (예상금액 ${Math.round(totalAmt).toLocaleString()}원)` : '');
+
+    const tx = db.transaction(async () => {
+      const info = await db.prepare(`INSERT INTO po_header
+        (po_number, po_type, vendor_name, status, due_date, total_qty, notes, parent_po_id, origin, po_date)
+        VALUES (?,?,?,?,?,?,?,?,?,date('now','localtime'))`).run(
+        poNum, poType, vendor, 'draft',
+        body.due_date || '', totalQty, notes,
+        doc.po_id || null, '거래명세서역변환'
+      );
+      const newPoId = info.lastInsertRowid;
+      const stmt = db.prepare(`INSERT INTO po_items
+        (po_id, product_code, brand, process_type, ordered_qty, spec, notes)
+        VALUES (?,?,?,?,?,?,?)`);
+      for (const it of items) {
+        const unitPrice = Number(it.unit_price || 0);
+        const noteParts = [];
+        if (it.product_name) noteParts.push(it.product_name);
+        if (unitPrice) noteParts.push(`@${unitPrice.toLocaleString()}`);
+        await stmt.run(
+          newPoId,
+          it.product_code || '',
+          it.brand || '',
+          it.process_type || '',
+          Number(it.ordered_qty || it.qty || 0),
+          it.spec || '',
+          noteParts.join(' ')
+        );
+      }
+      await db.prepare(`INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)`).run(
+        newPoId, 'created_from_trade_doc', body.actor || 'system',
+        `거래명세서 #${docId} (${doc.po_number || ''}) 에서 역변환 생성`
+      );
+      // 원본 PO에도 로그 (있다면)
+      if (doc.po_id) {
+        await db.prepare(`INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)`).run(
+          doc.po_id, 'reverse_po_created', body.actor || 'system',
+          `거래명세서 #${docId} → 신규 PO ${poNum}`
+        );
+      }
+      return newPoId;
+    });
+    const newPoId = await tx();
+    ok(res, { po_id: newPoId, po_number: poNum, total_qty: totalQty, total_amount: totalAmt, items_count: items.length });
+    return;
+  }
+
   // GET /api/trade-document/management — 거래명세서 관리 (업체별+월별 그룹, 가격변동 감지)
   if (pathname === '/api/trade-document/management' && method === 'GET') {
     const from = parsed.searchParams.get('from') || '';
@@ -9236,40 +9327,49 @@ async function handleRequest(req, res) {
       (defect_number, po_id, po_number, vendor_name, product_code, product_name,
        defect_date, defect_type, defect_qty, order_qty, severity, description,
        photo_url, claim_type, claim_amount, status)
-      VALUES (@defect_number, @po_id, @po_number, @vendor_name, @product_code, @product_name,
-              @defect_date, @defect_type, @defect_qty, @order_qty, @severity, @description,
-              @photo_url, @claim_type, @claim_amount, 'registered')`);
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'registered')`);
     const insertLog = db.prepare(`INSERT INTO defect_logs
       (defect_id, defect_number, action, from_status, to_status, actor, details)
-      VALUES (@defect_id, @defect_number, @action, @from_status, @to_status, @actor, @details)`);
+      VALUES (?,?,?,?,?,?,?)`);
 
     const tx = db.transaction(async () => {
-      const info = await insertDefect.run({
+      const info = await insertDefect.run(
         defect_number,
-        po_id: body.po_id || null,
-        po_number: body.po_number || '',
+        body.po_id || null,
+        body.po_number || '',
         vendor_name,
         product_code,
-        product_name: body.product_name || '',
+        body.product_name || '',
         defect_date,
-        defect_type: body.defect_type || '',
-        defect_qty: body.defect_qty || 0,
-        order_qty: body.order_qty || 0,
-        severity: body.severity || 'minor',
+        body.defect_type || '',
+        body.defect_qty || 0,
+        body.order_qty || 0,
+        body.severity || 'minor',
         description,
-        photo_url: body.photo_url || '',
-        claim_type: body.claim_type || '',
-        claim_amount: body.claim_amount || 0,
-      });
-      await insertLog.run({
-        defect_id: info.lastInsertRowid,
+        body.photo_url || '',
+        body.claim_type || '',
+        body.claim_amount || 0,
+      );
+      await insertLog.run(
+        info.lastInsertRowid,
         defect_number,
-        action: 'registered',
-        from_status: '',
-        to_status: 'registered',
-        actor: body.actor || '',
-        details: '불량 접수',
-      });
+        'registered',
+        '',
+        'registered',
+        body.actor || '',
+        '불량 접수',
+      );
+      // 클레임 금액 > 0 → 정산 자동 생성
+      const claimAmt = Number(body.claim_amount) || 0;
+      if (claimAmt > 0) {
+        await db.prepare(`INSERT INTO defect_settlements
+          (defect_id, defect_number, vendor_name, claim_amount, settled_amount, balance, status, notes)
+          VALUES (?,?,?,?,0,?,?,?)`).run(
+          info.lastInsertRowid, defect_number, vendor_name,
+          claimAmt, claimAmt, 'open',
+          `자동생성: ${body.claim_type || ''} ${body.description || ''}`.trim()
+        );
+      }
       return info.lastInsertRowid;
     });
     const newId = await tx();
@@ -9321,6 +9421,29 @@ async function handleRequest(req, res) {
         vals.splice(vals.length - 1, 0, today);
       }
       await db.prepare(`UPDATE defects SET ${sets.join(',')} WHERE id=?`).run(...vals);
+      // claim_amount 변경 시 settlement 동기화 (상계 적용 안 된 건만)
+      if (body.claim_amount !== undefined) {
+        const newAmt = Number(body.claim_amount) || 0;
+        const existing = await db.prepare('SELECT * FROM defect_settlements WHERE defect_id=?').get(defectId);
+        if (existing) {
+          const settled = Number(existing.settled_amount) || 0;
+          if (settled === 0) {
+            // 정산 적용 전 → 금액만 업데이트
+            const newBalance = newAmt;
+            const newStatus = newAmt > 0 ? 'open' : 'cancelled';
+            await db.prepare(`UPDATE defect_settlements SET claim_amount=?, balance=?, status=?, updated_at=datetime('now','localtime') WHERE id=?`)
+              .run(newAmt, newBalance, newStatus, existing.id);
+          }
+          // 이미 일부 정산된 건은 수정 금지 (감사 추적)
+        } else if (newAmt > 0) {
+          await db.prepare(`INSERT INTO defect_settlements
+            (defect_id, defect_number, vendor_name, claim_amount, settled_amount, balance, status, notes)
+            VALUES (?,?,?,?,0,?,?,?)`).run(
+            defectId, defect.defect_number || '', defect.vendor_name || '',
+            newAmt, newAmt, 'open', 'PUT 자동생성'
+          );
+        }
+      }
       if (statusChanged) {
         const actionLabel = body.status === 'in_progress' ? '처리 시작' :
                             body.status === 'resolved'    ? '처리 완료' : '상태 변경';
@@ -9413,6 +9536,158 @@ async function handleRequest(req, res) {
 
     const poId = await tx();
     ok(res, { po_id: poId, po_number: poNumber, defect_id: defectId, defect_number: defect.defect_number });
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  DEFECT SETTLEMENTS API (불량 클레임 자동 상계)
+  // ════════════════════════════════════════════════════════════════════
+
+  // GET /api/settlements — 정산 목록 (필터: vendor_name, status)
+  if (pathname === '/api/settlements' && method === 'GET') {
+    const sp = parsed.searchParams;
+    let q = 'SELECT * FROM defect_settlements WHERE 1=1';
+    const args = [];
+    if (sp.get('vendor_name')) { q += ' AND vendor_name=?'; args.push(sp.get('vendor_name')); }
+    if (sp.get('status'))      { q += ' AND status=?';      args.push(sp.get('status')); }
+    q += ' ORDER BY status ASC, created_at DESC LIMIT 500';
+    const rows = await db.prepare(q).all(...args);
+    // PostgreSQL bigint/numeric → number
+    rows.forEach(r => {
+      r.claim_amount = Number(r.claim_amount) || 0;
+      r.settled_amount = Number(r.settled_amount) || 0;
+      r.balance = Number(r.balance) || 0;
+    });
+    ok(res, rows);
+    return;
+  }
+
+  // GET /api/settlements/summary — 업체별 미정산 합계
+  if (pathname === '/api/settlements/summary' && method === 'GET') {
+    const byVendor = await db.prepare(`
+      SELECT vendor_name,
+        COUNT(*) FILTER (WHERE status IN ('open','partial')) as open_count,
+        COALESCE(SUM(CASE WHEN status IN ('open','partial') THEN balance ELSE 0 END), 0) as open_balance,
+        COALESCE(SUM(claim_amount), 0) as total_claim,
+        COALESCE(SUM(settled_amount), 0) as total_settled
+      FROM defect_settlements
+      GROUP BY vendor_name
+      HAVING COUNT(*) FILTER (WHERE status IN ('open','partial')) > 0
+      ORDER BY open_balance DESC
+    `).all().catch(async () => {
+      // 폴백 (FILTER 미지원 환경): 두 단계 쿼리
+      const rows = await db.prepare(`
+        SELECT vendor_name, status, claim_amount, settled_amount, balance FROM defect_settlements
+      `).all();
+      const map = {};
+      rows.forEach(r => {
+        const v = r.vendor_name;
+        if (!map[v]) map[v] = { vendor_name: v, open_count: 0, open_balance: 0, total_claim: 0, total_settled: 0 };
+        map[v].total_claim += Number(r.claim_amount) || 0;
+        map[v].total_settled += Number(r.settled_amount) || 0;
+        if (r.status === 'open' || r.status === 'partial') {
+          map[v].open_count++;
+          map[v].open_balance += Number(r.balance) || 0;
+        }
+      });
+      return Object.values(map).filter(x => x.open_count > 0).sort((a, b) => b.open_balance - a.open_balance);
+    });
+    byVendor.forEach(r => {
+      r.open_count = Number(r.open_count) || 0;
+      r.open_balance = Number(r.open_balance) || 0;
+      r.total_claim = Number(r.total_claim) || 0;
+      r.total_settled = Number(r.total_settled) || 0;
+    });
+    const totals = {
+      vendors: byVendor.length,
+      open_count: byVendor.reduce((s, r) => s + r.open_count, 0),
+      open_balance: byVendor.reduce((s, r) => s + r.open_balance, 0)
+    };
+    ok(res, { totals, byVendor });
+    return;
+  }
+
+  // POST /api/settlements/sync — defects.claim_amount > 0 중 누락분 일괄 생성 (멱등)
+  if (pathname === '/api/settlements/sync' && method === 'POST') {
+    const missing = await db.prepare(`
+      SELECT d.id, d.defect_number, d.vendor_name, d.claim_amount, d.claim_type, d.description
+      FROM defects d
+      WHERE COALESCE(d.claim_amount,0) > 0
+        AND NOT EXISTS (SELECT 1 FROM defect_settlements s WHERE s.defect_id = d.id)
+    `).all();
+    let created = 0;
+    for (const d of missing) {
+      const amt = Number(d.claim_amount) || 0;
+      if (amt <= 0) continue;
+      await db.prepare(`INSERT INTO defect_settlements
+        (defect_id, defect_number, vendor_name, claim_amount, settled_amount, balance, status, notes)
+        VALUES (?,?,?,?,0,?,?,?)`).run(
+        d.id, d.defect_number || '', d.vendor_name || '',
+        amt, amt, 'open',
+        `sync 자동생성: ${d.claim_type || ''} ${d.description || ''}`.trim()
+      );
+      created++;
+    }
+    ok(res, { created, scanned: missing.length });
+    return;
+  }
+
+  // POST /api/settlements/:id/apply — 정산 적용 (PO 또는 수동 정산)
+  const settleApplyMatch = pathname.match(/^\/api\/settlements\/(\d+)\/apply$/);
+  if (settleApplyMatch && method === 'POST') {
+    const id = parseInt(settleApplyMatch[1]);
+    const body = await readJSON(req);
+    const settle = await db.prepare('SELECT * FROM defect_settlements WHERE id=?').get(id);
+    if (!settle) { fail(res, 404, '정산 건 없음'); return; }
+    const balance = Number(settle.balance) || 0;
+    if (balance <= 0 || settle.status === 'closed' || settle.status === 'cancelled') {
+      fail(res, 400, '이미 정산 완료/취소된 건입니다'); return;
+    }
+    const applyAmt = Math.min(Number(body.amount) || balance, balance);
+    if (applyAmt <= 0) { fail(res, 400, '정산 금액 오류'); return; }
+    const newSettled = (Number(settle.settled_amount) || 0) + applyAmt;
+    const newBalance = (Number(settle.claim_amount) || 0) - newSettled;
+    const newStatus = newBalance <= 0.01 ? 'closed' : 'partial';
+    await db.prepare(`UPDATE defect_settlements
+      SET settled_amount=?, balance=?, status=?,
+          applied_po_id=COALESCE(?, applied_po_id),
+          applied_po_number=COALESCE(?, applied_po_number),
+          applied_at=datetime('now','localtime'),
+          applied_by=?,
+          notes=CASE WHEN ?='' THEN notes ELSE notes || ' | ' || ? END,
+          updated_at=datetime('now','localtime')
+      WHERE id=?`).run(
+      newSettled, newBalance, newStatus,
+      body.po_id || null, body.po_number || null,
+      body.actor || 'system',
+      body.notes || '', body.notes || '',
+      id
+    );
+    // defect 이력 로그
+    if (settle.defect_id) {
+      await db.prepare(`INSERT INTO defect_logs
+        (defect_id, defect_number, action, from_status, to_status, actor, details)
+        VALUES (?,?,?,?,?,?,?)`).run(
+        settle.defect_id, settle.defect_number,
+        '정산 적용', settle.status, newStatus,
+        body.actor || 'system',
+        `${applyAmt.toLocaleString()}원 정산` + (body.po_number ? ` (PO ${body.po_number})` : '')
+      );
+    }
+    ok(res, { id, applied: applyAmt, new_balance: newBalance, new_status: newStatus });
+    return;
+  }
+
+  // POST /api/settlements/:id/cancel — 정산 취소
+  const settleCancelMatch = pathname.match(/^\/api\/settlements\/(\d+)\/cancel$/);
+  if (settleCancelMatch && method === 'POST') {
+    const id = parseInt(settleCancelMatch[1]);
+    const body = await readJSON(req).catch(() => ({}));
+    const settle = await db.prepare('SELECT * FROM defect_settlements WHERE id=?').get(id);
+    if (!settle) { fail(res, 404, '정산 건 없음'); return; }
+    await db.prepare(`UPDATE defect_settlements SET status='cancelled', updated_at=datetime('now','localtime'),
+      notes=notes || ' | 취소: ' || ? WHERE id=?`).run(body.reason || '', id);
+    ok(res, { id, cancelled: true });
     return;
   }
 
@@ -15428,13 +15703,14 @@ async function runDeadlineAlertCheck() {
   const today = new Date().toISOString().slice(0, 10);
   console.log(`[납기알림] ${today} 실행`);
 
-  // due_date가 오늘~3일 후인 미완료 PO 조회
+  // due_date가 오늘~3일 후인 미완료 PO 조회 (PG/SQLite 양쪽 호환 위해 JS에서 날짜 계산)
+  const d3 = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
   const upcomingPOs = await db.prepare(`
     SELECT h.po_id, h.po_number, h.vendor_name, h.due_date as expected_date, h.total_qty, h.po_date
     FROM po_header h
-    WHERE h.due_date >= date('now') AND h.due_date <= date('now','+3 days')
+    WHERE h.due_date >= ? AND h.due_date <= ?
       AND h.status NOT IN ('received','cancelled','os_pending')
-  `).all();
+  `).all(today, d3);
 
   if (!upcomingPOs.length) {
     console.log('[납기알림] 임박 건 없음');
@@ -15444,13 +15720,35 @@ async function runDeadlineAlertCheck() {
   console.log(`[납기알림] 임박 ${upcomingPOs.length}건 발견`);
 
   for (const po of upcomingPOs) {
+    const dDay = Math.round((new Date(po.expected_date) - new Date(today)) / 86400000);
+
+    // 내부 알림 (사내 담당자) — 동일 PO+날짜 중복 방지
+    try {
+      const dedupLink = `procurement#po=${po.po_id}&d=${today}`;
+      const existed = await db.prepare(
+        "SELECT id FROM notifications WHERE link=? LIMIT 1"
+      ).get(dedupLink);
+      if (!existed) {
+        const tag = dDay <= 0 ? '오늘 입고예정' : `D-${dDay}`;
+        await createNotification(
+          null,
+          'po',
+          `입고임박: ${po.po_number} (${tag})`,
+          `${po.vendor_name} · 납기 ${po.expected_date} · 수량 ${po.total_qty}`,
+          dedupLink
+        );
+        console.log(`[납기알림] 내부알림 생성: ${po.po_number} (D-${dDay})`);
+      }
+    } catch (e) {
+      console.warn('[납기알림] 내부알림 실패:', e.message);
+    }
+
     const vendor = await db.prepare('SELECT email, name FROM vendors WHERE name = ?').get(po.vendor_name);
     if (!vendor || !vendor.email) {
       console.log(`[납기알림] ${po.po_number}: 거래처 이메일 없음 (${po.vendor_name})`);
       continue;
     }
 
-    const dDay = Math.round((new Date(po.expected_date) - new Date(today)) / 86400000);
     const subject = `[바른손] 납기일 D-${dDay} 리마인더 — ${po.po_number}`;
     const text = `안녕하세요, ${vendor.name} 담당자님.\n\n아래 발주건의 납기일이 ${dDay}일 남았습니다.\n\n- 발주번호: ${po.po_number}\n- 발주일: ${po.po_date}\n- 납기예정일: ${po.expected_date}\n- 수량: ${po.total_qty}\n\n납기일 준수 부탁드립니다.\n\n바른손 자재관리팀`;
 
