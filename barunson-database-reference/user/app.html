@@ -3931,11 +3931,12 @@ function closeMegaMenu() { /* no-op */ }
 <!-- PAGE: 품목관리 (Product Management) -->
 <!-- ============================================================ -->
 <div class="page" id="page-product-mgmt">
-  <div class="tab-bar" style="margin-bottom:16px">
-    <div class="tab active" data-pm-tab="한국" onclick="switchPMTab('한국')">한국</div>
-    <div class="tab" data-pm-tab="중국" onclick="switchPMTab('중국')">중국</div>
-    <div class="tab" data-pm-tab="더기프트" onclick="switchPMTab('더기프트')">더기프트</div>
-    <div class="tab" data-pm-tab="부속품" onclick="switchPMTab('부속품')">📦 부속품 관리</div>
+  <div class="tab-bar" style="margin-bottom:16px" id="pmTabBar">
+    <div class="tab active" data-pm-tab="한국" data-pm-company="barunson" onclick="switchPMTab('한국')">한국</div>
+    <div class="tab" data-pm-tab="중국" data-pm-company="barunson" onclick="switchPMTab('중국')">중국</div>
+    <div class="tab" data-pm-tab="더기프트" data-pm-company="barunson" onclick="switchPMTab('더기프트')">더기프트</div>
+    <div class="tab" data-pm-tab="부속품" data-pm-company="barunson" onclick="switchPMTab('부속품')">📦 부속품 관리</div>
+    <div class="tab" data-pm-tab="DD" data-pm-company="dd" onclick="switchPMTab('DD')" style="display:none">🎎 디얼디어</div>
   </div>
 
   <!-- 제품관리 전용 툴바 (부속품 탭에서는 숨김) -->
@@ -3959,9 +3960,9 @@ function closeMegaMenu() { /* no-op */ }
         <input type="text" id="pmSearch" placeholder="제품코드/품목명 검색" oninput="renderProductMgmt()" style="width:200px">
         <span id="pmCountBadge" style="font-size:12px;color:var(--text-muted)"></span>
       </div>
-      <div style="display:flex;gap:6px">
-        <button class="btn btn-sm" onclick="syncProductInfo()" style="background:#6366f1;color:#fff;border-color:#6366f1">ERP 동기화</button>
-        <button class="btn btn-sm" onclick="syncDDProducts()" style="background:#e11d48;color:#fff;border-color:#e11d48">DD 동기화</button>
+      <div style="display:flex;gap:6px" id="pmSyncButtons">
+        <button class="btn btn-sm" data-pm-company="barunson" onclick="syncProductInfo()" style="background:#6366f1;color:#fff;border-color:#6366f1">ERP 동기화</button>
+        <button class="btn btn-sm" data-pm-company="dd" onclick="syncDDProducts()" style="background:#e11d48;color:#fff;border-color:#e11d48;display:none">DD 동기화</button>
       </div>
       <button class="btn btn-primary btn-sm" onclick="showAddProductModal()">+ 품목 등록</button>
     </div>
@@ -17659,6 +17660,27 @@ function switchPMTab(tab){
   if(isAcc) loadAccList(); else renderProductMgmt();
 }
 
+// 회사 전환 시 품목관리 탭/버튼 가시성 업데이트
+function applyPMCompanyFilter(){
+  const company = (typeof _currentCompany !== 'undefined') ? _currentCompany : 'barunson';
+  // 탭 가시성
+  document.querySelectorAll('#pmTabBar [data-pm-company]').forEach(el=>{
+    el.style.display = (el.dataset.pmCompany === company) ? '' : 'none';
+  });
+  // 동기화 버튼 가시성
+  document.querySelectorAll('#pmSyncButtons [data-pm-company]').forEach(el=>{
+    el.style.display = (el.dataset.pmCompany === company) ? '' : 'none';
+  });
+  // 현재 활성 탭이 해당 회사 탭이 아니면 첫 번째 가시 탭으로 전환
+  const activeTab = document.querySelector('#pmTabBar .tab.active');
+  if(!activeTab || activeTab.dataset.pmCompany !== company){
+    const firstVisible = document.querySelector(`#pmTabBar [data-pm-company="${company}"]`);
+    if(firstVisible){
+      switchPMTab(firstVisible.dataset.pmTab);
+    }
+  }
+}
+
 // ===== 입출고 현황 (XERP 실시간) =====
 let shipRows = [];
 let shipGubun = 'all';
@@ -17837,6 +17859,7 @@ let pmUploadBound = false;
 async function loadProductMgmt(){
   const resp=await fetch('/api/products').then(r=>r.json());
   pmData=resp.data||resp||[];
+  applyPMCompanyFilter();
   renderProductMgmt();
 
   // 엑셀 업로드 이벤트 바인딩 (1회만)
