@@ -6503,6 +6503,137 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // GET /api/vendor-performance — 업체 종합 성과 (납기준수율 + 불량률 + 종합점수)
+  if (pathname === '/api/vendor-performance' && method === 'GET') {
+    const qs = new URL(req.url, `http://${req.headers.host}`).searchParams;
+    const today = new Date();
+    const defaultFrom = new Date(today.getFullYear(), today.getMonth() - 5, 1).toISOString().slice(0, 10); // 최근 6개월
+    const from = qs.get('from') || defaultFrom;
+    const to = qs.get('to') || today.toISOString().slice(0, 10);
+    const minOrders = parseInt(qs.get('min_orders') || '1', 10);
+
+    // 1) 발주 통계 (업체별)
+    const poStats = await db.prepare(`
+      SELECT vendor_name,
+        COUNT(*) as order_count,
+        COALESCE(SUM(total_qty), 0) as total_qty,
+        COALESCE(SUM(CASE WHEN status IN ('received','os_pending') THEN 1 ELSE 0 END), 0) as completed_count,
+        COALESCE(SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END), 0) as cancel_count
+      FROM po_header
+      WHERE po_date >= ? AND po_date <= ? AND vendor_name IS NOT NULL AND vendor_name != ''
+      GROUP BY vendor_name
+    `).all(from, to);
+
+    // 2) 납기 준수율 + 평균 리드타임 (업체별)
+    const ltMap = {};
+    for (const r of poStats) {
+      const ltRows = await db.prepare(`
+        SELECT po_date, updated_at, due_date as expected_date FROM po_header
+        WHERE vendor_name = ? AND po_date >= ? AND po_date <= ?
+          AND status IN ('received','os_pending') AND po_date IS NOT NULL AND updated_at IS NOT NULL
+      `).all(r.vendor_name, from, to);
+      let totalLT = 0, ltCount = 0, onTimeCount = 0, withExpected = 0;
+      ltRows.forEach(p => {
+        const d1 = new Date(p.po_date), d2 = new Date(p.updated_at);
+        if (d1 && d2 && d2 > d1) {
+          const days = Math.round((d2 - d1) / 86400000);
+          if (days > 0 && days < 90) { totalLT += days; ltCount++; }
+        }
+        if (p.expected_date) {
+          withExpected++;
+          if (p.updated_at <= p.expected_date + ' 23:59:59') onTimeCount++;
+        }
+      });
+      ltMap[r.vendor_name] = {
+        avg_lead_time: ltCount > 0 ? Math.round(totalLT / ltCount * 10) / 10 : 0,
+        on_time_rate: withExpected > 0 ? Math.round(onTimeCount / withExpected * 100) : null
+      };
+    }
+
+    // 3) 불량 통계 (업체별)
+    const defectStats = await db.prepare(`
+      SELECT vendor_name,
+        COUNT(*) as defect_count,
+        COALESCE(SUM(defect_qty), 0) as total_defect_qty,
+        COALESCE(SUM(claim_amount), 0) as total_claim_amount,
+        COALESCE(SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END), 0) as resolved_count
+      FROM defects
+      WHERE defect_date >= ? AND defect_date <= ?
+      GROUP BY vendor_name
+    `).all(from, to);
+    const defectMap = {};
+    defectStats.forEach(d => { defectMap[d.vendor_name] = d; });
+
+    // 4) 결합 + 종합 점수 (PostgreSQL은 bigint를 string으로 반환 → Number() 변환 필수)
+    const result = poStats
+      .map(r => ({
+        vendor_name: r.vendor_name,
+        order_count: Number(r.order_count) || 0,
+        total_qty: Number(r.total_qty) || 0,
+        completed_count: Number(r.completed_count) || 0,
+        cancel_count: Number(r.cancel_count) || 0
+      }))
+      .filter(r => r.order_count >= minOrders)
+      .map(r => {
+        const lt = ltMap[r.vendor_name] || { avg_lead_time: 0, on_time_rate: null };
+        const dfRaw = defectMap[r.vendor_name] || { defect_count: 0, total_defect_qty: 0, total_claim_amount: 0, resolved_count: 0 };
+        const df = {
+          defect_count: Number(dfRaw.defect_count) || 0,
+          total_defect_qty: Number(dfRaw.total_defect_qty) || 0,
+          total_claim_amount: Number(dfRaw.total_claim_amount) || 0,
+          resolved_count: Number(dfRaw.resolved_count) || 0
+        };
+        const defectRate = r.total_qty > 0 ? Math.round(df.total_defect_qty / r.total_qty * 1000) / 10 : 0;
+        // 종합 점수 (0~100):
+        //   납기 준수율(50%) + 품질(50%, 100 - defect_rate*5, clamp 0~100)
+        const onTime = lt.on_time_rate != null ? lt.on_time_rate : 80; // 기대일 없으면 평균값 80
+        const quality = Math.max(0, Math.min(100, 100 - defectRate * 5));
+        const score = Math.round(onTime * 0.5 + quality * 0.5);
+        let grade = 'D';
+        if (score >= 90) grade = 'A';
+        else if (score >= 75) grade = 'B';
+        else if (score >= 60) grade = 'C';
+        return {
+          vendor_name: r.vendor_name,
+          order_count: r.order_count,
+          total_qty: r.total_qty,
+          completed_count: r.completed_count,
+          cancel_count: r.cancel_count,
+          completion_rate: r.order_count > 0 ? Math.round(r.completed_count / r.order_count * 100) : 0,
+          avg_lead_time: lt.avg_lead_time,
+          on_time_rate: lt.on_time_rate,
+          defect_count: df.defect_count,
+          total_defect_qty: df.total_defect_qty,
+          total_claim_amount: df.total_claim_amount,
+          defect_resolved: df.resolved_count,
+          defect_rate: defectRate,
+          score,
+          grade
+        };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    // 요약 통계
+    const summary = {
+      total_vendors: result.length,
+      grade_a: result.filter(r => r.grade === 'A').length,
+      grade_b: result.filter(r => r.grade === 'B').length,
+      grade_c: result.filter(r => r.grade === 'C').length,
+      grade_d: result.filter(r => r.grade === 'D').length,
+      avg_score: result.length > 0 ? Math.round(result.reduce((s, r) => s + r.score, 0) / result.length) : 0,
+      avg_on_time: (() => {
+        const v = result.filter(r => r.on_time_rate != null);
+        return v.length > 0 ? Math.round(v.reduce((s, r) => s + r.on_time_rate, 0) / v.length) : 0;
+      })(),
+      total_defects: result.reduce((s, r) => s + r.defect_count, 0),
+      total_claim: result.reduce((s, r) => s + r.total_claim_amount, 0),
+      from, to
+    };
+
+    ok(res, { summary, vendors: result });
+    return;
+  }
+
   // GET /api/po/stats — 대시보드 전용 통계
   if (pathname === '/api/po/stats' && method === 'GET') {
     const enToKo = { 'draft':'대기', 'sent':'발송', 'confirmed':'확인', 'partial':'수령중', 'received':'완료', 'cancelled':'취소', 'os_pending':'OS등록대기', 'os_registered':'OS검증대기' };

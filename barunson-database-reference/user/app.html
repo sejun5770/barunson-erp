@@ -1403,6 +1403,7 @@ var _megaData = {
       {icon:'📥',bg:'#f0fdf4',fg:'#059669',name:'입고관리',desc:'수령 처리 + 불량 기록',page:'receipts',origins:['한국','중국','더기프트'],companies:['barunson']},
       {icon:'🏷',bg:'#f5f3ff',fg:'#8b5cf6',name:'OS등록',desc:'외주 생산 등록',page:'os-register',companies:['barunson']},
       {icon:'📊',bg:'#dbeafe',fg:'#1d4ed8',name:'통합발주관리',desc:'한국/중국/더기프트 파이프라인',page:'procurement',companies:['barunson']},
+      {icon:'🏆',bg:'#fef3c7',fg:'#b45309',name:'업체성과',desc:'납기/품질 종합 평가',page:'vendor-performance',companies:['barunson']},
     ]
   },
   sales: {
@@ -6172,6 +6173,22 @@ function closeMegaMenu() { /* no-op */ }
   <div id="ssContent" style="min-height:400px;overflow-x:auto"></div>
 </div>
 
+<!-- ========== VENDOR PERFORMANCE (업체 종합 성과) PAGE ========== -->
+<div class="page" id="page-vendor-performance" style="background:#fff;color:#111">
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+    <label style="font-size:12px;color:#475569">기간:</label>
+    <input type="date" id="vpFrom" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+    <span>~</span>
+    <input type="date" id="vpTo" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+    <label style="font-size:12px;color:#475569;margin-left:8px">최소 발주건수:</label>
+    <input type="number" id="vpMinOrders" value="1" min="1" style="width:70px;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+    <button class="btn btn-sm" onclick="loadVendorPerformance()" style="background:#2563eb;color:#fff">조회</button>
+    <button class="btn btn-sm" onclick="exportVendorPerformanceCSV()" style="background:#059669;color:#fff">CSV 내보내기</button>
+  </div>
+  <div id="vpKpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px"></div>
+  <div id="vpContent" style="min-height:400px;overflow-x:auto"></div>
+</div>
+
 <!-- ========== CYCLE COUNT (재고실사) PAGE ========== -->
 <div class="page" id="page-cycle-count" style="background:#fff;color:#111">
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
@@ -8436,6 +8453,7 @@ function showPage(page, opts){
   if(page==='process-routing') loadProcessRoutingPage();
   if(page==='equipment') loadEquipmentPage();
   if(page==='procurement') loadProcurementPage();
+  if(page==='vendor-performance') loadVendorPerformancePage();
   if(page==='vat-report') loadVatReportPage();
   if(page==='journal-auto') loadJournalAutoPage();
   if(page==='barcode') loadBarcodePage();
@@ -24916,6 +24934,140 @@ async function submitChinaShipmentLink() {
     if (d.ok) { document.getElementById('proc-receive-modal').style.display = 'none'; loadProcurementPage(); }
     else alert('실패: ' + (d.error||''));
   } catch(e) { alert('오류: ' + e.message); }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  업체 종합 성과 (Vendor Performance)
+// ════════════════════════════════════════════════════════════════════
+
+let _vpCache = null;
+
+function _ymdLocal(d) {
+  var y = d.getFullYear(), m = d.getMonth() + 1, day = d.getDate();
+  return y + '-' + (m<10?'0':'') + m + '-' + (day<10?'0':'') + day;
+}
+
+async function loadVendorPerformancePage() {
+  // 기본 기간: 최근 6개월 (로컬 타임존)
+  var today = new Date();
+  var fromInput = document.getElementById('vpFrom');
+  var toInput = document.getElementById('vpTo');
+  if (fromInput && !fromInput.value) {
+    var from = new Date(today.getTime() - 180 * 86400000);
+    fromInput.value = _ymdLocal(from);
+  }
+  if (toInput && !toInput.value) {
+    toInput.value = _ymdLocal(today);
+  }
+  await loadVendorPerformance();
+}
+
+async function loadVendorPerformance() {
+  var kpi = document.getElementById('vpKpi');
+  var content = document.getElementById('vpContent');
+  if (!kpi || !content) return;
+  content.innerHTML = '<div style="padding:40px;text-align:center;color:#94a3b8">로딩 중...</div>';
+  var from = document.getElementById('vpFrom').value;
+  var to = document.getElementById('vpTo').value;
+  var minOrders = document.getElementById('vpMinOrders').value || '1';
+  try {
+    var r = await authFetch('/api/vendor-performance?from=' + from + '&to=' + to + '&min_orders=' + minOrders);
+    var d = await r.json();
+    if (!d || d.error || d.ok === false) { content.innerHTML = '<div style="padding:40px;color:#dc2626">로드 실패: ' + (d && d.error || '') + '</div>'; return; }
+    var payload = d.data || d;
+    _vpCache = payload;
+    renderVendorPerformanceKpi(payload.summary || {});
+    renderVendorPerformanceTable(payload.vendors || []);
+  } catch(e) {
+    content.innerHTML = '<div style="padding:40px;color:#dc2626">오류: ' + e.message + '</div>';
+  }
+}
+
+function renderVendorPerformanceKpi(s) {
+  var kpi = document.getElementById('vpKpi');
+  var card = function(title, value, color) {
+    return '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:14px">' +
+      '<div style="font-size:11px;color:#64748b;margin-bottom:6px">' + title + '</div>' +
+      '<div style="font-size:20px;font-weight:700;color:' + color + '">' + value + '</div></div>';
+  };
+  kpi.innerHTML =
+    card('전체 업체', (s.total_vendors||0) + '곳', '#1e293b') +
+    card('A등급 (90+)', (s.grade_a||0) + '곳', '#16a34a') +
+    card('B등급 (75~89)', (s.grade_b||0) + '곳', '#0284c7') +
+    card('C등급 (60~74)', (s.grade_c||0) + '곳', '#d97706') +
+    card('D등급 (~59)', (s.grade_d||0) + '곳', '#dc2626') +
+    card('평균 점수', (s.avg_score||0) + '점', '#1e293b') +
+    card('평균 납기준수율', (s.avg_on_time||0) + '%', '#1e293b') +
+    card('총 불량 건수', (s.total_defects||0) + '건', '#dc2626') +
+    card('총 클레임액', '₩' + (s.total_claim||0).toLocaleString(), '#dc2626');
+}
+
+function renderVendorPerformanceTable(vendors) {
+  var content = document.getElementById('vpContent');
+  if (!vendors.length) {
+    content.innerHTML = '<div style="padding:40px;text-align:center;color:#94a3b8">조회 기간 내 발주 데이터가 없습니다.</div>';
+    return;
+  }
+  var gradeColor = { 'A':'#16a34a', 'B':'#0284c7', 'C':'#d97706', 'D':'#dc2626' };
+  var rows = vendors.map(function(v, i) {
+    var gc = gradeColor[v.grade] || '#64748b';
+    var ot = v.on_time_rate == null ? '-' : v.on_time_rate + '%';
+    var lt = v.avg_lead_time > 0 ? v.avg_lead_time + '일' : '-';
+    return '<tr style="border-bottom:1px solid #e2e8f0">' +
+      '<td style="padding:10px;text-align:center;color:#64748b">' + (i+1) + '</td>' +
+      '<td style="padding:10px;font-weight:600">' + String(v.vendor_name||'').replace(/[<>&]/g, function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];}) + '</td>' +
+      '<td style="padding:10px;text-align:center"><span style="background:' + gc + ';color:#fff;padding:3px 10px;border-radius:12px;font-weight:700;font-size:13px">' + v.grade + '</span></td>' +
+      '<td style="padding:10px;text-align:right;font-weight:700;color:' + gc + '">' + v.score + '점</td>' +
+      '<td style="padding:10px;text-align:right">' + (v.order_count||0).toLocaleString() + '건</td>' +
+      '<td style="padding:10px;text-align:right">' + (v.total_qty||0).toLocaleString() + '</td>' +
+      '<td style="padding:10px;text-align:right">' + (v.completion_rate||0) + '%</td>' +
+      '<td style="padding:10px;text-align:right">' + ot + '</td>' +
+      '<td style="padding:10px;text-align:right">' + lt + '</td>' +
+      '<td style="padding:10px;text-align:right;color:' + (v.defect_count > 0 ? '#dc2626' : '#16a34a') + '">' + (v.defect_count||0) + '건</td>' +
+      '<td style="padding:10px;text-align:right">' + (v.defect_rate||0) + '%</td>' +
+      '<td style="padding:10px;text-align:right;color:#dc2626">₩' + (v.total_claim_amount||0).toLocaleString() + '</td>' +
+    '</tr>';
+  }).join('');
+  content.innerHTML =
+    '<table style="width:100%;border-collapse:collapse;font-size:13px;background:#fff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">' +
+      '<thead><tr style="background:#f1f5f9;color:#475569;font-size:12px">' +
+        '<th style="padding:10px;text-align:center;width:40px">#</th>' +
+        '<th style="padding:10px;text-align:left">거래처명</th>' +
+        '<th style="padding:10px;text-align:center;width:60px">등급</th>' +
+        '<th style="padding:10px;text-align:right;width:80px">종합점수</th>' +
+        '<th style="padding:10px;text-align:right;width:80px">발주건수</th>' +
+        '<th style="padding:10px;text-align:right;width:90px">총 수량</th>' +
+        '<th style="padding:10px;text-align:right;width:80px">완료율</th>' +
+        '<th style="padding:10px;text-align:right;width:90px">납기준수율</th>' +
+        '<th style="padding:10px;text-align:right;width:90px">평균 리드타임</th>' +
+        '<th style="padding:10px;text-align:right;width:80px">불량건수</th>' +
+        '<th style="padding:10px;text-align:right;width:80px">불량률</th>' +
+        '<th style="padding:10px;text-align:right;width:120px">클레임액</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function exportVendorPerformanceCSV() {
+  if (!_vpCache || !_vpCache.vendors) { alert('먼저 조회하세요.'); return; }
+  var headers = ['순위','거래처명','등급','종합점수','발주건수','총수량','완료율','납기준수율','평균리드타임','불량건수','불량률','클레임액'];
+  var lines = [headers.join(',')];
+  _vpCache.vendors.forEach(function(v, i) {
+    var row = [
+      i+1,
+      '"' + (v.vendor_name||'').replace(/"/g,'""') + '"',
+      v.grade, v.score, v.order_count, v.total_qty, v.completion_rate + '%',
+      (v.on_time_rate == null ? '-' : v.on_time_rate + '%'),
+      (v.avg_lead_time > 0 ? v.avg_lead_time + '일' : '-'),
+      v.defect_count, v.defect_rate + '%', v.total_claim_amount
+    ];
+    lines.push(row.join(','));
+  });
+  var blob = new Blob(['\ufeff' + lines.join('\n')], { type:'text/csv;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'vendor_performance_' + (_vpCache.summary && _vpCache.summary.from || '') + '_' + (_vpCache.summary && _vpCache.summary.to || '') + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ════════════════════════════════════════════════════════════════════
