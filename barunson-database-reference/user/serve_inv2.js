@@ -5610,6 +5610,9 @@ async function handleRequest(req, res) {
         });
         // 후공정 PO 찾기 (같은 날짜, 대기 상태, 후공정 타입)
         const postPOs = await db.prepare(`SELECT * FROM po_header WHERE po_date = ? AND status IN ('draft','sent') AND po_type = '후공정'`).all(po.po_date);
+        const _chainOk = [];
+        const _chainNoEmail = [];
+        const _chainEmailFail = [];
         for (const pp of postPOs) {
           const postVendor = await db.prepare('SELECT * FROM vendors WHERE name = ?').get(pp.vendor_name);
           if (postVendor && postVendor.email) {
@@ -5618,9 +5621,27 @@ async function handleRequest(req, res) {
             await db.prepare(`UPDATE po_header SET status = 'sent', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(pp.po_id);
             emailResult = await sendPOEmail(pp, ppItems, postVendor.email, postVendor.name, true, postVendor.email_cc);
             console.log(`원재료→후공정 체인: ${pp.po_number} → ${postVendor.name} (${postVendor.email})`);
+            if (emailResult && emailResult.ok !== false) {
+              _chainOk.push(`${pp.po_number} → ${postVendor.name}`);
+            } else {
+              _chainEmailFail.push(`${pp.po_number} → ${postVendor.name}`);
+            }
+          } else {
+            _chainNoEmail.push(`${pp.po_number} → ${pp.vendor_name}`);
           }
         }
-        ok(res, { po_id: poId, status: '확인', chain_triggered: postPOs.length, email: emailResult });
+        // Slack 알림: 체인 결과
+        try {
+          const lines = [];
+          lines.push(`🔗 *원재료 출고 → 후공정 체인*`);
+          lines.push(`원재료: ${po.po_number} (${po.vendor_name})`);
+          if (_chainOk.length) lines.push(`✅ 이메일 발송 (${_chainOk.length}): \n• ${_chainOk.join('\n• ')}`);
+          if (_chainNoEmail.length) lines.push(`⚠️ 이메일 없음 (${_chainNoEmail.length}): \n• ${_chainNoEmail.join('\n• ')}`);
+          if (_chainEmailFail.length) lines.push(`🔴 발송 실패 (${_chainEmailFail.length}): \n• ${_chainEmailFail.join('\n• ')}`);
+          if (!postPOs.length) lines.push(`❌ 매칭되는 후공정 PO 없음 (po_date=${po.po_date})`);
+          sendSlack(lines.join('\n')).catch(()=>{});
+        } catch (_) {}
+        ok(res, { po_id: poId, status: '확인', chain_triggered: postPOs.length, chain_ok: _chainOk.length, chain_no_email: _chainNoEmail.length, email: emailResult });
         return;
       }
     }
@@ -7072,6 +7093,31 @@ async function handleRequest(req, res) {
     }
 
     ok(res, { created, errors });
+    return;
+  }
+
+  // POST /api/slack/manual-po-notify — 수동 일괄 발주 완료 알림
+  if (pathname === '/api/slack/manual-po-notify' && method === 'POST') {
+    try {
+      const body = await readJSON(req);
+      const savedVendors = Array.isArray(body.saved_vendors) ? body.saved_vendors : [];
+      const emailOk = Array.isArray(body.email_ok) ? body.email_ok : [];
+      const emailFail = Array.isArray(body.email_fail) ? body.email_fail : [];
+      const origin = body.origin || '';
+      const totalQty = Number(body.total_qty || 0);
+      if (_slackWebhookUrl && savedVendors.length) {
+        const lines = [];
+        lines.push(`📮 *수동 발주 완료* (${origin || '국가미지정'})`);
+        lines.push(`저장: ${savedVendors.length}건 / 수량합: ${totalQty.toLocaleString()}`);
+        lines.push(`• ${savedVendors.join(', ')}`);
+        if (emailOk.length) lines.push(`✅ 이메일 발송 (${emailOk.length}): ${emailOk.join(', ')}`);
+        if (emailFail.length) lines.push(`⚠️ 이메일 미발송 (${emailFail.length}): ${emailFail.join(', ')}`);
+        sendSlack(lines.join('\n')).catch(()=>{});
+      }
+      ok(res, { notified: !!_slackWebhookUrl });
+    } catch (e) {
+      fail(res, 500, e.message);
+    }
     return;
   }
 

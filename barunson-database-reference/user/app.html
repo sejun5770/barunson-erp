@@ -13567,6 +13567,19 @@ async function saveAllPOs(){
   if (_savingPO) { alert('발주서 저장 중입니다. 잠시 기다려주세요.'); return; }
   const checks=document.querySelectorAll('.po-vendor-check:checked');
   if(!checks.length){alert('저장할 거래처를 선택하세요.');return;}
+
+  // 한국 원재료 자동 이메일 발송 여부 안내
+  const isKoreaContext = currentOriginContext !== '중국';
+  const matCheckCount = Array.from(checks).filter(c => c.dataset.type === 'mat').length;
+  const postCheckCount = Array.from(checks).filter(c => c.dataset.type !== 'mat').length;
+  if (isKoreaContext && matCheckCount > 0) {
+    const confirmMsg = `[한국 발주 저장 + 자동 발송]\n\n` +
+      `• 원재료 거래처: ${matCheckCount}개 → 저장 후 즉시 이메일 발송\n` +
+      `• 후공정 거래처: ${postCheckCount}개 → 저장만 (원재료 출고 시 자동 발송)\n\n` +
+      `진행하시겠습니까?`;
+    if (!confirm(confirmMsg)) return;
+  }
+
   _savingPO = true;
   // 버튼 비활성화
   document.querySelectorAll('button').forEach(b => { if (b.textContent.includes('일괄 저장')) b.disabled = true; });
@@ -13575,6 +13588,7 @@ async function saveAllPOs(){
   const deliveryDate=document.getElementById('poDeliveryDate').value;
   const notes=document.getElementById('poNotes').value;
   const results=[];
+  const emailResults=[]; // {vendor, ok, reason}
 
   for(const chk of checks){
     const type=chk.dataset.type;
@@ -13611,7 +13625,31 @@ async function saveAllPOs(){
       if (res.status === 409) {
         results.push({vendor, ok:false, dup:true, msg:d.error||'중복 발주'});
       } else {
-        results.push({vendor, ok:!!(d.ok||d.id), po_number:d.po_number||''});
+        const okSave = !!(d.ok||d.id||d.po_id);
+        const poId = d.po_id || d.id;
+        results.push({vendor, ok:okSave, po_number:d.po_number||'', po_id: poId, type});
+
+        // 한국 원재료만 자동 발송 (후공정/중국은 제외)
+        if (okSave && poId && isKoreaContext && type === 'mat') {
+          try {
+            const sendRes = await fetch(`/api/po/${poId}`, {
+              method: 'PATCH',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({status: '발송'})
+            });
+            const sendD = await sendRes.json().catch(()=>({}));
+            const emailInfo = sendD && sendD.email;
+            if (sendRes.ok && emailInfo && emailInfo.ok !== false && !emailInfo.skipped) {
+              emailResults.push({vendor, ok:true});
+            } else if (emailInfo && emailInfo.skipped) {
+              emailResults.push({vendor, ok:false, reason:'skip'});
+            } else {
+              emailResults.push({vendor, ok:false, reason:(emailInfo && emailInfo.error) || '이메일 미발송(업체 이메일 없음?)'});
+            }
+          } catch(e) {
+            emailResults.push({vendor, ok:false, reason:'네트워크 오류'});
+          }
+        }
       }
     }catch(e){
       results.push({vendor, ok:false});
@@ -13620,6 +13658,34 @@ async function saveAllPOs(){
 
   const okCount=results.filter(r=>r.ok).length;
   const failCount=results.filter(r=>!r.ok).length;
+
+  // Slack 알림: 수동 일괄 발주 완료
+  try {
+    const savedVendors = results.filter(r=>r.ok).map(r=>r.vendor);
+    if (savedVendors.length) {
+      const totalQty = (function(){
+        let s = 0;
+        for (const chk of checks) {
+          const v=chk.dataset.vendor, t=chk.dataset.type;
+          if (!savedVendors.includes(v)) continue;
+          if (t==='mat') (matGroups[v]||[]).forEach(p=>{ s += (p._qty||0); });
+          else (postGroups[v]||[]).forEach(it=>{ s += (it.qty||0); });
+        }
+        return s;
+      })();
+      fetch('/api/slack/manual-po-notify', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          saved_vendors: savedVendors,
+          email_ok: emailResults.filter(r=>r.ok).map(r=>r.vendor),
+          email_fail: emailResults.filter(r=>!r.ok).map(r=>r.vendor),
+          origin: currentOriginContext || '',
+          total_qty: totalQty
+        })
+      }).catch(()=>{});
+    }
+  } catch(_) {}
 
   if(failCount===0){
     // 저장 성공한 업체의 품목만 orderQty에서 제거 (나머지 유지)
@@ -13676,7 +13742,19 @@ async function saveAllPOs(){
         }, 300);
         setTimeout(()=>clearInterval(waitForPO), 15000); // 15초 타임아웃
       } else {
-        alert(`${okCount}개 거래처 발주서 모두 저장 완료!`);
+        let finalMsg = `${okCount}개 거래처 발주서 모두 저장 완료!`;
+        if (emailResults.length) {
+          const emOk = emailResults.filter(r=>r.ok);
+          const emFail = emailResults.filter(r=>!r.ok);
+          finalMsg += `\n\n[이메일 자동 발송]`;
+          finalMsg += `\n✅ 발송 성공: ${emOk.length}건`;
+          if (emOk.length) finalMsg += ` (${emOk.map(r=>r.vendor).join(', ')})`;
+          if (emFail.length) {
+            finalMsg += `\n⚠️ 미발송: ${emFail.length}건`;
+            finalMsg += `\n  - ${emFail.map(r=>`${r.vendor} (${r.reason||'오류'})`).join('\n  - ')}`;
+          }
+        }
+        alert(finalMsg);
       }
     }
   } else {
@@ -13685,6 +13763,11 @@ async function saveAllPOs(){
     let msg = `${okCount}개 성공`;
     if (dupResults.length) msg += `\n중복 ${dupResults.length}개: ${dupResults.map(r=>r.vendor).join(', ')}`;
     if (failResults.length) msg += `\n실패 ${failResults.length}개: ${failResults.map(r=>r.vendor).join(', ')}`;
+    if (emailResults.length) {
+      const emOk = emailResults.filter(r=>r.ok).length;
+      const emFail = emailResults.filter(r=>!r.ok).length;
+      msg += `\n\n[이메일] 발송 ${emOk}건 / 미발송 ${emFail}건`;
+    }
     alert(msg);
     refreshVendorCards(); // 실패해도 남은 카드 갱신
   }
