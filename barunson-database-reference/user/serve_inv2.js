@@ -71,9 +71,68 @@ const logger = {
     _errorStream.write(line);
     _appStream.write(line);
     console.error(msg, ...args);
+    // Slack 알림 (fire-and-forget, 실패해도 서버 영향 없음)
+    try { slackError(msg, args); } catch(_) {}
   }
 };
 _cleanOldLogs(); // 서버 시작 시 1회 정리
+
+// ── Slack Incoming Webhook 알림 ─────────────────────────────────
+// SLACK_WEBHOOK_URL 환경변수가 설정되어 있을 때만 동작. 미설정 시 전부 no-op.
+// 에러 알림은 중복 억제(dedupe) 및 rate limit 적용.
+const _slackDedupe = new Map(); // key → lastSentTime
+const SLACK_DEDUPE_MS = 5 * 60 * 1000; // 같은 에러는 5분에 1번만
+let _slackWebhookUrl = ''; // 서버 시작 후 envVars 로드되면 채워짐
+
+function _slackCleanupDedupe() {
+  const cutoff = Date.now() - SLACK_DEDUPE_MS * 2;
+  for (const [k, t] of _slackDedupe.entries()) {
+    if (t < cutoff) _slackDedupe.delete(k);
+  }
+}
+
+async function sendSlack(text, opts = {}) {
+  if (!_slackWebhookUrl) return false;
+  if (!text || typeof text !== 'string') return false;
+  const payload = { text: text.slice(0, 3000) };
+  if (opts.blocks) payload.blocks = opts.blocks;
+  try {
+    const https = require('https');
+    const url = new URL(_slackWebhookUrl);
+    const body = JSON.stringify(payload);
+    return await new Promise((resolve) => {
+      const req = https.request({
+        method: 'POST',
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        timeout: 5000
+      }, (res) => {
+        res.on('data', () => {});
+        res.on('end', () => resolve(res.statusCode >= 200 && res.statusCode < 300));
+      });
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+      req.write(body);
+      req.end();
+    });
+  } catch (_) { return false; }
+}
+
+function slackError(msg, args) {
+  if (!_slackWebhookUrl) return;
+  // 에러 메시지 필터: 너무 흔한 것들(요청 취소, ECONNRESET) 제외
+  const full = String(msg) + ' ' + (args && args.length ? JSON.stringify(args).slice(0, 300) : '');
+  if (/ECONNRESET|EPIPE|aborted|socket hang up/i.test(full)) return;
+  // dedupe key: 앞 150자
+  const key = full.slice(0, 150);
+  const now = Date.now();
+  if (_slackDedupe.has(key) && (now - _slackDedupe.get(key)) < SLACK_DEDUPE_MS) return;
+  _slackDedupe.set(key, now);
+  _slackCleanupDedupe();
+  // fire-and-forget
+  sendSlack(`🚨 *ERP 에러*\n\`\`\`${full.slice(0, 1500)}\`\`\``).catch(() => {});
+}
 
 // ── XERP MSSQL 연결 ─────────────────────────────────────────────────
 let xerpPool = null;
@@ -121,6 +180,28 @@ try {
   });
   console.log('환경변수 로드:', dotenvPath, '(DB_SERVER:', envVars.DB_SERVER ? 'OK' : 'missing', ')');
 } catch (e) { console.warn('.env 로드 실패:', e.message); }
+
+// Slack Webhook URL 활성화 (envVars 로드 완료 후)
+_slackWebhookUrl = envVars.SLACK_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL || '';
+if (_slackWebhookUrl) {
+  console.log('[Slack] Webhook 활성화됨');
+} else {
+  console.log('[Slack] SLACK_WEBHOOK_URL 미설정 → 알림 비활성');
+}
+
+// 서버 크래시 감지 (uncaughtException / unhandledRejection)
+process.on('uncaughtException', (err) => {
+  console.error('[CRASH] uncaughtException:', err.message, err.stack);
+  try { sendSlack(`💥 *ERP 서버 크래시 (uncaughtException)*\n\`\`\`${err.message}\n${(err.stack||'').slice(0, 1500)}\`\`\``); } catch(_){}
+  // 바로 종료하지 않고 1초 대기 (Slack 전송 시간 확보)
+  setTimeout(() => process.exit(1), 1000);
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const stack = reason instanceof Error ? reason.stack : '';
+  console.error('[CRASH] unhandledRejection:', msg, stack);
+  try { sendSlack(`⚠️ *ERP unhandledRejection*\n\`\`\`${msg}\n${(stack||'').slice(0, 1500)}\`\`\``); } catch(_){}
+});
 
 const xerpConfig = {
   server: envVars.DB_SERVER || process.env.DB_SERVER || '',
@@ -15873,6 +15954,18 @@ async function runDeadlineAlertCheck() {
 }
 
 // 자동발주 스케줄러: 매일 9시 실행
+async function _safeRunAutoOrder() {
+  try {
+    await runAutoOrderScheduler();
+  } catch (e) {
+    logger.error('[자동발주 스케줄러 실패]', e.message, e.stack);
+    try { sendSlack(`🔴 *자동발주 스케줄러 실패*\n\`\`\`${e.message}\n${(e.stack||'').slice(0,1000)}\`\`\``); } catch(_){}
+  }
+  try { await runShipmentEmailCheck(); } catch(e) { logger.error('[출고 이메일 체크 실패]', e.message); }
+  try { await runDeadlineAlertCheck(); } catch(e) { logger.error('[납기 알림 체크 실패]', e.message); }
+  // 자동발주 실행 완료 후 Slack 요약 전송 (약 1분 여유)
+  setTimeout(() => { runDailyPOSummary().catch(e => logger.error('[일일 발주 요약 실패]', e.message)); }, 60 * 1000);
+}
 function scheduleAutoOrder() {
   const now = new Date();
   const next9am = new Date(now);
@@ -15883,16 +15976,70 @@ function scheduleAutoOrder() {
   console.log(`[자동발주 스케줄러] 다음 실행: ${next9am.toLocaleString('ko-KR')} (${Math.round(msUntilNext / 60000)}분 후)`);
 
   setTimeout(() => {
-    runAutoOrderScheduler();
-    runShipmentEmailCheck();
-    runDeadlineAlertCheck();
+    _safeRunAutoOrder();
     // 이후 24시간마다 반복
-    setInterval(() => {
-      runAutoOrderScheduler();
-      runShipmentEmailCheck();
-      runDeadlineAlertCheck();
-    }, 24 * 60 * 60 * 1000);
+    setInterval(_safeRunAutoOrder, 24 * 60 * 60 * 1000);
   }, msUntilNext);
+}
+
+// ── 매일 9시 발주 현황 Slack 요약 ─────────────────────────────────
+// 자동발주 스케줄러 실행 직후(약 1분 뒤) 호출됨
+async function runDailyPOSummary() {
+  if (!_slackWebhookUrl) return;
+  const today = new Date().toISOString().slice(0, 10);
+
+  // 1) 오늘 자동 생성된 PO 집계
+  let todayPOs = [];
+  try {
+    todayPOs = await db.prepare(
+      "SELECT po_number, vendor_name, total_qty, origin, notes FROM po_header WHERE po_date=? AND notes LIKE '%자동발주%'"
+    ).all(today);
+  } catch(e) { logger.warn('[일일 요약] 오늘 PO 조회 실패:', e.message); }
+
+  // 2) 자동발주 설정 품목 중 긴급/위험 분류 (재고 파일 기반)
+  let urgent = 0, warning = 0, totalEnabled = 0;
+  try {
+    const items = await db.prepare('SELECT product_code FROM auto_order_items WHERE enabled=1').all();
+    totalEnabled = items.length;
+    let inv = [];
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(__dir, 'erp_smart_inventory.json'), 'utf8'));
+      inv = raw.products || raw.data || (Array.isArray(raw) ? raw : []);
+    } catch(_) {}
+    const invMap = {};
+    for (const p of inv) invMap[p['품목코드']] = p;
+    for (const it of items) {
+      const p = invMap[it.product_code] || invMap[(it.product_code||'').toUpperCase()];
+      if (!p) continue;
+      const avail = typeof p['가용재고']==='number' ? p['가용재고'] : 0;
+      const daily = p['_xerpDaily'] || 0;
+      if (daily <= 0) continue;
+      const remainDays = avail / daily;
+      if (remainDays <= 14) urgent++;
+      else if (remainDays <= 21) warning++;
+    }
+  } catch(e) { logger.warn('[일일 요약] 긴급도 분류 실패:', e.message); }
+
+  // 3) Slack 메시지 작성
+  const dateLabel = new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
+  let msg = `📋 *ERP 일일 발주 요약 — ${dateLabel}*\n\n`;
+  msg += `🤖 *자동발주 생성: ${todayPOs.length}건*\n`;
+  if (todayPOs.length > 0) {
+    const preview = todayPOs.slice(0, 10).map(po => `  • \`${po.po_number}\` ${po.vendor_name || '(미지정)'} — ${(po.total_qty||0).toLocaleString()}매 [${po.origin||'?'}]`).join('\n');
+    msg += preview;
+    if (todayPOs.length > 10) msg += `\n  _...외 ${todayPOs.length - 10}건_`;
+    msg += '\n\n';
+  } else {
+    msg += `  _오늘 자동 생성된 발주 없음_\n\n`;
+  }
+  msg += `📊 *자동발주 모니터링: ${totalEnabled}개 품목*\n`;
+  msg += `  🔴 긴급 (14일 이하): *${urgent}개*\n`;
+  msg += `  🟡 위험 (21일 이하): *${warning}개*\n`;
+  msg += `  🟢 안전: ${Math.max(totalEnabled - urgent - warning, 0)}개\n`;
+  msg += `\n<https://docker-manager.barunsoncard.com/c/s-c-erp/|ERP 바로가기>`;
+
+  await sendSlack(msg);
+  console.log('[일일 발주 요약] Slack 전송 완료');
 }
 
 // XERP 데이터 자동 동기화: 매일 9:30 실행
