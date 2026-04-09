@@ -13625,9 +13625,11 @@ async function saveAllPOs(){
       if (res.status === 409) {
         results.push({vendor, ok:false, dup:true, msg:d.error||'중복 발주'});
       } else {
-        const okSave = !!(d.ok||d.id||d.po_id);
-        const poId = d.po_id || d.id;
-        results.push({vendor, ok:okSave, po_number:d.po_number||'', po_id: poId, type});
+        // 서버 응답은 {ok:true, data:{po_id, po_number}} 래퍼 구조
+        const payload = (d && d.data) ? d.data : d;
+        const okSave = !!(d && d.ok);
+        const poId = payload.po_id || payload.id;
+        results.push({vendor, ok:okSave, po_number:payload.po_number||'', po_id: poId, type});
 
         // 한국 원재료만 자동 발송 (후공정/중국은 제외)
         if (okSave && poId && isKoreaContext && type === 'mat') {
@@ -13638,13 +13640,16 @@ async function saveAllPOs(){
               body: JSON.stringify({status: '발송'})
             });
             const sendD = await sendRes.json().catch(()=>({}));
-            const emailInfo = sendD && sendD.email;
+            const sendPayload = (sendD && sendD.data) ? sendD.data : sendD;
+            const emailInfo = sendPayload && sendPayload.email;
             if (sendRes.ok && emailInfo && emailInfo.ok !== false && !emailInfo.skipped) {
               emailResults.push({vendor, ok:true});
             } else if (emailInfo && emailInfo.skipped) {
               emailResults.push({vendor, ok:false, reason:'skip'});
+            } else if (emailInfo && emailInfo.ok === false) {
+              emailResults.push({vendor, ok:false, reason: emailInfo.error || '발송 실패'});
             } else {
-              emailResults.push({vendor, ok:false, reason:(emailInfo && emailInfo.error) || '이메일 미발송(업체 이메일 없음?)'});
+              emailResults.push({vendor, ok:false, reason:'업체 이메일 미등록'});
             }
           } catch(e) {
             emailResults.push({vendor, ok:false, reason:'네트워크 오류'});
