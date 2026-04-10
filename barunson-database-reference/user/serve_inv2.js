@@ -3501,7 +3501,7 @@ async function handleRequest(req, res) {
     const userPerms = user.permissions ? JSON.parse(user.permissions) : [];
     const effectivePerms = user.role === 'admin' ? ['*'] : (userPerms.length > 0 ? userPerms : (ROLE_PERMISSIONS[user.role] || []));
     let favs = []; try { favs = JSON.parse(user.favorites || '[]'); } catch {}
-    // ���뉴 활성화 상태 포함
+    // 메뉴 활성화 상태 포함
     let menuEnabled = {};
     try {
       const ms = await db.prepare('SELECT page_id, is_enabled FROM menu_settings').all();
@@ -3517,7 +3517,7 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ��─ 메뉴 활성화/비활성화 API ──
+  // ── 메뉴 활성화/비활성화 API ──
   if (pathname === '/api/menu-settings' && method === 'GET') {
     const token = extractToken(req);
     const decoded = token ? verifyToken(token) : null;
@@ -3538,7 +3538,7 @@ async function handleRequest(req, res) {
     // body: { settings: { page_id: { is_enabled: 0|1, sort_order?: N }, ... } }
     const upsert = db.prepare(`INSERT INTO menu_settings (page_id, is_enabled, sort_order, updated_at) VALUES (?, ?, ?, datetime('now','localtime'))
       ON CONFLICT(page_id) DO UPDATE SET is_enabled=excluded.is_enabled, sort_order=excluded.sort_order, updated_at=excluded.updated_at`);
-    const PROTECTED = ['dashboard', 'settings']; // 항상 활성��
+    const PROTECTED = ['dashboard', 'settings']; // 항상 활성화
     const tx = db.transaction(async () => {
       for (const [pageId, cfg] of Object.entries(body.settings || {})) {
         const enabled = PROTECTED.includes(pageId) ? 1 : (cfg.is_enabled ? 1 : 0);
@@ -3546,7 +3546,7 @@ async function handleRequest(req, res) {
       }
     });
     await tx();
-    ok(res, { message: '메뉴 설정이 저장되었��니다' });
+    ok(res, { message: '메뉴 설정이 저장되었습니다' });
     return;
   }
 
@@ -14883,7 +14883,7 @@ async function handleRequest(req, res) {
 
   // ════════════════════════════════════════════════════════════════════
   //  Phase 1: 경영자 통합 대시보드 API
-  // ════════���═══════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/exec/dashboard-full' && method === 'GET') {
     const now = new Date();
@@ -15163,7 +15163,7 @@ async function handleRequest(req, res) {
 
   // ════════════════════════════════════════════════════════════════════
   //  Phase 4: 제조원가 계산 API
-  // ══════════════���═════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/mfg-cost/rates' && method === 'GET') {
     const rates = await db.prepare("SELECT * FROM cost_rates ORDER BY rate_type, rate_key").all();

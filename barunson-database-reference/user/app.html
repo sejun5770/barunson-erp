@@ -1699,6 +1699,7 @@ function renderHeaderFavorites() {
 // ===== RECENT PAGES =====
 function addRecentPage(pageId) {
   if (pageId === 'dashboard' || pageId === 'settings') return;
+  if (!document.getElementById('page-'+pageId)) return; // 존재하지 않는 페이지 저장 방지
   _recentPages = _recentPages.filter(function(p) { return p !== pageId; });
   _recentPages.unshift(pageId);
   if (_recentPages.length > 10) _recentPages = _recentPages.slice(0, 10);
@@ -8557,7 +8558,7 @@ function isMenuEnabled(pageId) {
 function showPage(page, opts){
   // 메뉴 비활성화 체크
   if (!isMenuEnabled(page)) {
-    alert('비활성화된 메���입니다. 관리자에게 문의하세요.');
+    alert('비활성화된 메뉴입니다. 관리자에게 문의하세요.');
     return;
   }
   // 권한 체크 (dashboard는 항상 허용)
@@ -8605,7 +8606,8 @@ function showPage(page, opts){
   // Update page visibility
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   const el=document.getElementById('page-'+page);
-  if(el) el.classList.add('active');
+  if(!el){ showPage('dashboard'); return; }
+  el.classList.add('active');
   // 페이지 전환 시 스크롤을 맨 위로
   const pc=document.querySelector('.page-content');
   if(pc) pc.scrollTop=0;
@@ -25703,7 +25705,7 @@ async function showProcStageChange(poId, currentStage) {
   }
 }
 
-// 입고 이��
+// 입고 이력
 async function showProcHistory(poId) {
   document.getElementById('proc-modal-title').textContent = '📋 입고 이력';
   document.getElementById('proc-modal-submit').style.display = 'none';
