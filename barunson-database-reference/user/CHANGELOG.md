@@ -5,6 +5,29 @@
 
 ---
 
+## [1.0.8] - 2026-04-10
+
+### 🎉 Added — DD 법인 재고/출고 완전 분리 (구조 개편)
+- **BHC(디얼디어) DB 연동** — DD 법인 재고 및 출고 데이터를 **BHC DB의 `mmInventory`/`mmInoutItem`** 에서 직접 조회 (SiteCode `BHC2`)
+- **`/api/xerp-inventory` 법인별 DB 분기**:
+  - `company=barunson` → XERP DB / SiteCode `BK10` (바른손 창고, 기존)
+  - `company=dd` → **BHC DB / SiteCode `BHC2`** (디얼디어 창고, 신규)
+  - `company=all` → 두 DB 병렬 조회 후 병합 (Promise.all)
+- 응답 품목마다 `legal_entity` / `_invSource` / `_siteCode` 필드 동봉 — 프론트 필터링 정확도 향상
+- **발주서 작성 페이지에 법인 필터 셀렉트 추가** — 바른컴퍼니/디디 전환
+- `getPOTargetItems` / 생산지 탭 배지에 `_poCurrentEntity` 기준 필터 로직 추가
+- 메가메뉴 `create-po` 항목의 `companies:['barunson']` → `['barunson','dd']` 로 확장, `origins`에 `DD` 추가
+- BHC 내 DD 품목 705개 고유, 재고>0 472개 확인 (수정 전 발주제안 탭에 1건만 노출되던 문제 원천 해결)
+
+### 🐛 Fixed
+- **DD 품목 `origin='한국'` 강제 UPDATE 제거** (`serve_inv2.js:1182`) — 원래 생산지가 소실되어 발주서 작성 한국 탭에서 바른손과 섞이던 구조적 버그 수정. `legal_entity='dd'` 마킹만 수행하고 `origin` 원본 보존
+
+### 📝 Notes
+- BHC 접속은 기존 `readonly_user` (`DB_USER`) 로 가능 — XERP 계정(`XERP_DB_USER`)은 BHC 권한 없음, Azure SQL 권한 매핑 차이
+- BHC pool은 on-demand 생성(`new sql.ConnectionPool` → `close`) — 장기 커넥션 필요 없음, bar_shop1 pool과 동일 패턴
+
+---
+
 ## [1.0.7] - 2026-04-10
 
 ### ✨ Added

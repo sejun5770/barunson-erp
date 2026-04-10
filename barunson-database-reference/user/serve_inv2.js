@@ -1,6 +1,6 @@
 const _startTime = Date.now();
 // ERP 애플리케이션 버전 (MANUAL.md / CHANGELOG.md 와 동기화)
-const APP_VERSION = '1.0.7';
+const APP_VERSION = '1.0.8';
 const APP_VERSION_DATE = '2026-04-10';
 const http = require('http');
 const https = require('https');
@@ -1175,12 +1175,15 @@ try {
     const _used = await db.prepare(`SELECT COUNT(*) AS c FROM po_items i
       JOIN products p ON p.product_code=i.product_code
       WHERE p.origin='DD' OR p.brand='DD'`).get();
+    // v1.0.8: origin='DD'를 '한국'으로 강제 UPDATE 하던 로직 제거 —
+    // 원래 생산지(한국/중국/더기프트)가 소실되어 발주서 작성 탭에서 DD 품목이 바른손과 섞이는 버그 유발.
+    // 이제는 legal_entity만 마킹하고 origin은 건드리지 않는다.
     if (_used && Number(_used.c) === 0) {
       await db.prepare("DELETE FROM products WHERE origin='DD' OR brand='DD'").run();
       console.log(`[entity-migration] DD 더미 품목 ${_ddCleanup.c}건 삭제 완료`);
     } else {
-      await db.prepare("UPDATE products SET legal_entity='dd', origin='한국' WHERE (origin='DD' OR brand='DD')").run();
-      console.log(`[entity-migration] DD 품목 ${_ddCleanup.c}건 dd 법인으로 마킹 (거래 ${_used.c}건 연결)`);
+      await db.prepare("UPDATE products SET legal_entity='dd' WHERE (origin='DD' OR brand='DD')").run();
+      console.log(`[entity-migration] DD 품목 ${_ddCleanup.c}건 dd 법인으로 마킹 (origin 보존, 거래 ${_used.c}건 연결)`);
     }
   }
 } catch(e) { console.warn('[entity-migration] DD 정리 오류:', e.message); }
@@ -1833,6 +1836,8 @@ await db.exec(`CREATE TABLE IF NOT EXISTS po_drafts (
 )`);
 
 try { await db.exec("ALTER TABLE vendor_notes ADD COLUMN status TEXT DEFAULT 'open'"); } catch(_) {}
+// v1.0.8: po_drafts 법인 분리
+try { await db.exec("ALTER TABLE po_drafts ADD COLUMN legal_entity TEXT DEFAULT 'barunson'"); } catch(_) {}
 
 // ── 불량 클레임 정산 (defect settlements) ──
 await db.exec(`CREATE TABLE IF NOT EXISTS defect_settlements (
@@ -4134,12 +4139,9 @@ async function handleRequest(req, res) {
 
     // 법인 파라미터 (all/barunson/dd)
     const company = parsed.searchParams.get('company') || 'all';
-    // all = 모두, dd = DD만, barunson = DD 제외
-    // 판별 기준: 품목코드 prefix(DD*) 또는 (레거시) origin='DD'
-    // legal_entity 컬럼은 권한 문제로 누락되어 있을 수 있어 prefix 기반이 가장 안전
-    const originFilter = company === 'dd'
-      ? "(product_code LIKE 'DD%' OR origin = 'DD')"
-      : (company === 'barunson' ? "(product_code NOT LIKE 'DD%' AND origin != 'DD')" : "1=1");
+    // barunson → XERP DB, SiteCode=BK10 (바른손 창고)
+    // dd       → BHC  DB, SiteCode=BHC2 (디얼디어 창고)
+    // all      → 둘 다 조회 후 병합
 
     // 10분 캐시 — 법인별 분리
     const now = Date.now();
@@ -4151,112 +4153,170 @@ async function handleRequest(req, res) {
       return;
     }
 
-    try {
-      // 품목관리 DB에서 등록된 제품코드 리스트 로드 (법인별 필터)
-      // DD는 inactive 품목도 포함 (DD 동기화 시 is_display='F'인 제품은 inactive로 등록됨)
-      // all 모드: 바른컴퍼니는 active만, DD는 active+inactive 모두
-      const statusFilter = (company === 'dd' || company === 'all')
-        ? "(status = 'active' OR (status = 'inactive' AND (product_code LIKE 'DD%' OR origin = 'DD')))"
+    // ── 내부 헬퍼: 특정 법인의 재고/출고를 해당 DB+SiteCode에서 조회 ──
+    // legalEntity: 'barunson' | 'dd'
+    async function fetchCompanyInventory(legalEntity) {
+      const isDd = legalEntity === 'dd';
+      // 품목 리스트 필터
+      const originFilter = isDd
+        ? "(product_code LIKE 'DD%' OR origin = 'DD')"
+        : "(product_code NOT LIKE 'DD%' AND origin != 'DD')";
+      const statusFilter = isDd
+        ? "(status = 'active' OR status = 'inactive')"  // DD: inactive 포함
         : "status = 'active'";
-      const registeredProducts = await db.prepare(`SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products WHERE ${statusFilter} AND ${originFilter}`).all();
-      if (!registeredProducts.length) {
-        ok(res, { products: [], updated: new Date().toISOString(), count: 0, message: '품목관리에 등록된 제품이 없습니다. 먼저 품목을 등록해주세요.' });
-        return;
-      }
+      const registeredProducts = await db.prepare(
+        `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products WHERE ${statusFilter} AND ${originFilter}`
+      ).all();
+      if (!registeredProducts.length) return [];
       const productCodes = registeredProducts.map(p => p.product_code);
+      // IN절용 (SQL Injection 방지: 영숫자_만 허용)
+      const safeCodeList = productCodes
+        .filter(c => /^[A-Za-z0-9_\-]+$/.test(c))
+        .map(c => `'${c}'`).join(',');
+      if (!safeCodeList) return [];
 
-      // IN절용 제품코드 리스트 (SQL Injection 방지: 영숫자_만 허용)
-      const safeCodeList = productCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).map(c => `'${c}'`).join(',');
-      if (!safeCodeList) { ok(res, { products: [], updated: new Date().toISOString(), count: 0 }); return; }
-
-      // 1. 제품 현재고: mmInventory (등록 제품만 조회 — 속도 최적화)
-      const invResult = await xerpPool.request().query(`
-        SELECT RTRIM(ItemCode) AS item_code, SUM(OhQty) AS oh_qty
-        FROM mmInventory WITH (NOLOCK)
-        WHERE SiteCode = 'BK10' AND RTRIM(ItemCode) IN (${safeCodeList})
-        GROUP BY RTRIM(ItemCode)
-      `);
-      const invMap = {};
-      for (const r of invResult.recordset) {
-        invMap[(r.item_code || '').trim().toUpperCase()] = Math.round(r.oh_qty || 0);
+      // DB 풀 + SiteCode 분기
+      const dbName = isDd ? 'BHC' : 'XERP';
+      const siteCode = isDd ? 'BHC2' : 'BK10';
+      let workPool = null;
+      let createdLocal = false;
+      if (isDd) {
+        // BHC는 on-demand pool (사용 후 닫음)
+        workPool = new sql.ConnectionPool({ ...xerpConfig, database: 'BHC' });
+        await workPool.connect();
+        createdLocal = true;
+      } else {
+        workPool = xerpPool;
       }
 
-      // 2. 제품 출고: mmInoutItem (최근 3개월, 등록 제품만)
-      const today = new Date();
-      const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
-      const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
-
-      const shipResult = await xerpPool.request()
-        .input('start3m', sql.NChar(16), fmt(start3m))
-        .input('today', sql.NChar(16), fmt(today))
-        .query(`
-          SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty
-          FROM mmInoutItem WITH (NOLOCK)
-          WHERE SiteCode = 'BK10' AND InoutGubun = 'SO'
-            AND InoutDate >= @start3m AND InoutDate < @today
-            AND RTRIM(ItemCode) IN (${safeCodeList})
+      try {
+        // 1. 현재고
+        const invResult = await workPool.request().query(`
+          SELECT RTRIM(ItemCode) AS item_code, SUM(OhQty) AS oh_qty
+          FROM mmInventory WITH (NOLOCK)
+          WHERE SiteCode = '${siteCode}' AND RTRIM(ItemCode) IN (${safeCodeList})
           GROUP BY RTRIM(ItemCode)
         `);
-      const shipMap = {};
-      for (const r of shipResult.recordset) {
-        const code = (r.item_code || '').trim().toUpperCase();
-        if (code) {
-          const total = Math.round(r.total_qty || 0);
-          shipMap[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
+        const invMap = {};
+        for (const r of invResult.recordset) {
+          invMap[(r.item_code || '').trim().toUpperCase()] = Math.round(r.oh_qty || 0);
+        }
+
+        // 2. 최근 3개월 출고
+        const today = new Date();
+        const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
+        const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+        const shipResult = await workPool.request()
+          .input('start3m', sql.NChar(16), fmt(start3m))
+          .input('today', sql.NChar(16), fmt(today))
+          .query(`
+            SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty
+            FROM mmInoutItem WITH (NOLOCK)
+            WHERE SiteCode = '${siteCode}' AND InoutGubun = 'SO'
+              AND InoutDate >= @start3m AND InoutDate < @today
+              AND RTRIM(ItemCode) IN (${safeCodeList})
+            GROUP BY RTRIM(ItemCode)
+          `);
+        const shipMap = {};
+        for (const r of shipResult.recordset) {
+          const code = (r.item_code || '').trim().toUpperCase();
+          if (code) {
+            const total = Math.round(r.total_qty || 0);
+            shipMap[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
+          }
+        }
+
+        // 3. 품목명 (S2_Card) — 한 번만 조회해도 됨, 바른손 모드에서만 의미있음
+        let itemNames = {};
+        if (!isDd) {
+          try {
+            const bar1Pool = new sql.ConnectionPool({ ...xerpConfig, database: 'bar_shop1' });
+            await bar1Pool.connect();
+            const nameResult = await bar1Pool.request().query(
+              `SELECT Card_Code, Card_Name FROM S2_Card WHERE RTRIM(Card_Code) IN (${safeCodeList})`
+            );
+            nameResult.recordset.forEach(r => {
+              itemNames[(r.Card_Code || '').trim().toUpperCase()] = (r.Card_Name || '').trim();
+            });
+            await bar1Pool.close();
+          } catch (e) { console.warn('품목명 로드 실패:', e.message); }
+        }
+
+        // 4. 품목 병합
+        const out = [];
+        for (const p of registeredProducts) {
+          const code = p.product_code;
+          const codeUpper = code.toUpperCase();
+          const ohQty = invMap[codeUpper] || 0;
+          const ship = shipMap[codeUpper] || { total: 0, monthly: 0, daily: 0 };
+          out.push({
+            '제품코드': code,
+            '품목명': p.product_name || itemNames[codeUpper] || '',
+            '브랜드': p.brand || '',
+            '생산지': p.origin || '',
+            '현재고': ohQty,
+            '가용재고': ohQty,
+            '요청량': 0,
+            '_xerpMonthly': ship.monthly,
+            '_xerpDaily': ship.daily,
+            '_xerpTotal3m': ship.total,
+            '_원자재코드': p.material_code || '',
+            '_원재료용지명': p.material_name || '',
+            '_절': p.cut_spec || '',
+            '_조판': p.jopan || '',
+            '_원지사': p.paper_maker || '',
+            '_후공정업체': p.post_vendor || '',
+            'legal_entity': isDd ? 'dd' : 'barunson',
+            '_invSource': dbName,
+            '_siteCode': siteCode
+          });
+        }
+        console.log(`${dbName}/${siteCode} 재고 로드 (${legalEntity}): ${out.length}개 품목`);
+        return out;
+      } finally {
+        if (createdLocal && workPool) {
+          try { await workPool.close(); } catch(_){}
         }
       }
+    }
 
-      // 3. 품목명: bar_shop1.S2_Card (등록 제품만)
-      let itemNames = {};
-      try {
-        const bar1Pool = new sql.ConnectionPool({ ...xerpConfig, database: 'bar_shop1' });
-        await bar1Pool.connect();
-        const nameResult = await bar1Pool.request().query(`SELECT Card_Code, Card_Name FROM S2_Card WHERE RTRIM(Card_Code) IN (${safeCodeList})`);
-        nameResult.recordset.forEach(async r => { itemNames[(r.Card_Code || '').trim().toUpperCase()] = (r.Card_Name || '').trim(); });
-        await bar1Pool.close();
-      } catch (e) { console.warn('품목명 로드 실패:', e.message); }
+    try {
+      let products = [];
+      if (company === 'barunson') {
+        products = await fetchCompanyInventory('barunson');
+      } else if (company === 'dd') {
+        products = await fetchCompanyInventory('dd');
+      } else {
+        // all: 둘 다 조회 후 병합
+        const [bs, dd] = await Promise.all([
+          fetchCompanyInventory('barunson').catch(e => { console.error('barunson 조회 실패:', e.message); return []; }),
+          fetchCompanyInventory('dd').catch(e => { console.error('dd 조회 실패:', e.message); return []; })
+        ]);
+        products = [...bs, ...dd];
+      }
 
-      // 4. 품목관리 DB 기준으로 통합 (등록된 제품만)
-      const products = [];
-      for (const p of registeredProducts) {
-        const code = p.product_code;
-        const codeUpper = code.toUpperCase();
-        const ohQty = invMap[codeUpper] || 0;
-        const ship = shipMap[codeUpper] || { total: 0, monthly: 0, daily: 0 };
-        products.push({
-          '제품코드': code,
-          '품목명': p.product_name || itemNames[codeUpper] || '',
-          '브랜드': p.brand || '',
-          '생산지': p.origin || '',
-          '현재고': ohQty,
-          '가용재고': ohQty,
-          '요청량': 0,
-          '_xerpMonthly': ship.monthly,
-          '_xerpDaily': ship.daily,
-          '_xerpTotal3m': ship.total,
-          '_원자재코드': p.material_code || '',
-          '_원재료용지명': p.material_name || '',
-          '_절': p.cut_spec || '',
-          '_조판': p.jopan || '',
-          '_원지사': p.paper_maker || '',
-          '_후공정업체': p.post_vendor || ''
-        });
+      if (!products.length) {
+        ok(res, { products: [], updated: new Date().toISOString(), count: 0, message: '품목관리에 등록된 제품이 없습니다. 먼저 품목을 등록해주세요.' });
+        return;
       }
 
       const cacheData = { products, updated: new Date().toISOString(), count: products.length };
       xerpInventoryCaches[company] = { data: cacheData, time: now };
       // 기존 캐시 호환 (다른 모듈에서 참조)
       if (company === 'barunson') { xerpInventoryCache = cacheData; xerpInventoryCacheTime = now; }
-      console.log(`${company === 'dd' ? 'DD' : 'XERP'} 제품 재고 로드: ${products.length}개 제품`);
+      console.log(`재고 API 완료 (company=${company}): ${products.length}개 품목`);
       ok(res, cacheData);
     } catch (e) {
-      console.error('XERP 재고 조회 오류:', e.message);
-      // 타임아웃/연결 끊김 시 자동 재연결
-      if (e.message.includes('imeout') || e.message.includes('closed') || e.message.includes('ECONN')) {
+      console.error('재고 조회 오류:', e.message, '(company=' + company + ')');
+      // v1.0.8: 타임아웃/연결 끊김 자동 재연결은 XERP(바른손) 경로에서만 수행.
+      //         BHC(dd) 경로의 에러가 XERP 메인 풀을 내리지 않도록 company 분기.
+      //         all 모드는 Promise.all 내부에서 catch로 흡수되므로 이쪽까지 안 옴.
+      const isXerpRelated = (company === 'barunson' || company === 'all');
+      if (isXerpRelated && (e.message.includes('imeout') || e.message.includes('closed') || e.message.includes('ECONN'))) {
         try { await xerpPool.close(); } catch(_){}
         try { xerpPool = await sql.connect(xerpConfig); console.log('XERP 재연결 완료'); } catch(re) { console.error('XERP 재연결 실패:', re.message); }
       }
-      fail(res, 500, 'XERP 재고 조회 오류: ' + e.message);
+      fail(res, 500, '재고 조회 오류: ' + e.message);
     }
     return;
   }
@@ -8304,17 +8364,18 @@ async function handleRequest(req, res) {
     const { po_number, po_date, due_date, vendor_id, vendor_name, vendor_contact, vendor_phone, vendor_email,
             issuer_name, issuer_contact, issuer_phone, issuer_email, payment_terms, remark,
             items, total_supply, total_tax, total_amount } = body;
+    const legal_entity = (body.legal_entity === 'dd') ? 'dd' : 'barunson';
     const result = await db.prepare(`INSERT INTO po_drafts
       (po_number,po_date,due_date,vendor_id,vendor_name,vendor_contact,vendor_phone,vendor_email,
        issuer_name,issuer_contact,issuer_phone,issuer_email,payment_terms,remark,
-       items,total_supply,total_tax,total_amount)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+       items,total_supply,total_tax,total_amount,legal_entity)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       po_number||'', po_date||'', due_date||'', vendor_id||0, vendor_name||'',
       vendor_contact||'', vendor_phone||'', vendor_email||'',
       issuer_name||'바른컴퍼니', issuer_contact||'', issuer_phone||'', issuer_email||'',
       payment_terms||'', remark||'',
       typeof items === 'string' ? items : JSON.stringify(items||[]),
-      total_supply||0, total_tax||0, total_amount||0
+      total_supply||0, total_tax||0, total_amount||0, legal_entity
     );
     ok(res, { id: result.lastInsertRowid });
     return;

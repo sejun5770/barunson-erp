@@ -1410,7 +1410,7 @@ var _megaData = {
     title: '구매관리',
     items: [
       {icon:'🔄',bg:'#eef2ff',fg:'#6366f1',name:'자동발주',desc:'전략발주 + 단가 최적화',page:'auto-order',origins:['한국','더기프트'],companies:['barunson']},
-      {icon:'📝',bg:'#eff6ff',fg:'#2563eb',name:'발주서 작성',desc:'선택 품목으로 PO 생성/발송',page:'create-po',origins:['한국','중국','더기프트'],companies:['barunson']},
+      {icon:'📝',bg:'#eff6ff',fg:'#2563eb',name:'발주서 작성',desc:'선택 품목으로 PO 생성/발송',page:'create-po',origins:['한국','중국','더기프트','DD'],companies:['barunson','dd']},
       {icon:'📋',bg:'#f0fdf4',fg:'#16a34a',name:'발주현황',desc:'PO 상태 관리',page:'po-list',origins:['한국','중국','더기프트'],companies:['barunson'],badgeId:'qmPOList'},
       {icon:'📄',bg:'#f5f3ff',fg:'#7c3aed',name:'발주서 관리',desc:'발주서 출력 + 이력',page:'po-mgmt',companies:['barunson'],badgeId:'qmPOMgmt'},
       {icon:'🚢',bg:'#fef2f2',fg:'#dc2626',name:'중국선적',desc:'交期表 + BL추적',page:'china-shipment',clickOrigin:'중국',companies:['barunson']},
@@ -2568,6 +2568,10 @@ function closeMegaMenu() { /* no-op */ }
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
       <div style="font-weight:700;font-size:16px">✍️ 발주서 작성</div>
       <div style="display:flex;gap:6px;align-items:center">
+        <select id="poTargetEntity" onchange="switchPOEntity(this.value)" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;color:#7c3aed;font-weight:600">
+          <option value="barunson">바른컴퍼니</option>
+          <option value="dd">디디</option>
+        </select>
         <input type="text" id="poTargetSearch" placeholder="품목코드/품목명 검색" oninput="renderPOTargets()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;width:180px">
         <select id="poTargetStatus" onchange="renderPOTargets()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:6px">
           <option value="">전체 상태</option>
@@ -7268,13 +7272,20 @@ async function processData(products){
 
   await Promise.allSettled(promises);
 
-  // 법인별 필터링: 바른컴퍼니=한국/중국/더기프트, 디얼디어=DD
-  const _companyOrigins = getCompanyCfg().origins;
-  RAW=products.filter(p=>{
-    const origin = p['생산지'] || originMap[p['제품코드']] || '한국';
-    return _companyOrigins.includes(origin);
+  // v1.0.8: 법인 분리는 legal_entity 필드 기반 (BHC에서 들어온 DD 품목의 origin은 한국/중국/더기프트 그대로 유지됨)
+  // 서버가 /api/xerp-inventory 응답에 legal_entity를 이미 마킹함. 프론트는 전체를 RAW로 받고,
+  // 각 페이지에서 _currentCompany / _poCurrentEntity 로 필터링한다.
+  RAW = products.slice();
+  RAW.forEach(p=>{
+    p._origin = p['생산지'] || originMap[p['제품코드']] || '한국';
+    // 월출고 필드 정규화: BHC/XERP 재고 API는 _xerpMonthly로 내려줌 → 월출고 필드로도 복사
+    if (p._xerpMonthly != null && p['월출고'] == null) p['월출고'] = p._xerpMonthly;
+    // legal_entity 보정 (서버에서 빠진 경우 prefix 기반)
+    if (!p.legal_entity) {
+      const _c = String(p['제품코드']||'').toUpperCase();
+      p.legal_entity = _c.startsWith('DD') ? 'dd' : 'barunson';
+    }
   });
-  RAW.forEach(p=>{p._origin=p['생산지']||originMap[p['제품코드']]||'한국';});
   RAW.forEach(classifyItem);
   classified={urgent:[],nohistory:[],danger:[],safe:[],nosale:[],printwarehouse:[],etc:[]};
   RAW.forEach(p=>{
@@ -7931,6 +7942,14 @@ function goToCreatePO(){
 
 // ===== 발주대상 탭 시스템 =====
 let _poCurrentOrigin = '한국';
+let _poCurrentEntity = 'barunson'; // 'barunson' | 'dd'
+function switchPOEntity(entity){
+  _poCurrentEntity = entity || 'barunson';
+  // DD는 생산지 구분이 의미 적으므로 "전체"를 기본값으로
+  if(_poCurrentEntity === 'dd'){ _poCurrentOrigin = 'all'; }
+  else if(_poCurrentOrigin === 'all'){ _poCurrentOrigin = '한국'; }
+  renderPOTargets();
+}
 let _poTargetChecked = {};
 let _poTargetQty = {};
 
@@ -7953,8 +7972,14 @@ function getPOTargetItems() {
   return RAW.filter(p => {
     const code = p['제품코드'] || p['품목코드'] || '';
     if (!code) return false;
+    // 법인 필터 (v1.0.8)
+    const _upper = String(code).toUpperCase();
+    const isDD = (p.legal_entity === 'dd') || _upper.startsWith('DD') || p['_origin'] === 'DD' || p['생산지'] === 'DD' || p['브랜드'] === 'DD';
+    if (_poCurrentEntity === 'dd' && !isDD) return false;
+    if (_poCurrentEntity === 'barunson' && isDD) return false;
     const origin = p['생산지'] || p['origin'] || '';
-    if (origin !== _poCurrentOrigin) return false;
+    // DD 법인일 땐 생산지 탭 '전체' 허용
+    if (_poCurrentOrigin !== 'all' && origin !== _poCurrentOrigin) return false;
     // 검색
     if (search) {
       const name = (p['품목명'] || p['제품명'] || '').toLowerCase();
@@ -7984,10 +8009,16 @@ function renderPOTargets() {
   const empty = document.getElementById('poTargetEmpty');
   if (!tbody) return;
 
-  // 탭 배지 업데이트 (전체 RAW 기준으로 각 origin 긴급+위험 카운트)
+  // 탭 배지 업데이트 (전체 RAW 기준으로 각 origin 긴급+위험 카운트) — 현재 법인 필터 반영
   const statusVal = document.getElementById('poTargetStatus')?.value || '';
+  const _entityOf = (p) => {
+    const _c = String(p['제품코드']||p['품목코드']||'').toUpperCase();
+    const _isDD = (p.legal_entity==='dd') || _c.startsWith('DD') || p['_origin']==='DD' || p['생산지']==='DD' || p['브랜드']==='DD';
+    return _isDD ? 'dd' : 'barunson';
+  };
   ['한국','중국','더기프트'].forEach(org => {
     const cnt = RAW.filter(p => {
+      if (_entityOf(p) !== _poCurrentEntity) return false;
       const o = p['생산지'] || p['origin'] || '';
       if (o !== org) return false;
       if (!statusVal) return true;
@@ -16280,7 +16311,9 @@ async function savePODraft(){
     items: JSON.stringify(items),
     total_supply: totalSupply,
     total_tax: totalTax,
-    total_amount: totalSupply + totalTax
+    total_amount: totalSupply + totalTax,
+    // v1.0.8: 현재 선택된 법인 마킹 (발주서 작성 페이지의 법인 필터 값)
+    legal_entity: (typeof _poCurrentEntity !== 'undefined' && _poCurrentEntity) || 'barunson'
   };
 
   const resp = await fetch('/api/po-drafts', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()).catch(()=>null);
