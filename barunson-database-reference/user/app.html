@@ -19430,13 +19430,16 @@ function initVendorPortal(){
   }
 
   // 사이드바 숨김, 메인 풀스크린
-  document.querySelector('.sidebar').style.display='none';
-  document.querySelector('.main').style.marginLeft='0';
-  document.querySelector('.main').style.maxWidth='100%';
+  const _sb=document.getElementById('sidebarNav')||document.querySelector('.sidebar-nav')||document.querySelector('.sidebar');
+  if(_sb) _sb.style.display='none';
+  const _main=document.querySelector('.main');
+  if(_main){_main.style.marginLeft='0';_main.style.maxWidth='100%';}
 
-  // 헤더 변경
-  document.getElementById('pageTitle').textContent='업체 발주 포털';
-  document.querySelector('.header-right').innerHTML='<span style="font-size:13px;color:var(--text-muted)">'+email+'</span>';
+  // 헤더 변경: 포탈 전용
+  const _pt=document.getElementById('pageTitle');
+  if(_pt) _pt.textContent='업체 발주 포털';
+  const _hr=document.querySelector('.header-right');
+  if(_hr) _hr.innerHTML=`<span style="font-size:14px;font-weight:600;color:var(--text-primary)">${vendorPortalName||''}</span> <span style="font-size:12px;color:var(--text-muted);margin-left:8px">${email||''}</span>`;
 
   // 모든 페이지 숨기고 포털 페이지 표시
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
@@ -22062,10 +22065,7 @@ async function submitEditUser(id) {
   } catch (e) { alert('오류: ' + e.message); }
 }
 
-// Init: check vendor portal mode, then auth
-if(!initVendorPortal()){
-  // initAuth()가 페이지 맨 끝에서 호출됨 (로그인 체크 후 showApp → loadDashboard)
-}
+// Init: vendor portal check는 맨 끝에서 실행 (DOM 완전 로드 후)
 // ═══════════════════════════════════════════════════════════════════
 //  생산재고 (Production Stock / Gift Set)
 // ═══════════════════════════════════════════════════════════════════
@@ -29988,8 +29988,8 @@ async function toggleJaConfig(eventType, enabled) {
   } catch(e) { alert('오류: '+e.message); }
 }
 
-// ===== 앱 시작: 인증 체크 =====
-initAuth();
+// ===== 앱 시작: 거래처 포탈 우선 체크 → 아니면 일반 인증 =====
+if(!initVendorPortal()) { initAuth(); }
 </script>
 </body>
 </html>
