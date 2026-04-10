@@ -3012,7 +3012,8 @@ function closeMegaMenu() { /* no-op */ }
           <tbody id="receiptItemsTable"><tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:16px">발주서를 선택하세요</td></tr></tbody>
         </table>
       </div>
-      <div style="display:flex;gap:8px;align-items:center">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="receiptWarehouse" style="width:160px"><option value="">입고 창고 선택</option></select>
         <input type="text" id="receiptNotes" placeholder="비고 (선택)" style="width:200px">
         <button class="btn btn-primary" onclick="saveReceipt('korea')">입고 저장</button>
       </div>
@@ -3050,7 +3051,8 @@ function closeMegaMenu() { /* no-op */ }
           <tbody id="receiptChinaItemsTable"><tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:16px">발주서를 선택하세요</td></tr></tbody>
         </table>
       </div>
-      <div style="display:flex;gap:8px;align-items:center">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="receiptChinaWarehouse" style="width:160px"><option value="">입고 창고 선택</option></select>
         <input type="text" id="receiptChinaNotes" placeholder="비고 (선택)" style="width:200px">
         <button class="btn btn-primary" onclick="saveReceipt('china')">입고 저장 (차수 등록)</button>
       </div>
@@ -3864,7 +3866,7 @@ function closeMegaMenu() { /* no-op */ }
           <thead><tr>
             <th style="width:30px"><input type="checkbox" id="mrpCheckAll" onchange="toggleMrpCheckAll()"></th>
             <th>완제품</th><th>자재코드</th><th>자재명</th><th>공정</th><th>거래처</th>
-            <th>총소요량</th><th>현재고</th><th>기발주</th><th>순소요량</th><th>발주제안</th><th>상태</th>
+            <th>총소요량</th><th>현재고</th><th>입고중</th><th>순소요량</th><th>발주제안</th><th>상태</th>
           </tr></thead>
           <tbody id="mrpResultBody"></tbody>
         </table>
@@ -7173,9 +7175,12 @@ function classifyItem(p){
   p._turnover = monthly > 0 ? Math.round((av / monthly) * 10) / 10 : null;
   if (!p._xerpMonthly) p._xerpMonthly = xu ? xu.monthly : 0;
 
-  // ── 미입고 잔량 (발주 트래킹) ──
+  // ── 발주 트래킹 (입고중 + 입고완료 미동기화) ──
   const po = pendingOrders[code];
-  p._pendingQty = po ? po.pending_qty : 0;
+  p._pendingQty = po ? po.pending_qty : 0;           // 미입고 잔량 (진행중 PO)
+  p._receivedNotSynced = po ? parseInt(po.received_not_synced || 0) : 0;  // 입고완료 but XERP 미동기화
+  p._pendingQty = parseInt(p._pendingQty || 0);
+  p._totalTracked = p._pendingQty + p._receivedNotSynced;  // 전체 추적수량
   p._pendingOS = po ? po.os_numbers : [];
   p._pendingPO = po ? po.po_numbers : [];
   p._lastOrderDate = po ? po.last_order_date : '';
@@ -7216,8 +7221,8 @@ function classifyItem(p){
     p._orderByDiff = Math.round((orderByDate.getTime() - today.getTime()) / 86400000);
   } else { p._orderByDate = null; p._daysToSafety = null; p._orderByDiff = null; }
 
-  // ── 발주필요여부 = (가용재고+미입고) < 발주점 && 매출있음 ──
-  const effectiveStock = av + p._pendingQty;
+  // ── 발주필요여부 = (가용재고+입고중+입고완료미동기화) < 발주점 && 매출있음 ──
+  const effectiveStock = av + p._pendingQty + (p._receivedNotSynced || 0);
   p._effectiveStock = effectiveStock;
   p._needOrder = (monthly > 0 && effectiveStock < reorderPoint);
 
@@ -7484,10 +7489,15 @@ function renderCell(c, p){
     return`<td class="n" style="${ss?'':'color:#ccc'}">${ss?ss.toLocaleString():'-'}</td>`;
   }
   if(c.special==='pendingQty'){
-    const pq=p._pendingQty||0;
-    if(!pq)return`<td class="n" style="color:#ddd">-</td>`;
+    const pq=parseInt(p._pendingQty)||0;
+    const rns=parseInt(p._receivedNotSynced)||0;
+    if(!pq&&!rns)return`<td class="n" style="color:#ddd">-</td>`;
     const osStr=p._pendingOS?.length?` title="OS: ${p._pendingOS.join(', ')}"`:'';;
-    return`<td class="n" style="color:#6366f1;font-weight:600;cursor:help"${osStr}>${pq.toLocaleString()}</td>`;
+    let html='<td class="n" style="cursor:help"'+osStr+'>';
+    if(pq>0) html+=`<div style="color:#6366f1;font-weight:600;font-size:12px">${pq.toLocaleString()}<span style="font-size:9px;font-weight:400;color:#9ca3af;margin-left:2px">입고중</span></div>`;
+    if(rns>0) html+=`<div style="color:#16a34a;font-weight:600;font-size:11px">${rns.toLocaleString()}<span style="font-size:9px;font-weight:400;color:#9ca3af;margin-left:2px">입고완료</span></div>`;
+    html+='</td>';
+    return html;
   }
   if(c.special==='pendingOS'){
     const os=p._pendingOS||[];
@@ -7498,14 +7508,18 @@ function renderCell(c, p){
     const es=p._effectiveStock||0;
     const av=p['가용재고']||0;
     const pq=p._pendingQty||0;
-    if(!pq)return`<td class="n" style="color:var(--text-muted)">${av?av.toLocaleString():'-'}</td>`;
+    const rns=p._receivedNotSynced||0;
+    if(!pq&&!rns)return`<td class="n" style="color:var(--text-muted)">${av?av.toLocaleString():'-'}</td>`;
     const ss=p._safetyStock||0;
     const color=es<=ss?'#ef4444':es<=ss*1.5?'#f59e0b':'#22c55e';
-    return`<td class="n" style="color:${color};font-weight:700" title="현재고 ${av.toLocaleString()} + 미입고 ${pq.toLocaleString()}">${es.toLocaleString()}</td>`;
+    const tip=`현재고 ${av.toLocaleString()}${pq?` + 입고중 ${pq.toLocaleString()}`:''}${rns?` + 입고완료 ${rns.toLocaleString()}`:''}`;
+    return`<td class="n" style="color:${color};font-weight:700" title="${tip}">${es.toLocaleString()}</td>`;
   }
   if(c.special==='needOrder'){
     if(p._needOrder){
       const pq=p._pendingQty||0;
+      const rns=p._receivedNotSynced||0;
+      if(rns>0) return`<td style="text-align:center"><span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;color:#16a34a;background:#dcfce7">입고완료</span><div style="font-size:9px;color:#9ca3af">XERP 미동기화</div></td>`;
       if(pq>0) return`<td style="text-align:center"><span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;color:#7c3aed;background:#ede9fe">발주중</span></td>`;
       return`<td style="text-align:center"><span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;color:#dc2626;background:#fee2e2">발주필요</span></td>`;
     }
@@ -15477,6 +15491,21 @@ function switchReceiptTab(tab){
 }
 
 function loadReceipts(){
+  // Load warehouse list for dropdowns
+  fetch('/api/warehouses').then(r=>r.json()).then(resp=>{
+    const whs=(resp.data||resp||[]).filter(w=>!w.code.startsWith('TEST'));
+    ['receiptWarehouse','receiptChinaWarehouse'].forEach(id=>{
+      const sel=document.getElementById(id); if(!sel) return;
+      sel.innerHTML='<option value="">입고 창고 선택</option>';
+      whs.forEach(w=>{
+        const o=document.createElement('option');
+        o.value=w.id;
+        o.textContent=`${w.name}${w.is_default?' (기본)':''}`;
+        if(w.is_default) o.selected=true;
+        sel.appendChild(o);
+      });
+    });
+  }).catch(()=>{});
   // Load POs for both dropdowns (confirmed/partial, split by origin)
   fetch('/api/po?include=items').then(r=>r.json()).then(resp=>{
     const data=(resp.data||resp||[]).filter(po=>po.status!=='완료'&&po.status!=='취소'&&po.status!=='received');
@@ -15634,6 +15663,9 @@ function saveReceipt(origin){
 
   const batchNo = origin==='china' ? parseInt((document.getElementById('chinaBatchNo').textContent||'1').replace(/[^0-9]/g,''))||1 : 1;
   const notes = document.getElementById(notesId)?.value || '';
+  const whSelId = origin==='china'?'receiptChinaWarehouse':'receiptWarehouse';
+  const warehouseId = document.getElementById(whSelId)?.value || '';
+  if(!warehouseId){alert('입고 창고를 선택하세요.');return;}
 
   const receipt={
     po_number: po.po_number,
@@ -15641,6 +15673,7 @@ function saveReceipt(origin){
     items: receiptItems,
     batch_no: batchNo,
     notes: notes,
+    warehouse_id: parseInt(warehouseId),
     received_at: new Date().toISOString()
   };
 
@@ -19652,22 +19685,39 @@ async function loadVendorPortal(){
                 <td style="padding:5px 4px;text-align:center"><input type="date" class="vp-ship-date" data-po="${po.po_id}" data-item="${it.item_id||idx}" value="${it.ship_date||today}" style="width:100%;padding:5px 4px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px;text-align:center"></td>
                 <td style="padding:8px 6px;font-size:11px;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.process_chain_full||'')}">${esc(it.process_chain_full||'-')}</td>
               </tr>`;}).join('')}</tbody>`
-              : `<colgroup><col style="width:18%"><col style="width:16%"><col style="width:26%"><col style="width:16%"><col style="width:24%"></colgroup>
+              : `<colgroup><col style="width:12%"><col style="width:9%"><col style="width:14%"><col style="width:10%"><col style="width:10%"><col style="width:10%"><col style="width:10%"><col style="width:7%"><col style="width:18%"></colgroup>
               <thead><tr style="background:#f1f5f9">
-                <th style="padding:8px 6px;text-align:left;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:13px">제품코드</th>
-                <th style="padding:8px 6px;text-align:left;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:13px">공정</th>
-                <th style="padding:8px 6px;text-align:left;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:13px">제품사양</th>
-                <th style="padding:8px 6px;text-align:right;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:13px">수량(매)</th>
-                <th style="padding:8px 6px;text-align:center;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:13px">출고일</th>
+                <th style="padding:8px 4px;text-align:left;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:12px">제품코드</th>
+                <th style="padding:8px 4px;text-align:left;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:12px">공정</th>
+                <th style="padding:8px 4px;text-align:left;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:12px">제품사양</th>
+                <th style="padding:8px 4px;text-align:center;border-bottom:2px solid #94a3b8;font-weight:700;color:#dc2626;font-size:11px">긴급도</th>
+                <th style="padding:8px 4px;text-align:right;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:12px">생산수량</th>
+                <th style="padding:8px 4px;text-align:right;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:12px">생산완료</th>
+                <th style="padding:8px 4px;text-align:right;border-bottom:2px solid #94a3b8;font-weight:700;color:#dc2626;font-size:12px">불량</th>
+                <th style="padding:8px 4px;text-align:center;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:11px">불량<br>보고</th>
+                <th style="padding:8px 4px;text-align:center;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:12px">출고일</th>
               </tr></thead>
               <tbody>${items.map((it,idx)=>{
                 const today=new Date().toISOString().slice(0,10);
-                return `<tr style="border-bottom:1px solid #e2e8f0">
-                <td style="padding:8px 6px;font-weight:600;font-size:13px">${esc(it.product_code||'')}</td>
-                <td style="padding:8px 6px;color:#0369a1;font-weight:600;font-size:13px">${esc(it.process_type||it.spec||'-')}</td>
-                <td style="padding:8px 6px;font-size:13px;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.product_spec||'')}">${esc(it.product_spec||'-')}</td>
-                <td style="padding:8px 6px;text-align:right;font-weight:700;color:var(--primary);font-size:15px">${(it.ordered_qty||0).toLocaleString()}</td>
-                <td style="padding:5px 4px;text-align:center"><input type="date" class="vp-ship-date" data-po="${po.po_id}" data-item="${it.item_id||idx}" value="${it.ship_date||today}" style="width:100%;padding:5px 4px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px;text-align:center"></td>
+                const pq=it.produced_qty||0;
+                const oq=it.ordered_qty||0;
+                const dq=it.defect_qty||0;
+                const pqColor=pq>=oq?'#16a34a':pq>0?'#d97706':'#94a3b8';
+                const cs=it.current_stock||0, mu=it.monthly_usage||0, sm=it.stock_months, rd=it.remain_days;
+                const urgDetail=mu>0?'현재고 '+cs.toLocaleString()+' / 월 '+mu.toLocaleString()+(rd!==null?' / '+rd+'일':''):'';
+                const urgBadge=it.is_urgent?'<div><span style="background:#dc2626;color:#fff;padding:2px 6px;border-radius:3px;font-weight:700;font-size:11px;animation:pulse 1.5s infinite">🚨 긴급</span>'+(urgDetail?'<div style="font-size:9px;color:#dc2626;margin-top:2px">'+urgDetail+'</div>':'')+'</div>'
+                  :it.is_danger?'<div><span style="background:#f59e0b;color:#fff;padding:2px 6px;border-radius:3px;font-weight:600;font-size:11px">⚠ 위험</span>'+(urgDetail?'<div style="font-size:9px;color:#b45309;margin-top:2px">'+urgDetail+'</div>':'')+'</div>'
+                  :'<span style="color:#10b981;font-size:11px">안전</span>';
+                return `<tr style="border-bottom:1px solid #e2e8f0;${it.is_urgent?'background:#fff5f5;':''}">
+                <td style="padding:6px 4px;font-weight:600;font-size:12px">${esc(it.product_code||'')}</td>
+                <td style="padding:6px 4px;color:#0369a1;font-weight:600;font-size:12px">${esc(it.process_type||it.spec||'-')}</td>
+                <td style="padding:6px 4px;font-size:11px;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.product_spec||'')}">${esc(it.product_spec||'-')}</td>
+                <td style="padding:6px 4px;text-align:center">${urgBadge}</td>
+                <td style="padding:6px 4px;text-align:right;font-weight:700;color:var(--primary);font-size:14px">${oq.toLocaleString()}</td>
+                <td style="padding:4px 2px;text-align:right"><input type="number" class="vp-produced-qty" data-po="${po.po_id}" data-item="${it.item_id||idx}" value="${pq||''}" placeholder="0" style="width:80px;padding:4px 3px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px;text-align:right;font-weight:700;color:${pqColor}"></td>
+                <td style="padding:6px 4px;text-align:right;font-weight:700;color:${dq>0?'#dc2626':'#94a3b8'};font-size:13px">${dq>0?dq.toLocaleString():'-'}</td>
+                <td style="padding:4px 2px;text-align:center"><button onclick="openVpDefectModal('${po.po_id}','${it.item_id||idx}','${esc(it.product_code||'')}')" style="padding:3px 8px;border:1px solid #fca5a5;border-radius:4px;background:#fef2f2;color:#dc2626;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">🚫 보고</button></td>
+                <td style="padding:4px 2px;text-align:center"><input type="date" class="vp-ship-date" data-po="${po.po_id}" data-item="${it.item_id||idx}" value="${it.ship_date||today}" style="width:100%;padding:4px 3px;border:1px solid #cbd5e1;border-radius:5px;font-size:12px;text-align:center"></td>
               </tr>`}).join('')}</tbody>`}
             </table>
             ${shipmentScheduleHtml}
@@ -19699,6 +19749,21 @@ async function loadVendorPortal(){
       });
     });
 
+    // 생산완료수량 변경 시 자동 저장
+    portalPage.querySelectorAll('.vp-produced-qty').forEach(inp=>{
+      inp.addEventListener('change', async function(){
+        const poId=this.dataset.po;
+        const itemId=this.dataset.item;
+        const val=parseInt(this.value)||0;
+        try {
+          await fetch('/api/vendor-portal/item-produced-qty',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({po_id:poId,item_id:itemId,produced_qty:val,access:vendorPortalToken})});
+          this.style.background='#ecfdf5'; this.style.color='#16a34a';
+          setTimeout(()=>{this.style.background='';},1000);
+        } catch(e){ this.style.background='#fef2f2'; }
+      });
+    });
+
     // 거래명세서 로드 (확인 이후 상태의 PO)
     for (const po of allToShow) {
       if (['확인','수령중','완료','OS등록대기','OS검증대기'].includes(po.status)) {
@@ -19710,6 +19775,98 @@ async function loadVendorPortal(){
       <h3 style="color:var(--urgent)">연결 실패</h3>
       <p>서버에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.</p>
     </div>`;
+  }
+}
+
+// ===== 불량 보고 모달 =====
+function openVpDefectModal(poId, itemId, productCode) {
+  const existing = document.getElementById('vpDefectModal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'vpDefectModal';
+  modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:24px;width:90%;max-width:480px;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h3 style="margin:0;font-size:16px;font-weight:700;color:#1e293b">🚫 불량 보고</h3>
+        <button onclick="document.getElementById('vpDefectModal').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#94a3b8">&times;</button>
+      </div>
+      <div style="background:#f8fafc;border-radius:8px;padding:10px 12px;margin-bottom:16px;font-size:13px">
+        <span style="color:#64748b">발주:</span> <strong>PO-${poId}</strong>
+        <span style="margin-left:12px;color:#64748b">제품:</span> <strong>${productCode}</strong>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:4px">불량 유형 *</label>
+          <select id="vpDefType" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;font-family:inherit">
+            <option value="">선택하세요</option>
+            <option value="인쇄불량">인쇄불량</option>
+            <option value="톰슨불량">톰슨불량 (재단)</option>
+            <option value="접착불량">접착불량</option>
+            <option value="용지불량">용지불량 (원지 하자)</option>
+            <option value="코팅불량">코팅불량</option>
+            <option value="봉투불량">봉투불량</option>
+            <option value="색상불량">색상불량 (색차)</option>
+            <option value="박불량">박불량 (핫스탬핑)</option>
+            <option value="형압불량">형압불량 (엠보싱)</option>
+            <option value="오염">오염/찍힘</option>
+            <option value="기타">기타</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:4px">불량 수량 (매) *</label>
+          <input type="number" id="vpDefQty" placeholder="0" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;font-family:inherit;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:4px">조치사항</label>
+          <select id="vpDefAction" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;font-family:inherit">
+            <option value="재작업">재작업 예정</option>
+            <option value="폐기">폐기 처리</option>
+            <option value="납품보류">납품 보류</option>
+            <option value="대체출고">대체 출고</option>
+            <option value="미정">미정 (확인 필요)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#475569;display:block;margin-bottom:4px">상세 설명</label>
+          <textarea id="vpDefDesc" rows="3" placeholder="불량 원인, 상태 등을 상세히 입력해주세요..." style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px">
+        <button onclick="document.getElementById('vpDefectModal').remove()" style="padding:8px 16px;border:1px solid #d1d5db;border-radius:6px;background:#fff;cursor:pointer;font-size:13px;font-family:inherit">취소</button>
+        <button onclick="submitVpDefect('${poId}','${itemId}','${productCode}')" style="padding:8px 16px;border:none;border-radius:6px;background:#dc2626;color:#fff;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit">불량 보고 제출</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function submitVpDefect(poId, itemId, productCode) {
+  const defType = document.getElementById('vpDefType').value;
+  const defQty = parseInt(document.getElementById('vpDefQty').value) || 0;
+  const defAction = document.getElementById('vpDefAction').value;
+  const defDesc = document.getElementById('vpDefDesc').value;
+  if (!defType) { alert('불량 유형을 선택해주세요'); return; }
+  if (!defQty || defQty <= 0) { alert('불량 수량을 입력해주세요'); return; }
+  try {
+    const resp = await fetch('/api/vendor-portal/defect-report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        po_id: poId, item_id: itemId, product_code: productCode,
+        defect_type: defType, defect_qty: defQty,
+        description: `[${defAction}] ${defDesc}`.trim(),
+        access: vendorPortalToken
+      })
+    }).then(r => r.json());
+    if (resp.ok) {
+      alert('✅ 불량 보고가 접수되었습니다.\n바른컴퍼니 담당자가 확인 후 연락드리겠습니다.');
+      document.getElementById('vpDefectModal').remove();
+      loadVendorPortal(); // 새로고침
+    } else {
+      alert('보고 실패: ' + (resp.error || ''));
+    }
+  } catch (e) {
+    alert('서버 연결 실패: ' + e.message);
   }
 }
 
@@ -25370,7 +25527,7 @@ async function loadProcurementPage() {
 async function loadProcPipeline() {
   const origin = _procOriginMap[_procTab];
   try {
-    const r = await authFetch('/api/procurement/pipeline?origin=' + encodeURIComponent(origin));
+    const r = await authFetch('/api/procurement/pipeline?origin=' + encodeURIComponent(origin) + '&entity=' + encodeURIComponent(_procEntity || 'barunson'));
     const d = (await r.json()).data;
     if (!d || !d.stages) return;
     // Pipeline visualization

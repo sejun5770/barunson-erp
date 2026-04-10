@@ -1194,6 +1194,39 @@ for (const tbl of _entityTables) {
     await db.prepare(`UPDATE ${tbl} SET legal_entity='barunson' WHERE legal_entity IS NULL OR legal_entity=''`).run();
   } catch(e) { /* 컬럼 없으면 무시 */ }
 }
+// DD 제품 마킹: product_code가 DD로 시작하는 품목 → legal_entity='dd'
+try {
+  const ddUpdated = await db.prepare("UPDATE products SET legal_entity='dd' WHERE product_code LIKE 'DD%' AND (legal_entity IS NULL OR legal_entity='barunson')").run();
+  if (ddUpdated.changes > 0) console.log(`[entity-backfill] DD 제품 ${ddUpdated.changes}건 → legal_entity='dd' 마킹`);
+  // PO도 DD 품목이 포함된 것은 dd로 마킹
+  const ddPoUpdated = await db.prepare(`UPDATE po_header SET legal_entity='dd' WHERE po_id IN (SELECT DISTINCT po_id FROM po_items WHERE product_code LIKE 'DD%') AND (legal_entity IS NULL OR legal_entity='barunson')`).run();
+  if (ddPoUpdated.changes > 0) console.log(`[entity-backfill] DD 관련 PO ${ddPoUpdated.changes}건 → legal_entity='dd' 마킹`);
+} catch(e) { console.warn('[entity-backfill] DD 마킹 오류:', e.message); }
+
+// ── DDL 권한 부족 대응: onely 계정으로 legal_entity 컬럼 추가 시도 ──
+// sc_erp 계정은 ALTER TABLE 불가 → onely(superuser)로 별도 연결하여 DDL 실행
+{
+  const { Pool: _PgPool } = require('pg');
+  const _ddlHost = envVars.PG_HOST || process.env.PG_HOST || 'onely-postgres';
+  const _ddlPort = parseInt(envVars.PG_PORT || process.env.PG_PORT || '5432');
+  const _ddlDb = envVars.PG_DATABASE || process.env.PG_DATABASE || 'sc_erp';
+  const _ddlPool = new _PgPool({ host: _ddlHost, port: _ddlPort, user: 'onely', password: 'onely', database: _ddlDb, max: 2 });
+  let _ddlOk = 0;
+  for (const tbl of _entityTables) {
+    try {
+      const chk = await _ddlPool.query("SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name='legal_entity'", [tbl]);
+      if (!chk.rows.length) {
+        await _ddlPool.query(`ALTER TABLE ${tbl} ADD COLUMN legal_entity TEXT DEFAULT 'barunson'`);
+        _ddlOk++;
+        console.log(`[DDL/onely] ${tbl}.legal_entity 컬럼 추가 완료`);
+      }
+    } catch(e) { /* 테이블 없거나 이미 존재 */ }
+  }
+  if (_ddlOk) console.log(`[DDL/onely] ${_ddlOk}개 테이블에 legal_entity 컬럼 추가`);
+  // GRANT 권한도 부여 (sc_erp 계정이 읽기/쓰기 가능하도록)
+  try { await _ddlPool.query("GRANT ALL ON ALL TABLES IN SCHEMA public TO sc_erp"); } catch(e) {}
+  await _ddlPool.end();
+}
 
 // ── 컬럼 존재 여부 점검 (PG 권한 부족으로 ALTER 실패한 테이블 대응) ──
 // 운영 PG의 일부 테이블은 owner가 아니라서 ALTER TABLE이 silent fail함.
@@ -1445,6 +1478,25 @@ await db.exec("CREATE INDEX IF NOT EXISTS idx_activity_date ON po_activity_log(c
 // ── po_items에 ship_date 컬럼 추가 (품목별 출고일) ──
 try { await db.exec(`ALTER TABLE po_items ADD COLUMN ship_date TEXT DEFAULT ''`); } catch(e) {}
 try { await db.exec(`ALTER TABLE po_items ADD COLUMN os_number TEXT DEFAULT ''`); } catch(e) {}
+try { await db.exec(`ALTER TABLE po_items ADD COLUMN produced_qty INTEGER DEFAULT 0`); } catch(e) {}
+try { await db.exec(`ALTER TABLE po_items ADD COLUMN defect_qty INTEGER DEFAULT 0`); } catch(e) {}
+
+// ── 거래처 불량 보고 ──
+await db.exec(`CREATE TABLE IF NOT EXISTS vendor_defect_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  po_id INTEGER NOT NULL,
+  item_id INTEGER,
+  product_code TEXT,
+  vendor_name TEXT,
+  defect_type TEXT NOT NULL,
+  defect_qty INTEGER DEFAULT 0,
+  description TEXT DEFAULT '',
+  action_taken TEXT DEFAULT '',
+  status TEXT DEFAULT 'reported',
+  reported_at TEXT DEFAULT (datetime('now','localtime')),
+  resolved_at TEXT,
+  resolved_by TEXT
+)`);
 
 // ── 불량/품질 관리 ──
 await db.exec(`CREATE TABLE IF NOT EXISTS defects (
@@ -4358,17 +4410,20 @@ async function handleRequest(req, res) {
   }
 
   // ════════════════════════════════════════════════════════════════════
-  //  품목별 미입고 잔량 API (발주 트래킹 — 중복발주 방지)
+  //  품목별 발주 트래킹 API (중복발주 방지 — 입고중 + 입고완료 미동기화)
   // ════════════════════════════════════════════════════════════════════
   if (pathname === '/api/inventory/pending-orders' && method === 'GET') {
     try {
-      const rows = await db.prepare(`
+      // 1) 진행중 PO (미입고 잔량) — draft~partial
+      const pendingRows = await db.prepare(`
         SELECT i.product_code,
                SUM(i.ordered_qty - COALESCE(i.received_qty,0)) as pending_qty,
-               GROUP_CONCAT(DISTINCT h.os_number) as os_numbers,
-               GROUP_CONCAT(DISTINCT h.po_number) as po_numbers,
+               SUM(i.ordered_qty) as ordered_qty,
+               SUM(COALESCE(i.received_qty,0)) as partial_received_qty,
+               STRING_AGG(DISTINCT h.os_number, ',') as os_numbers,
+               STRING_AGG(DISTINCT h.po_number, ',') as po_numbers,
                MIN(h.due_date) as earliest_due,
-               h.status as latest_status,
+               MAX(h.status) as latest_status,
                MAX(h.po_date) as latest_po_date
         FROM po_items i
         JOIN po_header h ON h.po_id = i.po_id
@@ -4376,10 +4431,28 @@ async function handleRequest(req, res) {
           AND (i.ordered_qty - COALESCE(i.received_qty,0)) > 0
         GROUP BY i.product_code
       `).all();
+
+      // 2) 입고완료 but XERP 미동기화 (os_number 미등록 or os_registered 아닌 received PO)
+      const receivedRows = await db.prepare(`
+        SELECT i.product_code,
+               SUM(COALESCE(i.received_qty,0)) as received_qty,
+               STRING_AGG(DISTINCT h.po_number, ',') as po_numbers,
+               MAX(h.updated_at) as completed_at
+        FROM po_items i
+        JOIN po_header h ON h.po_id = i.po_id
+        WHERE h.status = 'received'
+          AND COALESCE(i.received_qty,0) > 0
+          AND (h.os_number IS NULL OR h.os_number = '')
+        GROUP BY i.product_code
+      `).all();
+
       const map = {};
-      rows.forEach(r => {
+      pendingRows.forEach(r => {
         map[r.product_code] = {
           pending_qty: r.pending_qty || 0,
+          ordered_qty: r.ordered_qty || 0,
+          partial_received_qty: r.partial_received_qty || 0,
+          received_not_synced: 0,
           os_numbers: (r.os_numbers || '').split(',').filter(Boolean),
           po_numbers: (r.po_numbers || '').split(',').filter(Boolean),
           earliest_due: r.earliest_due || '',
@@ -4387,8 +4460,24 @@ async function handleRequest(req, res) {
           last_order_date: r.latest_po_date || ''
         };
       });
+      // 입고완료(미동기화) 수량 합산
+      receivedRows.forEach(r => {
+        if (!map[r.product_code]) {
+          map[r.product_code] = {
+            pending_qty: 0, ordered_qty: 0, partial_received_qty: 0,
+            received_not_synced: 0,
+            os_numbers: [], po_numbers: [],
+            earliest_due: '', status: 'received', last_order_date: ''
+          };
+        }
+        map[r.product_code].received_not_synced = r.received_qty || 0;
+        const extraPOs = (r.po_numbers || '').split(',').filter(Boolean);
+        extraPOs.forEach(p => {
+          if (!map[r.product_code].po_numbers.includes(p)) map[r.product_code].po_numbers.push(p);
+        });
+      });
       ok(res, map);
-    } catch(e) { ok(res, {}); }
+    } catch(e) { console.error('pending-orders error:', e.message); ok(res, {}); }
     return;
   }
 
@@ -4964,7 +5053,7 @@ async function handleRequest(req, res) {
       const isDanger = remainDays <= 21;
 
       // 안전 품목은 발주 안 함 (잔여일 > 21일)
-      if (!isDanger) { skipped.push({ product_code: item.product_code, reason: `안전 (잔여 ${Math.round(remainDays)}일, 목표재고 ${calc.targetStock.toLocaleString()})` }); continue; }
+      if (!isDanger) { skipped.push({ product_code: item.product_code, reason: `안전 (잔여 ${Math.round(remainDays)}일, 목표재고 ${(calc.targetStock||0).toLocaleString()})` }); continue; }
 
       // 거래처별 주간 6건 제한 (긴급은 한도 무시)
       const vendor = item.vendor_name || '';
@@ -4982,10 +5071,20 @@ async function handleRequest(req, res) {
       const pendingPO = await db.prepare(`
         SELECT h.po_number, h.status FROM po_header h
         JOIN po_items i ON i.po_id = h.po_id
-        WHERE i.product_code = ? AND h.status IN ('draft','발송','확인','수령중','OS등록대기')
+        WHERE i.product_code = ? AND h.status IN ('draft','sent','confirmed','partial','os_pending',
+          'draft','발송','확인','수령중','OS등록대기')
         LIMIT 1
       `).get(item.product_code);
       if (pendingPO) { skipped.push({ product_code: item.product_code, reason: `미완료 PO (${pendingPO.po_number})` }); continue; }
+      // 입고완료 but XERP 미동기화 (OS번호 미등록) → 스킵
+      const receivedNotSynced = await db.prepare(`
+        SELECT h.po_number, SUM(COALESCE(i.received_qty,0)) as recv_qty FROM po_header h
+        JOIN po_items i ON i.po_id = h.po_id
+        WHERE i.product_code = ? AND h.status = 'received'
+          AND (h.os_number IS NULL OR h.os_number = '')
+        GROUP BY h.po_number LIMIT 1
+      `).get(item.product_code);
+      if (receivedNotSynced) { skipped.push({ product_code: item.product_code, reason: `입고완료 XERP미동기화 (${receivedNotSynced.po_number}, ${receivedNotSynced.recv_qty}개)` }); continue; }
       // 거래처 결정: auto_order_items.vendor_name > products.paper_maker 매핑
       let resolvedVendor = vendor;
       if (!resolvedVendor) {
@@ -5276,7 +5375,7 @@ async function handleRequest(req, res) {
       const anyDone = poItems.some(pi => pi.received_qty > 0);
       let autoCompleted = false;
       if (allExact || (withinTolerance && totalReceived >= lowerBound)) {
-        await db.prepare("UPDATE po_header SET status='received', updated_at=datetime('now','localtime') WHERE po_id=?").run(body.po_id);
+        await db.prepare("UPDATE po_header SET status='received', process_status='completed', material_status='received', updated_at=datetime('now','localtime') WHERE po_id=?").run(body.po_id);
         autoCompleted = true;
         if (withinTolerance && !allExact) {
           await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
@@ -5284,7 +5383,7 @@ async function handleRequest(req, res) {
             `±${tolerancePct}% 허용범위 자동완료 (발주:${totalOrdered}, 입고:${totalReceived}, 범위:${Math.round(lowerBound)}~${Math.round(upperBound)})`);
         }
       } else if (anyDone) {
-        await db.prepare("UPDATE po_header SET status='partial', updated_at=datetime('now','localtime') WHERE po_id=?").run(body.po_id);
+        await db.prepare("UPDATE po_header SET status='partial', process_status='working', updated_at=datetime('now','localtime') WHERE po_id=?").run(body.po_id);
       }
       // 입고 활동 로그
       await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
@@ -5408,7 +5507,7 @@ async function handleRequest(req, res) {
     const poItems = await db.prepare('SELECT ordered_qty, received_qty FROM po_items WHERE po_id=?').all(body.po_id);
     const totalOrdered = poItems.reduce((s, pi) => s + pi.ordered_qty, 0);
     const totalReceived = poItems.reduce((s, pi) => s + pi.received_qty, 0);
-    await db.prepare("UPDATE po_header SET status='received', force_completed=1, force_completed_by=?, force_completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE po_id=?")
+    await db.prepare("UPDATE po_header SET status='received', process_status='completed', material_status='received', force_completed=1, force_completed_by=?, force_completed_at=datetime('now','localtime'), updated_at=datetime('now','localtime') WHERE po_id=?")
       .run(body.completed_by || 'admin', body.po_id);
     await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
       body.po_id, 'force_complete', body.completed_by || 'admin',
@@ -5558,6 +5657,10 @@ async function handleRequest(req, res) {
   if (pathname === '/api/procurement/pipeline' && method === 'GET') {
     const qs = new URL(req.url, `http://${req.headers.host}`).searchParams;
     const origin = qs.get('origin') || '';
+    const pipeEntity = qs.get('entity') || 'all';
+    const _pipeUseEnt = _hasEntity.po_header && pipeEntity && pipeEntity !== 'all';
+    const pipeEntityClause = _pipeUseEnt ? ' AND legal_entity=?' : '';
+    const pipeEntityParams = _pipeUseEnt ? [pipeEntity] : [];
     // 한국: draft → sent → 자재지급(material_sent) → 가공중(processing) → partial → received
     // 중국: draft → sent → 제작중(processing) → 선적(shipped) → 통관(customs) → partial → received
     // 더기프트: draft → sent → partial → received → 포장(assembly) → 출고(shipped)
@@ -5573,9 +5676,9 @@ async function handleRequest(req, res) {
                material_vendor_name, process_vendor_name, material_send_date,
                material_confirmed_at, process_email_sent, force_completed,
                tolerance_pct, order_type, vendor_confirmed_date
-        FROM po_header WHERE origin=? AND status != 'cancelled'
+        FROM po_header WHERE origin=? AND status != 'cancelled'${pipeEntityClause}
         ORDER BY created_at DESC LIMIT 100
-      `).all(origin);
+      `).all(origin, ...pipeEntityParams);
       // Map PO to pipeline stage
       for (const po of pos) {
         if (origin === '한국') {
@@ -5734,7 +5837,7 @@ async function handleRequest(req, res) {
       }
       if (!r.next_destination) r.next_destination = '파주(본사)';
     }
-    // 재고 정보 보강 (XERP 캐시 활용 — 거래처가 긴급도 판단용)
+    // 재고 정보 보강 (스마트재고현황 캐시 활용 — 모든 업체에 긴급도 제공)
     try {
       // XERP 재고 캐시에서 가져오기 (10분 갱신)
       const invMap = {};
@@ -5745,13 +5848,19 @@ async function handleRequest(req, res) {
           for (const p of ce.data.products) {
             const code = p['제품코드'] || p.product_code;
             if (code && !invMap[code]) {
-              invMap[code] = { stock: p['현재고'] || 0, monthly: p['_xerpMonthly'] || 0 };
+              invMap[code] = {
+                stock: p['현재고'] || p['가용재고'] || 0,
+                monthly: p['_xerpMonthly'] || 0,
+                status: p._status || '',           // urgent/danger/safe
+                remainDays: p._remainDays || null,  // 잔여일수
+                safetyStock: p._safetyStock || 0
+              };
             }
           }
         }
       }
-      // 캐시가 비어있으면 XERP 직접 조회 시도
-      if (Object.keys(invMap).length === 0 && typeof ensureXerpPool === 'function') {
+      // 캐시가 비어있으면 XERP 직접 조회 (원재료 업체만 — 후공정은 캐시만 사용)
+      if (Object.keys(invMap).length === 0 && vendor.type === '원재료' && typeof ensureXerpPool === 'function') {
         try {
           if (await ensureXerpPool()) {
             const codes = new Set();
@@ -5777,7 +5886,9 @@ async function handleRequest(req, res) {
           it.current_stock = inv.stock || 0;
           it.monthly_usage = inv.monthly || 0;
           it.stock_months = inv.monthly > 0 ? Math.round((inv.stock / inv.monthly) * 10) / 10 : null;
-          it.is_urgent = inv.monthly > 0 && inv.stock <= inv.monthly; // 1개월 이하 = 긴급
+          it.is_urgent = inv.status === 'urgent' || (inv.monthly > 0 && inv.stock <= inv.monthly); // 스마트재고 긴급 또는 1개월 이하
+          it.is_danger = inv.status === 'danger';
+          it.remain_days = inv.remainDays;
         }
       }
     } catch(e) { console.warn('vendor-portal 재고 보강 실패:', e.message); }
@@ -5855,17 +5966,52 @@ async function handleRequest(req, res) {
           });
 
           // 다음 step PO가 이미 대기 중인지 확인
-          const nextPO = await db.prepare(`SELECT * FROM po_header WHERE parent_po_id = ? AND process_step = ? AND po_type = '후공정'`).get(po.parent_po_id || poId, currentStep + 1);
+          const parentId = po.parent_po_id || poId;
+          let nextPO = await db.prepare(`SELECT * FROM po_header WHERE parent_po_id = ? AND process_step = ? AND po_type = '후공정'`).get(parentId, currentStep + 1);
+
+          // 없으면 자동 생성
+          if (!nextPO) {
+            const nextPoNumber = await generatePoNumber();
+            // 거래처명에서 vendors 테이블 매칭 (부분 매칭)
+            let nextVendorRow = await db.prepare('SELECT * FROM vendors WHERE name = ?').get(nextStepInfo.vendor);
+            if (!nextVendorRow) {
+              nextVendorRow = await db.prepare("SELECT * FROM vendors WHERE name LIKE ?").get(nextStepInfo.vendor.slice(0,2) + '%');
+            }
+            const nextVendorName = nextVendorRow ? nextVendorRow.name : nextStepInfo.vendor;
+            // 현재 PO의 품목을 복사
+            const currentItems = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(poId);
+            const nextHdr = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, po_date, material_status, process_status)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,date('now','localtime'),'sent','waiting')`).run(
+              nextPoNumber, '후공정', nextVendorName, 'sent',
+              po.due_date || '', po.total_qty || 0,
+              `공정체인 자동생성: ${nextStepInfo.process}@${nextVendorName} (원PO: ${po.po_number})`,
+              currentStep + 1, parentId, po.process_chain || '', po.origin || '한국'
+            );
+            const nextPoId = nextHdr.lastInsertRowid;
+            for (const ci of currentItems) {
+              await db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?,?,?,?,?,?,?)').run(
+                nextPoId, ci.product_code, ci.brand || '', nextStepInfo.process, ci.ordered_qty || 0, ci.spec || '', ''
+              );
+            }
+            nextPO = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(nextPoId);
+            console.log(`[공정체인] 자동 PO 생성: ${nextPoNumber} → ${nextVendorName}(${nextStepInfo.process}), parent=${parentId}`);
+            logPOActivity(nextPoId, 'auto_chain_create', {
+              actor_type: 'system',
+              to_status: 'sent',
+              details: `공정체인 자동생성: Step ${currentStep}(${vendor.name}) → Step ${currentStep+1}(${nextVendorName}, ${nextStepInfo.process})`
+            });
+          }
+
           if (nextPO) {
             const nextVendor = await db.prepare('SELECT * FROM vendors WHERE name = ?').get(nextPO.vendor_name);
             if (nextVendor && nextVendor.email) {
               const nextItems = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(nextPO.po_id);
-              await db.prepare(`UPDATE po_header SET status = 'sent', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(nextPO.po_id);
+              await db.prepare(`UPDATE po_header SET status = 'sent', material_status='sent', process_status='waiting', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(nextPO.po_id);
               emailResult = await sendPOEmail(nextPO, nextItems, nextVendor.email, nextVendor.name, true, nextVendor.email_cc);
               console.log(`공정체인 Step ${currentStep}→${currentStep+1}: ${nextPO.po_number} → ${nextVendor.name}`);
             }
           }
-          ok(res, { po_id: poId, status: '확인', next_step: currentStep + 1, next_vendor: nextStepInfo.vendor });
+          ok(res, { po_id: poId, status: '확인', next_step: currentStep + 1, next_vendor: nextStepInfo.vendor, next_po: nextPO ? nextPO.po_number : null });
           return;
         }
 
@@ -6066,6 +6212,57 @@ async function handleRequest(req, res) {
       await db.prepare('UPDATE po_items SET ship_date=? WHERE po_id=?').run(ship_date, po_id);
     }
     ok(res, { saved: true });
+    return;
+  }
+
+  // POST /api/vendor-portal/item-produced-qty — 품목별 생산완료수량 저장
+  if (pathname === '/api/vendor-portal/item-produced-qty' && method === 'POST') {
+    const body = await readJSON(req);
+    const { po_id, item_id, produced_qty } = body;
+    const authPQ = extractVendorAuth(body);
+    if (body.access && !authPQ) { fail(res, 403, '인증 실패'); return; }
+    if (!po_id || produced_qty === undefined) { fail(res, 400, '필수 항목 누락'); return; }
+    const qty = parseInt(produced_qty) || 0;
+    if (item_id !== undefined && item_id !== null) {
+      await db.prepare('UPDATE po_items SET produced_qty=? WHERE po_id=? AND item_id=?').run(qty, po_id, item_id);
+    } else {
+      await db.prepare('UPDATE po_items SET produced_qty=? WHERE po_id=?').run(qty, po_id);
+    }
+    ok(res, { saved: true });
+    return;
+  }
+
+  // POST /api/vendor-portal/defect-report — 불량 보고
+  if (pathname === '/api/vendor-portal/defect-report' && method === 'POST') {
+    const body = await readJSON(req);
+    const auth = extractVendorAuth(body);
+    if (body.access && !auth) { fail(res, 403, '인증 실패'); return; }
+    const { po_id, item_id, product_code, defect_type, defect_qty, description } = body;
+    if (!po_id || !defect_type || !defect_qty) { fail(res, 400, '필수 항목 누락 (po_id, defect_type, defect_qty)'); return; }
+    const vendorName = auth ? auth.vendorName : '';
+    const qty = parseInt(defect_qty) || 0;
+    await db.prepare(`INSERT INTO vendor_defect_reports (po_id, item_id, product_code, vendor_name, defect_type, defect_qty, description) VALUES (?,?,?,?,?,?,?)`).run(
+      po_id, item_id || null, product_code || '', vendorName, defect_type, qty, description || ''
+    );
+    // po_items에 불량수량 누적
+    if (item_id) {
+      await db.prepare('UPDATE po_items SET defect_qty = defect_qty + ? WHERE po_id=? AND item_id=?').run(qty, po_id, item_id);
+    }
+    ok(res, { saved: true });
+    return;
+  }
+
+  // GET /api/vendor-portal/defect-reports — 불량 보고 목록
+  if (pathname === '/api/vendor-portal/defect-reports' && method === 'GET') {
+    const qs = new URL(req.url, `http://${req.headers.host}`).searchParams;
+    const accessToken = qs.get('access') || '';
+    const decoded = decodeVendorToken(accessToken);
+    if (!decoded) { fail(res, 403, '인증 실패'); return; }
+    const email = decoded.email;
+    const vendor = await db.prepare('SELECT * FROM vendors WHERE email = ?').get(email);
+    if (!vendor) { fail(res, 404, '업체 없음'); return; }
+    const reports = await db.prepare(`SELECT r.*, h.po_number FROM vendor_defect_reports r LEFT JOIN po_header h ON h.po_id=r.po_id WHERE r.vendor_name=? ORDER BY r.reported_at DESC LIMIT 100`).all(vendor.name);
+    ok(res, reports);
     return;
   }
 
@@ -7021,7 +7218,7 @@ async function handleRequest(req, res) {
 
           if (hasMatch) {
             // 검증 완료 → received로 자동 완료
-            await db.prepare("UPDATE po_header SET status='received', updated_at=datetime('now','localtime') WHERE po_id=?").run(rpo.po_id);
+            await db.prepare("UPDATE po_header SET status='received', process_status='completed', material_status='received', updated_at=datetime('now','localtime') WHERE po_id=?").run(rpo.po_id);
             verified.push({ ...rpo, status: 'OS검증대기', xerp_status: '검증완료', auto_completed: true });
           } else {
             // 불일치 → os_pending으로 되돌리고 os_number 초기화
@@ -7474,6 +7671,35 @@ async function handleRequest(req, res) {
     });
     const poId = await tx();
 
+    // 후공정 체인 자동 설정: product_info에서 후공정 순서를 읽어 process_chain 저장
+    if (!body.process_chain && items.length) {
+      try {
+        const pInfo = getProductInfo();
+        const postCols = ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크'];
+        // 첫 번째 품목 기준으로 후공정 체인 구성
+        const info = pInfo[items[0].product_code] || {};
+        const chainSteps = [];
+        let stepNum = 1;
+        postCols.forEach(col => {
+          if (info[col] && info[col] !== '0') {
+            chainSteps.push({ step: stepNum, process: col, vendor: info[col] });
+            stepNum++;
+          }
+        });
+        if (chainSteps.length > 0) {
+          // 현재 PO의 vendor가 체인의 몇 번째 step인지 확인
+          const myStep = chainSteps.findIndex(s => {
+            const vn = vendorName.replace('패키지','').replace('봉투','');
+            return s.vendor.startsWith(vn.slice(0,2)) || vendorName.startsWith(s.vendor.slice(0,2));
+          });
+          const processStep = myStep >= 0 ? chainSteps[myStep].step : 1;
+          await db.prepare("UPDATE po_header SET process_chain=?, process_step=? WHERE po_id=?")
+            .run(JSON.stringify(chainSteps), processStep, poId);
+          console.log(`[공정체인] PO ${poNumber}: ${chainSteps.map(s=>s.vendor+'('+s.process+')').join(' → ')}, 현재 step=${processStep}`);
+        }
+      } catch(e) { console.warn('[공정체인 자동설정 실패]', e.message); }
+    }
+
     // 목형비 자동 처리: 신제품 첫 발주 시 notes에 '목형비 포함' 마킹
     for (const item of items) {
       const prod = await db.prepare('SELECT is_new_product, first_order_done, die_cost FROM products WHERE product_code=?').get(item.product_code);
@@ -7705,9 +7931,9 @@ async function handleRequest(req, res) {
       const anyReceived = poItems.some(pi => pi.received_qty > 0);
 
       if (allReceived) {
-        await db.prepare(`UPDATE po_header SET status = 'received', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
+        await db.prepare(`UPDATE po_header SET status = 'received', process_status = 'completed', material_status = 'received', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
       } else if (anyReceived) {
-        await db.prepare(`UPDATE po_header SET status = 'partial', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
+        await db.prepare(`UPDATE po_header SET status = 'partial', process_status = 'working', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
       }
 
       return receiptId;
@@ -16097,6 +16323,19 @@ async function runAutoOrderScheduler() {
     `).get(item.product_code);
     if (pendingPO) {
       console.log(`[자동발주] 스킵: ${item.product_code} — 미완료 PO (${pendingPO.po_number})`);
+      continue;
+    }
+
+    // 입고완료 but XERP 미동기화 (OS번호 미등록) → 스킵
+    const receivedNotSynced = await db.prepare(`
+      SELECT h.po_number, SUM(COALESCE(i.received_qty,0)) as recv_qty FROM po_header h
+      JOIN po_items i ON i.po_id = h.po_id
+      WHERE i.product_code = ? AND h.status = 'received'
+        AND (h.os_number IS NULL OR h.os_number = '')
+      GROUP BY h.po_number LIMIT 1
+    `).get(item.product_code);
+    if (receivedNotSynced) {
+      console.log(`[자동발주] 스킵: ${item.product_code} — 입고완료 XERP미동기화 (${receivedNotSynced.po_number}, ${receivedNotSynced.recv_qty}개)`);
       continue;
     }
 
