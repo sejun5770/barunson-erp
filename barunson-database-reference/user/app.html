@@ -6987,7 +6987,24 @@ let originMap={}; // {product_code: '한국'|'중국'|'더기프트'}
 let currentOrigin='all';
 fetch('/api/products').then(r=>r.json()).then(d=>{
   const list=d.data||d;
-  list.forEach(p=>{if(p.product_code&&p.origin)originMap[p.product_code]=p.origin;});
+  list.forEach(p=>{
+    if(!p.product_code) return;
+    if(p.origin) originMap[p.product_code]=p.origin;
+    // R(연) 단위 계산을 위해 절/조판 정보를 productInfo에 머지
+    // (product_info.json 정적 파일에 누락된 디디 품목 등 보완)
+    const existing = productInfo[p.product_code] || {};
+    productInfo[p.product_code] = {
+      ...existing,
+      '품명': existing['품명'] || p.product_name || '',
+      '생산지': existing['생산지'] || p.origin || '',
+      '브랜드': existing['브랜드'] || p.brand || '',
+      '절': existing['절'] || p.cut_spec || '',
+      '조판': existing['조판'] || p.jopan || '',
+      '원자재코드': existing['원자재코드'] || p.material_code || '',
+      '원재료용지명': existing['원재료용지명'] || p.material_name || '',
+      '제지사': existing['제지사'] || p.paper_maker || '',
+    };
+  });
 }).catch(()=>{});
 fetch('/api/product-notes').then(r=>r.json()).then(d=>{if(d.ok)productNotes=d.data||{};}).catch(()=>{});
 fetch('/api/order-history?mode=today').then(r=>r.json()).then(d=>{if(d.ok)orderedToday=d.data||{};}).catch(()=>{});
@@ -7286,8 +7303,8 @@ async function processData(products){
     const o=document.createElement('option');o.value=b;o.textContent=`${b||'(없음)'}(${n})`;sel.appendChild(o);
   });
 
-  // 디폴트 정렬: 월출고(판매량) 내림차순
-  sortK='_xerpMonthly';sortD='desc';
+  // 디폴트 정렬: 일평균 출고수량 내림차순 (가장 잘 나가는 품목 먼저)
+  sortK='_dailyUsage';sortD='desc';
   buildHeader();
   render();
 
