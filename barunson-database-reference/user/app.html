@@ -1481,9 +1481,7 @@ var _megaData = {
     title: '🇨🇳 중국관리',
     items: [
       {icon:'📊',bg:'#fef2f2',fg:'#dc2626',name:'중국 종합',desc:'재고·발주·선적·단가 통합',page:'china-hub',companies:['barunson']},
-      {icon:'🚢',bg:'#fff7ed',fg:'#ea580c',name:'중국선적',desc:'交期表 + BL추적',page:'china-shipment',clickOrigin:'중국',companies:['barunson']},
-      {icon:'📦',bg:'#ecfdf5',fg:'#059669',name:'중국재고',desc:'재고 업로드 + 부족 알림',page:'china-hub',companies:['barunson']},
-      {icon:'📅',bg:'#eff6ff',fg:'#2563eb',name:'중국입고',desc:'입고 예정 일정',page:'delivery-schedule',clickOrigin:'중국',companies:['barunson']}
+      {icon:'🚢',bg:'#fff7ed',fg:'#ea580c',name:'중국선적',desc:'交期表 + BL추적',page:'china-shipment',clickOrigin:'중국',companies:['barunson']}
     ]
   },
   master: {
@@ -1532,8 +1530,8 @@ function renderSidebar() {
   var container = document.getElementById('sbMenus');
   if (!container) return;
   var h = '<div class="sb-section-label" style="margin-top:8px">메뉴</div>';
-  var catOrder = ['purchase','china','sales','stock','production','accounting','master','analysis','work','system'];
-  var catIcons = {purchase:'🛒',china:'🇨🇳',sales:'💰',stock:'📦',production:'🏭',accounting:'🧾',master:'📋',analysis:'📈',work:'✅',system:'🔧'};
+  var catOrder = ['master','purchase','china','production','stock','sales','accounting','analysis','work','system'];
+  var catIcons = {master:'📋',purchase:'🛒',china:'🇨🇳',production:'🏭',stock:'📦',sales:'💰',accounting:'🧾',analysis:'📈',work:'✅',system:'🔧'};
 
   catOrder.forEach(function(catKey) {
     var cat = _megaData[catKey]; if (!cat) return;
@@ -4582,7 +4580,7 @@ function closeMegaMenu() { /* no-op */ }
           <option value="기타" selected>기타</option>
         </select>
         <input type="date" id="tkDueDate" style="flex:1;min-width:120px" title="마감일">
-        <input type="text" id="tkAssignee" placeholder="담당자" style="flex:1;min-width:80px">
+        <select id="tkAssignee" style="flex:1;min-width:80px;font-size:12px"><option value="">담당자 선택</option></select>
       </div>
       <textarea id="tkDescription" rows="2" placeholder="내용 (선택)" style="width:100%;resize:vertical;font-size:12px"></textarea>
       <!-- 추가 옵션 접기/펼치기 -->
@@ -11011,7 +11009,23 @@ function switchTaskView(v) {
   renderTasks(_tkAllTasks);
 }
 
+async function loadTaskAssigneeList() {
+  try {
+    const r = await authFetch('/api/auth/user-list');
+    const users = await r.json();
+    const sel = document.getElementById('tkAssignee');
+    if (!sel) return;
+    const curVal = sel.value;
+    sel.innerHTML = '<option value="">담당자 선택</option>';
+    (Array.isArray(users) ? users : users.data || []).filter(u => u.is_active !== 0).forEach(u => {
+      sel.innerHTML += `<option value="${esc(u.display_name||u.username)}">${esc(u.display_name||u.username)}</option>`;
+    });
+    if (curVal) sel.value = curVal;
+  } catch(e) {}
+}
+
 async function loadTasks() {
+  loadTaskAssigneeList();
   const status = _tkStatus;
   const cat = document.getElementById('tkCatFilter')?.value || 'all';
   const pri = document.getElementById('tkPriorityFilter')?.value || 'all';
@@ -11021,7 +11035,7 @@ async function loadTasks() {
   if (cat !== 'all') params.set('category', cat);
   if (pri !== 'all') params.set('priority', pri);
   if (q) params.set('q', q);
-  const r = await fetch('/api/tasks?' + params);
+  const r = await authFetch('/api/tasks?' + params);
   const resp = await r.json();
   const tasks = resp.data ?? resp;
   _tkAllTasks = tasks;
@@ -11185,7 +11199,11 @@ function openTaskModal(id) {
       document.getElementById('tkCategory').value = t.category;
       document.getElementById('tkPriority').value = t.priority;
       document.getElementById('tkStatus').value = t.status;
-      document.getElementById('tkAssignee').value = t.assignee || '';
+      const tkAsSel = document.getElementById('tkAssignee');
+      if (t.assignee && ![...tkAsSel.options].some(o=>o.value===t.assignee)) {
+        tkAsSel.innerHTML += `<option value="${esc(t.assignee)}">${esc(t.assignee)}</option>`;
+      }
+      tkAsSel.value = t.assignee || '';
       document.getElementById('tkStartDate').value = t.start_date || '';
       document.getElementById('tkDueDate').value = t.due_date || '';
       document.getElementById('tkRelatedPO').value = t.related_po || '';
@@ -11224,16 +11242,16 @@ async function saveTask() {
     tags: document.getElementById('tkTags').value
   };
   if (editId) {
-    await fetch('/api/tasks/' + editId, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    await authFetch('/api/tasks/' + editId, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
   } else {
-    const r = await fetch('/api/tasks', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const r = await authFetch('/api/tasks', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     const d = await r.json();
     const newId = (d.data||d).id;
     // 템플릿이 선택된 경우 단계 초기화
     const tplId = document.getElementById('tkTemplate')?.value;
     if (tplId && newId) {
       const customSteps = tplId === 'custom' ? _tkCustomSteps.filter(s => s.name.trim()) : [];
-      await fetch('/api/tasks/' + newId + '/steps/init', {
+      await authFetch('/api/tasks/' + newId + '/steps/init', {
         method: 'POST', headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ template_id: tplId, custom_steps: customSteps })
       });
@@ -11245,7 +11263,7 @@ async function saveTask() {
 
 async function openTaskDetail(id) {
   _tkDetailId = id;
-  const r = await fetch('/api/tasks/' + id);
+  const r = await authFetch('/api/tasks/' + id);
   const resp2 = await r.json();
   const t = resp2.data ?? resp2;
   document.getElementById('tdTitle').textContent = t.task_number + ' · ' + t.title;
@@ -11268,7 +11286,7 @@ async function openTaskDetail(id) {
 }
 
 async function loadTaskSteps(taskId) {
-  const r = await fetch('/api/tasks/' + taskId + '/steps');
+  const r = await authFetch('/api/tasks/' + taskId + '/steps');
   const resp = await r.json();
   const steps = resp.data ?? resp;
   const section = document.getElementById('tdStepsSection');
@@ -11315,7 +11333,7 @@ async function loadTaskSteps(taskId) {
 }
 
 async function updateStep(stepId, data) {
-  await fetch('/api/task-steps/' + stepId, {
+  await authFetch('/api/task-steps/' + stepId, {
     method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data)
   });
   await loadTaskSteps(_tkDetailId);
@@ -11336,7 +11354,7 @@ function closeTaskDetail() { document.getElementById('taskDetailModal').style.di
 
 async function quickStatusChange(s) {
   if (!_tkDetailId) return;
-  await fetch('/api/tasks/' + _tkDetailId, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ status: s }) });
+  await authFetch('/api/tasks/' + _tkDetailId, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ status: s }) });
   openTaskDetail(_tkDetailId);
   loadTasks();
 }
@@ -11345,7 +11363,7 @@ function editCurrentTask() { closeTaskDetail(); openTaskModal(_tkDetailId); }
 
 async function deleteCurrentTask() {
   if (!confirm('이 업무를 삭제하시겠습니까?')) return;
-  await fetch('/api/tasks/' + _tkDetailId, { method: 'DELETE' });
+  await authFetch('/api/tasks/' + _tkDetailId, { method: 'DELETE' });
   closeTaskDetail();
   loadTasks();
 }
@@ -11354,7 +11372,7 @@ async function addTaskComment() {
   const content = document.getElementById('tdCommentInput').value.trim();
   if (!content || !_tkDetailId) return;
   const author = document.getElementById('tdCommentAuthor').value.trim() || '익명';
-  await fetch('/api/tasks/' + _tkDetailId + '/comments', {
+  await authFetch('/api/tasks/' + _tkDetailId + '/comments', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ author, content })
   });
@@ -12870,7 +12888,7 @@ function loadDashboard(){
     document.getElementById('dPending').textContent=d.pendingCount||0;
     // 퀵메뉴 카운트 업데이트
     const qmPO = document.getElementById('qmPOList'); if(qmPO) qmPO.textContent = (d.monthPOCount||0) + '건';
-    fetch('/api/tasks?status=todo').then(r=>r.json()).then(resp => {
+    authFetch('/api/tasks?status=todo').then(r=>r.json()).then(resp => {
       const tasks = resp.data ?? resp;
       const qmTask = document.getElementById('qmTaskTodo'); if(qmTask) qmTask.textContent = (Array.isArray(tasks) ? tasks.length : 0) + '건 대기';
     }).catch(()=>{});
@@ -21893,6 +21911,10 @@ function showAddUserModal() {
           <option value="viewer">뷰어 (조회만)</option>
           <option value="purchase">구매담당</option>
           <option value="production">생산담당</option>
+          <option value="logistics">물류담당</option>
+          <option value="sales_team">영업담당</option>
+          <option value="accounting">회계담당</option>
+          <option value="packaging">포장담당</option>
           <option value="admin">관리자</option>
         </select>
       </div>
@@ -21962,6 +21984,10 @@ async function editUserRow(id, username, name, role, email, active) {
           <option value="viewer" ${role==='viewer'?'selected':''}>뷰어</option>
           <option value="purchase" ${role==='purchase'?'selected':''}>구매담당</option>
           <option value="production" ${role==='production'?'selected':''}>생산담당</option>
+          <option value="logistics" ${role==='logistics'?'selected':''}>물류담당</option>
+          <option value="sales_team" ${role==='sales_team'?'selected':''}>영업담당</option>
+          <option value="accounting" ${role==='accounting'?'selected':''}>회계담당</option>
+          <option value="packaging" ${role==='packaging'?'selected':''}>포장담당</option>
           <option value="admin" ${role==='admin'?'selected':''}>관리자</option>
         </select>
         <label style="font-size:13px;display:flex;align-items:center;gap:6px">

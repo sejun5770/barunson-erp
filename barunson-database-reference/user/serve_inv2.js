@@ -2944,9 +2944,18 @@ const ROLE_PERMISSIONS = {
     'delivery-schedule', 'receipts', 'invoices', 'notes', 'product-mgmt', 'bom', 'mrp', 'post-process', 'defects',
     'closing', 'report', 'po-mgmt', 'china-shipment', 'mat-purchase', 'tasks', 'meeting-log', 'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'cost-mgmt', 'board', 'audit-log', 'exec-dashboard', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'work-order', 'lot-tracking',
-    'approval', 'sales-order', 'budget', 'notification', 'safety-stock', 'cycle-count', 'mfg-cost'],
+    'approval', 'sales-order', 'budget', 'notification', 'safety-stock', 'cycle-count', 'mfg-cost', 'procurement', 'vendor-performance'],
   production: ['dashboard', 'inventory', 'warehouse', 'shipments', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks', 'approval', 'lot-tracking',
-    'process-routing', 'equipment', 'mfg-cost', 'safety-stock'],
+    'process-routing', 'equipment', 'mfg-cost', 'safety-stock', 'work-order'],
+  logistics: ['dashboard', 'inventory', 'warehouse', 'shipments', 'receipts', 'delivery-schedule', 'shipping', 'lot-tracking',
+    'safety-stock', 'cycle-count', 'barcode', 'tasks', 'notes', 'board', 'notification', 'customer-orders'],
+  sales_team: ['dashboard', 'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'sales-order', 'customer-orders', 'shipping',
+    'inventory', 'warehouse', 'shipments', 'ar-ap', 'invoices', 'tasks', 'notes', 'board', 'notification', 'exec-dashboard', 'analytics', 'report'],
+  accounting: ['dashboard', 'invoices', 'mat-purchase', 'cost-mgmt', 'closing', 'chart-of-accounts', 'journal', 'general-ledger',
+    'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'budget', 'mfg-cost', 'vat-report', 'journal-auto',
+    'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'tasks', 'notes', 'board', 'notification', 'approval', 'exec-dashboard'],
+  packaging: ['dashboard', 'inventory', 'warehouse', 'shipments', 'production-req', 'production-stock', 'work-order', 'bom',
+    'post-process', 'lot-tracking', 'receipts', 'tasks', 'notes', 'board', 'notification'],
   viewer: ['dashboard', 'inventory', 'warehouse', 'shipments', 'po-list', 'notes', 'sales', 'sales-barun', 'sales-gift', 'cost-mgmt', 'board', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap'],
 };
@@ -3527,6 +3536,16 @@ async function handleRequest(req, res) {
     const favs = Array.isArray(body.favorites) ? body.favorites : [];
     await db.prepare("UPDATE users SET favorites = ? WHERE user_id = ?").run(JSON.stringify(favs), decoded.userId);
     ok(res, { message: '즐겨찾기 저장 완료', favorites: favs });
+    return;
+  }
+
+  // GET /api/auth/user-list — 담당자 드롭다운용 (로그인 사용자)
+  if (pathname === '/api/auth/user-list' && method === 'GET') {
+    const token = extractToken(req);
+    const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '로그인 필요'); return; }
+    const users = await db.prepare("SELECT user_id, username, display_name, role FROM users WHERE is_active=1 ORDER BY display_name").all();
+    ok(res, users);
     return;
   }
 
