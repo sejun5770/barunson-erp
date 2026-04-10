@@ -1,6 +1,6 @@
 const _startTime = Date.now();
 // ERP 애플리케이션 버전 (MANUAL.md / CHANGELOG.md 와 동기화)
-const APP_VERSION = '1.0.6';
+const APP_VERSION = '1.0.7';
 const APP_VERSION_DATE = '2026-04-10';
 const http = require('http');
 const https = require('https');
@@ -3939,9 +3939,53 @@ async function handleRequest(req, res) {
   //  PRODUCTS BULK UPLOAD (품목관리 엑셀 일괄 업로드)
   // ════════════════════════════════════════════════════════════════════
 
+  // PREVIEW: 저장 없이 신규/기존/오류 건수만 계산
+  if (pathname === '/api/products/bulk/preview' && method === 'POST') {
+    const body = await readJSON(req);
+    const items = body.items || [];
+    if (!items.length) { fail(res, 400, 'items required'); return; }
+    const newList = [];      // 신규 품목
+    const updateList = [];   // 기존 품목 (덮어쓸 대상)
+    const errorList = [];    // 오류 행 (product_code 누락 등)
+    for (const it of items) {
+      if (!it || !it.product_code) {
+        errorList.push({ product_code: it && it.product_code || '', reason: 'product_code 누락' });
+        continue;
+      }
+      const existing = await db.prepare('SELECT product_code, product_name, brand, origin, cut_spec, jopan FROM products WHERE product_code=?').get(it.product_code);
+      if (existing) {
+        updateList.push({
+          product_code: it.product_code,
+          new_name: it.product_name || '',
+          old_name: existing.product_name || '',
+          new_origin: it.origin || '',
+          old_origin: existing.origin || ''
+        });
+      } else {
+        newList.push({
+          product_code: it.product_code,
+          product_name: it.product_name || '',
+          origin: it.origin || ''
+        });
+      }
+    }
+    ok(res, {
+      total: items.length,
+      new_count: newList.length,
+      update_count: updateList.length,
+      error_count: errorList.length,
+      new_list: newList,
+      update_list: updateList,
+      error_list: errorList
+    });
+    return;
+  }
+
   if (pathname === '/api/products/bulk' && method === 'POST') {
     const body = await readJSON(req);
     const items = body.items || [];
+    // mode: 'upsert'(기본, 전부반영) | 'insert_only'(신규만 등록, 기존은 skip)
+    const mode = body.mode === 'insert_only' ? 'insert_only' : 'upsert';
     if (!items.length) { fail(res, 400, 'items required'); return; }
     // 서버측 방어: 생산지 변형값 정규화
     const _normOriginBulk = (v) => {
@@ -3989,11 +4033,13 @@ async function handleRequest(req, res) {
     const upsertNote = db.prepare(`INSERT INTO product_notes (product_code, op_category, updated_at) VALUES (?,?,datetime('now','localtime'))
       ON CONFLICT(product_code) DO UPDATE SET op_category=excluded.op_category, updated_at=excluded.updated_at`);
 
-    let inserted = 0, updated = 0;
+    let inserted = 0, updated = 0, skipped = 0;
     const tx = db.transaction(async () => {
       for (const it of items) {
         if (!it.product_code) continue;
         const existing = await db.prepare('SELECT id FROM products WHERE product_code=?').get(it.product_code);
+        // mode='insert_only': 기존 품목은 건너뜀
+        if (existing && mode === 'insert_only') { skipped++; continue; }
         const _bArgs = [
           it.product_code, it.product_name||'', it.brand||'', it.origin||'한국',
           it.material_code||'', it.material_name||'', it.cut_spec||'', it.jopan||'',
@@ -4007,7 +4053,7 @@ async function handleRequest(req, res) {
       }
     });
     await tx();
-    ok(res, { inserted, updated, total: inserted + updated });
+    ok(res, { inserted, updated, skipped, total: inserted + updated + skipped, mode });
     return;
   }
 
