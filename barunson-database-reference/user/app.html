@@ -7040,6 +7040,7 @@ const COLS_STOCK=[
   {k:'가용일수',w:65,special:'remainDays',num:true,label:'가용일수'},
   {k:'안전재고',w:60,special:'safetyStock',num:true,label:'안전재고'},
   {k:'미입고',w:65,special:'pendingQty',num:true,label:'미입고'},
+  {k:'예상재고',w:70,special:'effectiveStock',num:true,label:'예상재고'},
   {k:'발주필요',w:55,special:'needOrder',label:'발주필요'},
   {k:'특이사항',w:40,special:'productNote',label:'메모'},
 ];
@@ -7055,6 +7056,7 @@ const COLS_ORDER=[
   {k:'안전재고',w:55,special:'safetyStock',num:true,label:'안전재고'},
   {k:'부족수량',w:60,special:'shortage',num:true,label:'부족수량'},
   {k:'미입고',w:60,special:'pendingQty',num:true,label:'미입고'},
+  {k:'예상재고',w:65,special:'effectiveStock',num:true,label:'예상재고'},
   {k:'발주OS',w:70,special:'pendingOS',label:'발주OS'},
   {k:'발주수량',w:100,special:'orderInput',label:'발주수량'},
   {k:'예상소진일',w:80,special:'depletionDate',label:'예상소진일'},
@@ -7077,7 +7079,7 @@ function buildHeader(){
     th.textContent=c.label||c.k;
     if(c.w)th.style.minWidth=c.w+'px';
     if(c.num) th.style.textAlign='right';
-    const sk=c.special==='xerpMonthly'?'_xerpMonthly':c.special==='dailyUsage'?'_dailyUsage':c.special==='remainDays'?'_remainDays':c.special==='shortage'?'_shortage':c.special==='safetyStock'?'_safetyStock':c.special==='pendingQty'?'_pendingQty':c.special==='availStock'?'가용재고':c.k;
+    const sk=c.special==='xerpMonthly'?'_xerpMonthly':c.special==='dailyUsage'?'_dailyUsage':c.special==='remainDays'?'_remainDays':c.special==='shortage'?'_shortage':c.special==='safetyStock'?'_safetyStock':c.special==='pendingQty'?'_pendingQty':c.special==='effectiveStock'?'_effectiveStock':c.special==='availStock'?'가용재고':c.k;
     if(!['orderInput','statusBadge','orderCheck','pendingOS','needOrder','originBadge','productNote'].includes(c.special)){
       th.dataset.k=sk; th.style.cursor='pointer';
       th.onclick=()=>{if(sortK===sk)sortD=sortD==='asc'?'desc':'asc';else{sortK=sk;sortD='asc';}render();};
@@ -7216,6 +7218,7 @@ function classifyItem(p){
 
   // ── 발주필요여부 = (가용재고+미입고) < 발주점 && 매출있음 ──
   const effectiveStock = av + p._pendingQty;
+  p._effectiveStock = effectiveStock;
   p._needOrder = (monthly > 0 && effectiveStock < reorderPoint);
 
   // ── 분류: 안전재고 기준 ──
@@ -7490,6 +7493,15 @@ function renderCell(c, p){
     const os=p._pendingOS||[];
     if(!os.length)return`<td style="color:#ddd;font-size:11px;text-align:center">-</td>`;
     return`<td style="font-size:10px;text-align:center;color:#6366f1;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${os.join(', ')}">${os.join(', ')}</td>`;
+  }
+  if(c.special==='effectiveStock'){
+    const es=p._effectiveStock||0;
+    const av=p['가용재고']||0;
+    const pq=p._pendingQty||0;
+    if(!pq)return`<td class="n" style="color:var(--text-muted)">${av?av.toLocaleString():'-'}</td>`;
+    const ss=p._safetyStock||0;
+    const color=es<=ss?'#ef4444':es<=ss*1.5?'#f59e0b':'#22c55e';
+    return`<td class="n" style="color:${color};font-weight:700" title="현재고 ${av.toLocaleString()} + 미입고 ${pq.toLocaleString()}">${es.toLocaleString()}</td>`;
   }
   if(c.special==='needOrder'){
     if(p._needOrder){
