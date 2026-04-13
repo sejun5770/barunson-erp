@@ -15090,6 +15090,11 @@ function renderPOSubCard(po, idx, steps, icon) {
     if(po.status==='취소'){
       actions+=`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();reorderPO(${po.po_id})">🔄 재발주</button>`;
     }
+    // 품목 수정 버튼 (admin 항상, 일반사용자는 완료/취소 아닐 때)
+    const isAdmin = currentAuthUser && currentAuthUser.role === 'admin';
+    if(isAdmin || (po.status!=='완료'&&po.status!=='취소')){
+      actions+=` <button class="btn btn-sm" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;margin-left:4px" onclick="event.stopPropagation();openPOItemEditModal(${idx})">📝 품목수정</button>`;
+    }
     actions+=` <button class="btn btn-sm" style="background:#fef2f2;color:#991b1b;border:1px solid #fecaca;margin-left:4px" onclick="event.stopPropagation();deletePO(${po.po_id},'${esc(po.po_number)}')">🗑 삭제</button>`;
     if(po.vendor_email){
       actions+=` <button class="btn btn-sm" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;margin-left:4px" onclick="event.stopPropagation();openVendorPortalView('${esc(po.vendor_email)}','${esc(po.vendor_name||'')}')">👁 거래처화면</button>`;
@@ -15260,6 +15265,231 @@ async function toggleActivityLog(poId) {
     container.innerHTML = html;
   } catch(e) {
     container.innerHTML = '<div style="color:#ef4444;padding:12px;font-size:13px;">로그 로딩 실패: ' + e.message + '</div>';
+  }
+}
+
+// ── PO 품목 수정 모달 ──
+function openPOItemEditModal(poIdx) {
+  const po = poList[poIdx];
+  if (!po) { alert('발주 정보를 찾을 수 없습니다.'); return; }
+  const items = (po.items || []).slice(); // copy
+  const isMat = po.po_type === '원재료';
+  const isAdmin = currentAuthUser && currentAuthUser.role === 'admin';
+
+  let overlay = document.getElementById('poItemEditOverlay');
+  if (overlay) overlay.remove();
+
+  overlay = document.createElement('div');
+  overlay.id = 'poItemEditOverlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center';
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  const statusNote = po.status === '완료' || po.status === '취소'
+    ? `<div style="padding:8px 12px;background:#fef2f2;border-radius:6px;color:#991b1b;font-size:12px;margin-bottom:12px">⚠️ ${po.status} 상태 — ${isAdmin ? '관리자 권한으로 수정 가능합니다' : '수정이 제한됩니다'}</div>` : '';
+
+  let html = `<div style="background:#fff;border-radius:12px;padding:24px;width:90vw;max-width:800px;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div>
+        <h3 style="margin:0;font-size:16px">📝 품목 수정 — ${esc(po.po_number)}</h3>
+        <span style="font-size:12px;color:#6b7280">${esc(po.vendor_name||'')} · ${esc(po.po_type||'')} · ${esc(po.status)}</span>
+      </div>
+      <button onclick="document.getElementById('poItemEditOverlay').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#9ca3af">✕</button>
+    </div>
+    ${statusNote}
+    <div id="poItemEditList"></div>
+    <div style="margin-top:16px;padding:16px;background:#f0f9ff;border-radius:8px;border:1px solid #bae6fd">
+      <div style="font-weight:700;font-size:13px;margin-bottom:8px;color:#0369a1">➕ 품목 추가</div>
+      <div style="display:grid;grid-template-columns:${isMat ? '1fr 100px 100px 1fr' : '1fr 120px 100px 1fr'};gap:8px;align-items:end">
+        <div><label style="font-size:11px;color:#64748b">제품코드</label><input id="poItemAdd_code" placeholder="예: 1212TR" style="width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:12px"></div>
+        ${isMat ? '' : '<div><label style="font-size:11px;color:#64748b">공정</label><input id="poItemAdd_process" placeholder="후공정명" style="width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:12px"></div>'}
+        <div><label style="font-size:11px;color:#64748b">수량</label><input id="poItemAdd_qty" type="number" placeholder="0" min="1" style="width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:12px"></div>
+        <div><label style="font-size:11px;color:#64748b">비고</label><input id="poItemAdd_notes" placeholder="선택" style="width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:12px"></div>
+        <div><button onclick="_poItemAddRow()" class="btn btn-sm btn-primary" style="padding:6px 14px;white-space:nowrap">추가</button></div>
+      </div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
+      <label style="font-size:12px;color:#374151;font-weight:600">변경 사유:</label>
+      <input id="poItemEditReason" placeholder="예: 업체 요청으로 수량 변경" style="flex:1;padding:6px 10px;border:1px solid #d1d5db;border-radius:5px;font-size:12px">
+    </div>
+    <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px">
+      <button onclick="document.getElementById('poItemEditOverlay').remove()" class="btn btn-sm" style="padding:8px 20px">취소</button>
+      <button onclick="_poItemSaveChanges(${po.po_id})" class="btn btn-sm btn-primary" style="padding:8px 20px;font-weight:700">💾 저장</button>
+    </div>
+  </div>`;
+
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+
+  // 수정/삭제 대상 추적
+  window._poItemEdits = { poId: po.po_id, original: items.map(it=>({...it})), toRemove: [], toUpdate: {}, toAdd: [] };
+  _poItemRenderList(items, isMat);
+}
+
+function _poItemRenderList(items, isMat) {
+  const container = document.getElementById('poItemEditList');
+  if (!container) return;
+  if (!items.length) { container.innerHTML = '<div style="padding:16px;text-align:center;color:#9ca3af;font-size:13px">품목이 없습니다</div>'; return; }
+
+  const edits = window._poItemEdits;
+  let html = `<table style="width:100%;font-size:12px;border-collapse:collapse">
+    <thead><tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">
+      <th style="padding:8px;text-align:left">제품코드</th>
+      ${isMat ? '<th style="padding:8px;text-align:left">원자재코드</th><th style="padding:8px;text-align:left">원재료용지명</th>' : '<th style="padding:8px;text-align:left">공정</th>'}
+      <th style="padding:8px;text-align:right">발주수량</th>
+      <th style="padding:8px;text-align:right">입고수량</th>
+      <th style="padding:8px;text-align:center">비고</th>
+      <th style="padding:8px;text-align:center;width:80px">삭제</th>
+    </tr></thead><tbody>`;
+
+  items.forEach((it, i) => {
+    const isRemoved = edits.toRemove.includes(it.item_id);
+    const rowStyle = isRemoved ? 'opacity:0.35;text-decoration:line-through;' : '';
+    const info = productInfo[it.product_code] || {};
+    const updatedQty = edits.toUpdate[it.item_id]?.ordered_qty ?? it.ordered_qty ?? 0;
+    const updatedNotes = edits.toUpdate[it.item_id]?.notes ?? it.notes ?? '';
+    html += `<tr style="${rowStyle};border-bottom:1px solid #f1f5f9" data-item-id="${it.item_id}">
+      <td style="padding:8px;font-weight:600">${esc(it.product_code||'')}</td>
+      ${isMat
+        ? `<td style="padding:8px;color:#0369a1">${esc(info['원자재코드']||'')}</td><td style="padding:8px">${esc(info['원재료용지명']||it.spec||'')}</td>`
+        : `<td style="padding:8px">${esc(it.process_type||it.spec||'')}</td>`}
+      <td style="padding:8px;text-align:right"><input type="number" value="${updatedQty}" min="0" ${isRemoved?'disabled':''} onchange="_poItemUpdateQty(${it.item_id},this.value)" style="width:80px;padding:4px;border:1px solid #d1d5db;border-radius:4px;text-align:right;font-size:12px"></td>
+      <td style="padding:8px;text-align:right;color:#6b7280">${(it.received_qty||0).toLocaleString()}</td>
+      <td style="padding:8px;text-align:center"><input type="text" value="${esc(updatedNotes)}" ${isRemoved?'disabled':''} onchange="_poItemUpdateNotes(${it.item_id},this.value)" style="width:100%;padding:4px;border:1px solid #d1d5db;border-radius:4px;font-size:11px" placeholder="-"></td>
+      <td style="padding:8px;text-align:center">${isRemoved
+        ? `<button onclick="_poItemUndoRemove(${it.item_id})" class="btn btn-sm" style="padding:2px 8px;font-size:11px;color:#059669">↩ 복원</button>`
+        : `<button onclick="_poItemRemove(${it.item_id})" class="btn btn-sm" style="padding:2px 8px;font-size:11px;color:#dc2626;border:1px solid #fecaca;background:#fef2f2">✕</button>`}
+      </td>
+    </tr>`;
+  });
+
+  // 추가된 항목(아직 저장 안된)
+  edits.toAdd.forEach((it, i) => {
+    html += `<tr style="background:#f0fdf4;border-bottom:1px solid #bbf7d0">
+      <td style="padding:8px;font-weight:600;color:#059669">🆕 ${esc(it.product_code||'')}</td>
+      ${isMat
+        ? `<td style="padding:8px">-</td><td style="padding:8px">${esc(it.spec||'')}</td>`
+        : `<td style="padding:8px">${esc(it.process_type||'')}</td>`}
+      <td style="padding:8px;text-align:right;font-weight:600">${(it.ordered_qty||0).toLocaleString()}</td>
+      <td style="padding:8px;text-align:right;color:#6b7280">0</td>
+      <td style="padding:8px;text-align:center;font-size:11px;color:#6b7280">${esc(it.notes||'-')}</td>
+      <td style="padding:8px;text-align:center"><button onclick="_poItemRemoveNew(${i})" class="btn btn-sm" style="padding:2px 8px;font-size:11px;color:#dc2626;border:1px solid #fecaca;background:#fef2f2">✕</button></td>
+    </tr>`;
+  });
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function _poItemUpdateQty(itemId, val) {
+  const edits = window._poItemEdits;
+  if (!edits.toUpdate[itemId]) edits.toUpdate[itemId] = {};
+  edits.toUpdate[itemId].ordered_qty = parseInt(val) || 0;
+}
+function _poItemUpdateNotes(itemId, val) {
+  const edits = window._poItemEdits;
+  if (!edits.toUpdate[itemId]) edits.toUpdate[itemId] = {};
+  edits.toUpdate[itemId].notes = val;
+}
+function _poItemRemove(itemId) {
+  const edits = window._poItemEdits;
+  const it = edits.original.find(x => x.item_id === itemId);
+  if (it && (it.received_qty || 0) > 0) {
+    if (!confirm(`이 품목은 이미 ${it.received_qty}개 입고됨. 정말 삭제하시겠습니까?`)) return;
+  }
+  if (!edits.toRemove.includes(itemId)) edits.toRemove.push(itemId);
+  const isMat = poList.find(p => p.po_id === edits.poId)?.po_type === '원재료';
+  _poItemRenderList(edits.original, isMat);
+}
+function _poItemUndoRemove(itemId) {
+  const edits = window._poItemEdits;
+  edits.toRemove = edits.toRemove.filter(id => id !== itemId);
+  const isMat = poList.find(p => p.po_id === edits.poId)?.po_type === '원재료';
+  _poItemRenderList(edits.original, isMat);
+}
+function _poItemRemoveNew(idx) {
+  const edits = window._poItemEdits;
+  edits.toAdd.splice(idx, 1);
+  const isMat = poList.find(p => p.po_id === edits.poId)?.po_type === '원재료';
+  _poItemRenderList(edits.original, isMat);
+}
+function _poItemAddRow() {
+  const code = document.getElementById('poItemAdd_code')?.value?.trim();
+  const qty = parseInt(document.getElementById('poItemAdd_qty')?.value) || 0;
+  const notes = document.getElementById('poItemAdd_notes')?.value?.trim() || '';
+  const processEl = document.getElementById('poItemAdd_process');
+  const process = processEl ? processEl.value.trim() : '';
+
+  if (!code) { alert('제품코드를 입력하세요.'); return; }
+  if (qty <= 0) { alert('수량을 입력하세요.'); return; }
+
+  const edits = window._poItemEdits;
+  edits.toAdd.push({
+    product_code: code,
+    brand: productInfo[code]?.['브랜드'] || '',
+    ordered_qty: qty,
+    process_type: process,
+    spec: process,
+    notes: notes
+  });
+
+  // clear inputs
+  document.getElementById('poItemAdd_code').value = '';
+  document.getElementById('poItemAdd_qty').value = '';
+  document.getElementById('poItemAdd_notes').value = '';
+  if (processEl) processEl.value = '';
+
+  const isMat = poList.find(p => p.po_id === edits.poId)?.po_type === '원재료';
+  _poItemRenderList(edits.original, isMat);
+}
+
+async function _poItemSaveChanges(poId) {
+  const edits = window._poItemEdits;
+  const reason = document.getElementById('poItemEditReason')?.value?.trim() || '';
+
+  // 변경사항 확인
+  const updateArr = [];
+  for (const [itemId, changes] of Object.entries(edits.toUpdate)) {
+    if (edits.toRemove.includes(parseInt(itemId))) continue; // 삭제될 항목은 무시
+    const orig = edits.original.find(it => it.item_id === parseInt(itemId));
+    if (!orig) continue;
+    const hasChange = (changes.ordered_qty !== undefined && changes.ordered_qty !== orig.ordered_qty)
+                   || (changes.notes !== undefined && changes.notes !== (orig.notes||''));
+    if (hasChange) updateArr.push({ item_id: parseInt(itemId), ...changes });
+  }
+
+  if (!edits.toRemove.length && !updateArr.length && !edits.toAdd.length) {
+    alert('변경사항이 없습니다.');
+    return;
+  }
+
+  // 변경 요약
+  const summary = [];
+  if (edits.toAdd.length) summary.push(`추가 ${edits.toAdd.length}건`);
+  if (updateArr.length) summary.push(`수정 ${updateArr.length}건`);
+  if (edits.toRemove.length) summary.push(`삭제 ${edits.toRemove.length}건`);
+  if (!confirm(`${summary.join(', ')} 변경하시겠습니까?${reason?'\n사유: '+reason:''}`)) return;
+
+  try {
+    const resp = await authFetch(`/api/po/${poId}/items`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        add: edits.toAdd,
+        remove: edits.toRemove,
+        update: updateArr,
+        reason: reason
+      })
+    });
+    const d = await resp.json();
+    if (d.ok !== false && !d.error) {
+      alert(`✅ 품목 변경 완료\n추가: ${d.data?.added||0}, 수정: ${d.data?.updated||0}, 삭제: ${d.data?.removed||0}`);
+      document.getElementById('poItemEditOverlay')?.remove();
+      loadPOList();
+    } else {
+      alert('❌ ' + (d.error || d.message || '저장 실패'));
+    }
+  } catch(e) {
+    alert('❌ 서버 오류: ' + e.message);
   }
 }
 
@@ -19620,7 +19850,7 @@ function initVendorPortal(){
   const _pt=document.getElementById('pageTitle');
   if(_pt) _pt.textContent='업체 발주 포털';
   const _hr=document.querySelector('.header-right');
-  if(_hr) _hr.innerHTML=`<span style="font-size:14px;font-weight:600;color:var(--text-primary)">${vendorPortalName||''}</span> <span style="font-size:12px;color:var(--text-muted);margin-left:8px">${vendorPortalEmail||''}</span>`;
+  if(_hr) _hr.innerHTML=`<a href="#" onclick="showVendorGuide();return false;" style="font-size:12px;color:#0369a1;margin-right:12px;text-decoration:underline">📖 사용안내</a><span style="font-size:14px;font-weight:600;color:var(--text-primary)">${vendorPortalName||''}</span> <span style="font-size:12px;color:var(--text-muted);margin-left:8px">${vendorPortalEmail||''}</span>`;
 
   // 모든 페이지 숨기고 포털 페이지 표시
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
@@ -20212,13 +20442,16 @@ async function loadVendorTradeDoc(poId, isShippedLock=false) {
 
     let html = '';
     if (isMaterial) {
-      // ── 원재료 거래명세서: R(연) 수량 표시 ──
+      // ── 원재료 거래명세서: R(연) 수량 + 연당 단가 표시 ──
+      html += `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#92400e">
+        <b>연당 단가(별도가)</b> 기준으로 입력해주세요. 금액 = 수량(R) x 연당단가
+      </div>`;
       html += `<table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px;">
         <tr style="background:#fef3c7;">
           <th style="padding:6px 8px;text-align:left;border-bottom:1px solid #fde68a;font-weight:700">품목</th>
           <th style="padding:6px 8px;text-align:left;border-bottom:1px solid #fde68a;font-weight:700">원재료명</th>
           <th style="padding:6px 8px;text-align:right;border-bottom:1px solid #fde68a;font-weight:700">수량(R)</th>
-          <th style="padding:6px 8px;text-align:right;border-bottom:1px solid #fde68a;font-weight:700">단가</th>
+          <th style="padding:6px 8px;text-align:right;border-bottom:1px solid #fde68a;font-weight:700">연당단가<span style="font-size:10px;color:#92400e;font-weight:400"> 별도가</span></th>
           <th style="padding:6px 8px;text-align:right;border-bottom:1px solid #fde68a;font-weight:700">금액</th>
         </tr>`;
 
@@ -20232,7 +20465,7 @@ async function loadVendorTradeDoc(poId, isShippedLock=false) {
         const ream = (cut && imp) ? (qty / 500 / cut / imp) : 0;
         const reamStr = ream > 0 ? ream.toFixed(1) + ' R' : qty.toLocaleString() + '매';
         const price = (mod || item).unit_price || 0;
-        const amount = price * qty;
+        const amount = ream > 0 ? Math.round(price * ream) : price * qty;
         totalAmount += amount;
         html += `<tr style="border-bottom:1px solid #fde68a30">
           <td style="padding:6px 8px;font-weight:600">${item.product_code || ''}</td>
@@ -20240,11 +20473,12 @@ async function loadVendorTradeDoc(poId, isShippedLock=false) {
           <td style="padding:6px 8px;text-align:right;font-weight:700;color:#0369a1">${reamStr}</td>
           <td style="padding:6px 8px;text-align:right;">
             ${isConfirmed && !priceChanged ?
-              `<input type="number" class="tradePrice_${poId}" data-idx="${i}" data-qty="${qty}" value="${mod ? mod.unit_price : item.unit_price}" style="width:80px;text-align:right;padding:2px 4px;border:1px solid #d1d5db;border-radius:4px;font-size:12px" disabled>` :
+              `<input type="number" class="tradePrice_${poId}" data-idx="${i}" data-qty="${qty}" data-ream="${ream.toFixed(4)}" value="${mod ? mod.unit_price : item.unit_price}" placeholder="연당단가" style="width:90px;text-align:right;padding:2px 4px;border:1px solid #d1d5db;border-radius:4px;font-size:12px" disabled>` :
               isConfirmed && priceChanged ?
               `<span style="text-decoration:line-through;color:#9ca3af;">${(item.unit_price||0).toLocaleString()}</span> → <b style="color:#dc2626;">${(mod.unit_price||0).toLocaleString()}</b>` :
-              `<input type="number" class="tradePrice_${poId}" data-idx="${i}" data-qty="${qty}" value="${item.unit_price || 0}" style="width:80px;text-align:right;padding:2px 4px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">`
+              `<input type="number" class="tradePrice_${poId}" data-idx="${i}" data-qty="${qty}" data-ream="${ream.toFixed(4)}" value="${item.unit_price || ''}" placeholder="연당단가" style="width:90px;text-align:right;padding:2px 4px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">`
             }
+            <div style="font-size:10px;color:#9ca3af;text-align:right;margin-top:1px">1R(연) 당</div>
           </td>
           <td style="padding:6px 8px;text-align:right;font-weight:600">${amount > 0 ? amount.toLocaleString() : '-'}</td>
         </tr>`;
@@ -20269,14 +20503,17 @@ async function loadVendorTradeDoc(poId, isShippedLock=false) {
       }
       html += '</table>';
     } else {
-      // ── 후공정 거래명세서: 공정명 + 연(R) + 수량 + 단가(VAT별도) + 금액 ──
+      // ── 후공정 거래명세서: 공정명 + 연(R) + 수량 + 연당단가(VAT별도) + 금액 ──
+      html += `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#92400e">
+        <b>연당 단가(별도가)</b> 기준으로 입력해주세요. 금액 = 연(R) x 연당단가
+      </div>`;
       html += `<table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px;">
         <tr style="background:#fef3c7;">
           <th style="padding:6px 8px;text-align:left;border-bottom:1px solid #fde68a;font-weight:700">품목</th>
           <th style="padding:6px 8px;text-align:left;border-bottom:1px solid #fde68a;font-weight:700">공정</th>
           <th style="padding:6px 8px;text-align:right;border-bottom:1px solid #fde68a;font-weight:700">연(R)</th>
           <th style="padding:6px 8px;text-align:right;border-bottom:1px solid #fde68a;font-weight:700">수량(매)</th>
-          <th style="padding:6px 8px;text-align:right;border-bottom:1px solid #fde68a;font-weight:700">공정단가<span style="font-size:10px;color:#92400e;font-weight:400"> VAT별도</span></th>
+          <th style="padding:6px 8px;text-align:right;border-bottom:1px solid #fde68a;font-weight:700">연당단가<span style="font-size:10px;color:#92400e;font-weight:400"> VAT별도</span></th>
           <th style="padding:6px 8px;text-align:right;border-bottom:1px solid #fde68a;font-weight:700">금액</th>
         </tr>`;
 
@@ -20290,7 +20527,7 @@ async function loadVendorTradeDoc(poId, isShippedLock=false) {
         const ream = (cut && imp) ? (qty / 500 / cut / imp) : 0;
         const reamStr = ream > 0 ? ream.toFixed(1) : '-';
         const price = (mod || item).unit_price || 0;
-        const amount = price * qty;
+        const amount = ream > 0 ? Math.round(price * ream) : price * qty;
         totalAmount += amount;
         html += `<tr style="border-bottom:1px solid #fde68a30">
           <td style="padding:6px 8px;font-weight:600">${item.product_code || ''}</td>
@@ -20299,11 +20536,12 @@ async function loadVendorTradeDoc(poId, isShippedLock=false) {
           <td style="padding:6px 8px;text-align:right;">${qty.toLocaleString()}</td>
           <td style="padding:6px 8px;text-align:right;">
             ${isConfirmed && !priceChanged ?
-              `<input type="number" class="tradePrice_${poId}" data-idx="${i}" data-qty="${qty}" value="${mod ? mod.unit_price : item.unit_price}" style="width:80px;text-align:right;padding:2px 4px;border:1px solid #d1d5db;border-radius:4px;font-size:12px" disabled>` :
+              `<input type="number" class="tradePrice_${poId}" data-idx="${i}" data-qty="${qty}" data-ream="${ream.toFixed(4)}" value="${mod ? mod.unit_price : item.unit_price}" placeholder="연당단가" style="width:90px;text-align:right;padding:2px 4px;border:1px solid #d1d5db;border-radius:4px;font-size:12px" disabled>` :
               isConfirmed && priceChanged ?
               `<span style="text-decoration:line-through;color:#9ca3af;">${(item.unit_price||0).toLocaleString()}</span> → <b style="color:#dc2626;">${(mod.unit_price||0).toLocaleString()}</b>` :
-              `<input type="number" class="tradePrice_${poId}" data-idx="${i}" data-qty="${qty}" value="${item.unit_price || 0}" style="width:80px;text-align:right;padding:2px 4px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">`
+              `<input type="number" class="tradePrice_${poId}" data-idx="${i}" data-qty="${qty}" data-ream="${ream.toFixed(4)}" value="${item.unit_price || ''}" placeholder="연당단가" style="width:90px;text-align:right;padding:2px 4px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">`
             }
+            <div style="font-size:10px;color:#9ca3af;text-align:right;margin-top:1px">1R(연) 당</div>
           </td>
           <td style="padding:6px 8px;text-align:right;font-weight:600">${amount > 0 ? amount.toLocaleString() : '-'}</td>
         </tr>`;
@@ -20389,6 +20627,58 @@ async function submitTradeDoc(docId, poId) {
       alert('오류: ' + (d.error || ''));
     }
   } catch(e) { alert('오류: ' + e.message); }
+}
+
+// ========== 거래처 사용안내 모달 ==========
+function showVendorGuide() {
+  let overlay = document.getElementById('vendorGuideOverlay');
+  if (overlay) { overlay.remove(); return; }
+  overlay = document.createElement('div');
+  overlay.id = 'vendorGuideOverlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center';
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `<div style="background:#fff;border-radius:12px;padding:28px 32px;width:90vw;max-width:700px;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <h2 style="margin:0;font-size:18px">📖 거래처 포털 사용 안내</h2>
+      <button onclick="document.getElementById('vendorGuideOverlay').remove()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#9ca3af">✕</button>
+    </div>
+    <div style="font-size:13px;line-height:1.8;color:#374151">
+      <h3 style="color:#0369a1;margin:16px 0 8px;font-size:15px">1. 발주 확인</h3>
+      <p>바른컴퍼니에서 발주 이메일을 보내면, 이메일 속 링크를 클릭하여 포털에 접속합니다.<br>
+      발주 내용을 확인한 후 <b>[발주 확인]</b> 버튼을 클릭하세요.</p>
+
+      <h3 style="color:#059669;margin:16px 0 8px;font-size:15px">2. 단가 입력 방법</h3>
+      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;margin:8px 0">
+        <b style="color:#92400e">연당 단가(별도가)</b> 기준으로 입력해주세요.
+        <ul style="margin:8px 0 0;padding-left:20px">
+          <li>1연(R) = 500매 x 절 수 x 조판 수</li>
+          <li>금액 = 수량(R) x 연당단가</li>
+          <li>VAT 별도 기준 입력</li>
+        </ul>
+      </div>
+      <table style="width:100%;border-collapse:collapse;margin:12px 0;font-size:12px">
+        <tr style="background:#f8fafc"><th style="padding:6px 8px;border:1px solid #e2e8f0;text-align:left">예시</th><th style="padding:6px 8px;border:1px solid #e2e8f0">수량(R)</th><th style="padding:6px 8px;border:1px solid #e2e8f0">연당단가</th><th style="padding:6px 8px;border:1px solid #e2e8f0">금액</th></tr>
+        <tr><td style="padding:6px 8px;border:1px solid #e2e8f0">BH8258 봉투가공</td><td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:right">4.2 R</td><td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:right">12,000원</td><td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:right">50,400원</td></tr>
+        <tr><td style="padding:6px 8px;border:1px solid #e2e8f0">1414SK 톰슨</td><td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:right">10.0 R</td><td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:right">8,500원</td><td style="padding:6px 8px;border:1px solid #e2e8f0;text-align:right">85,000원</td></tr>
+      </table>
+
+      <h3 style="color:#7c3aed;margin:16px 0 8px;font-size:15px">3. 출고 처리</h3>
+      <p>각 품목의 <b>출고예정일</b>을 선택하고, 출고 완료 시 <b>생산수량</b>을 입력합니다.<br>
+      불량 발생 시 <b>[보고]</b> 버튼으로 불량 내역을 등록하세요.</p>
+
+      <h3 style="color:#dc2626;margin:16px 0 8px;font-size:15px">4. 주의사항</h3>
+      <ul style="padding-left:20px">
+        <li>단가는 반드시 <b>연(R) 당</b>으로 입력 (장당 아님)</li>
+        <li>단가 수정 시 바른컴퍼니에 자동 통보됩니다</li>
+        <li>포털 링크가 만료된 경우 바른컴퍼니에 재발송 요청</li>
+      </ul>
+
+      <div style="margin-top:16px;padding:12px;background:#f1f5f9;border-radius:6px;font-size:12px;color:#64748b">
+        문의: <b>seungchan.back@barunn.net</b>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
 }
 
 // ========== 후공정 단가 관리 ==========

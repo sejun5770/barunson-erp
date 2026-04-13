@@ -3411,6 +3411,16 @@ async function handleRequest(req, res) {
     }
     return;
   }
+  // GET /api/vendor-guide — 거래처 사용안내서
+  if (pathname === '/api/vendor-guide' && method === 'GET') {
+    try {
+      const content = fs.readFileSync(path.join(__dirname, 'VENDOR_GUIDE.md'), 'utf8');
+      ok(res, { content });
+    } catch (e) {
+      fail(res, 500, 'VENDOR_GUIDE.md 로드 실패: ' + e.message);
+    }
+    return;
+  }
 
   // GET /api/changelog — 변경 이력 (CHANGELOG.md 원문)
   if (pathname === '/api/changelog' && method === 'GET') {
@@ -3868,7 +3878,6 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
   //  EXISTING ROUTES (preserved)
   // ════════════════════════════════════════════════════════════════════
-
   // 제품정보 저장 API (POST)
   if (pathname === '/api/save-product-info' && method === 'POST') {
     const body = await readBody(req);
@@ -7823,6 +7832,73 @@ async function handleRequest(req, res) {
 
     ok(res, { po_id: poId, po_number: poNumber });
     return;
+  }
+
+  // PUT /api/po/:id/items — 발주서 품목 추가/수정 (발송 후에도 admin 가능)
+  const poItemsMatch = pathname.match(/^\/api\/po\/(\d+)\/items$/);
+  if (poItemsMatch && method === 'PUT') {
+    const poId = parseInt(poItemsMatch[1]);
+    const body = await readJSON(req);
+    const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(poId);
+    if (!po) { fail(res, 404, '발주서 없음'); return; }
+
+    const isAdmin = currentUser && currentUser.role === 'admin';
+    // 수정 가능 조건: admin이면 항상, 아니면 원재료 발송 전까지만
+    const lockedStatuses = ['received', 'cancelled'];
+    const materialShipped = po.material_status === 'shipped' || po.material_status === 'received';
+    if (!isAdmin && (lockedStatuses.includes(po.status) || materialShipped)) {
+      fail(res, 403, '원재료가 이미 발송된 발주서는 수정할 수 없습니다. 관리자에게 요청하세요.'); return;
+    }
+    if (lockedStatuses.includes(po.status) && !isAdmin) {
+      fail(res, 403, '완료/취소된 발주서는 수정 불가'); return;
+    }
+
+    const addItems = body.add || []; // [{product_code, brand, ordered_qty, spec, notes, process_type}]
+    const removeItemIds = body.remove || []; // [item_id, ...]
+    const updateItems = body.update || []; // [{item_id, ordered_qty, spec, notes}]
+    let added = 0, removed = 0, updated = 0;
+
+    const tx = db.transaction(async () => {
+      // 품목 추가
+      for (const it of addItems) {
+        if (!it.product_code || !it.ordered_qty) continue;
+        await db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?,?,?,?,?,?,?)')
+          .run(poId, it.product_code, it.brand||'', it.process_type||'', it.ordered_qty||0, it.spec||'', it.notes||'');
+        added++;
+      }
+      // 품목 삭제
+      for (const itemId of removeItemIds) {
+        await db.prepare('DELETE FROM po_items WHERE item_id=? AND po_id=?').run(itemId, poId);
+        removed++;
+      }
+      // 품목 수정
+      for (const it of updateItems) {
+        if (!it.item_id) continue;
+        const sets = [], vals = [];
+        if (it.ordered_qty !== undefined) { sets.push('ordered_qty=?'); vals.push(it.ordered_qty); }
+        if (it.spec !== undefined) { sets.push('spec=?'); vals.push(it.spec); }
+        if (it.notes !== undefined) { sets.push('notes=?'); vals.push(it.notes); }
+        if (sets.length) { vals.push(it.item_id, poId); await db.prepare(`UPDATE po_items SET ${sets.join(',')} WHERE item_id=? AND po_id=?`).run(...vals); updated++; }
+      }
+      // total_qty 갱신
+      const total = await db.prepare('SELECT COALESCE(SUM(ordered_qty),0) AS t FROM po_items WHERE po_id=?').get(poId);
+      await db.prepare("UPDATE po_header SET total_qty=?, updated_at=datetime('now','localtime') WHERE po_id=?").run(total.t, poId);
+    });
+    await tx();
+
+    // 이력 기록
+    const details = [];
+    if (added) details.push(`${added}건 추가`);
+    if (removed) details.push(`${removed}건 삭제`);
+    if (updated) details.push(`${updated}건 수정`);
+    logPOActivity(poId, 'items_modified', {
+      actor: currentUser?.username || 'unknown',
+      actor_type: isAdmin ? 'admin' : 'user',
+      details: `품목변경: ${details.join(', ')}${body.reason ? ' | 사유: '+body.reason : ''}`
+    });
+    if (currentUser) auditLog(currentUser.userId, currentUser.username, 'po_items_modify', 'po_items', poId, `PO ${po.po_number} 품목변경: ${details.join(', ')}${body.reason?' 사유:'+body.reason:''}`, clientIP);
+
+    ok(res, { po_id: poId, added, removed, updated }); return;
   }
 
   // PUT /api/po/:id/status
