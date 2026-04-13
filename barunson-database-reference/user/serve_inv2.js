@@ -3077,6 +3077,7 @@ const ALL_PAGES = [
   // 통합발주
   { id: 'procurement', name: '통합발주관리', group: '구매' },
   // 재고 확장
+  { id: 'inventory-ledger', name: '수불원장', group: '재고' },
   { id: 'safety-stock', name: '안전재고관리', group: '재고' },
   { id: 'cycle-count', name: '재고실사', group: '재고' },
   // 생산 확장
@@ -3101,14 +3102,14 @@ const ALL_PAGES = [
 // 역할 기본 권한 맵 (개별 permissions가 없을 때 fallback)
 const ROLE_PERMISSIONS = {
   admin: ['*'],  // 모든 권한
-  purchase: ['dashboard', 'inventory', 'warehouse', 'shipments', 'auto-order', 'create-po', 'po-list', 'os-register',
+  purchase: ['dashboard', 'inventory', 'warehouse', 'shipments', 'inventory-ledger', 'auto-order', 'create-po', 'po-list', 'os-register',
     'delivery-schedule', 'receipts', 'invoices', 'notes', 'product-mgmt', 'bom', 'mrp', 'post-process', 'defects',
     'closing', 'report', 'po-mgmt', 'china-shipment', 'mat-purchase', 'tasks', 'meeting-log', 'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'cost-mgmt', 'board', 'audit-log', 'exec-dashboard', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'work-order', 'lot-tracking',
     'approval', 'sales-order', 'budget', 'notification', 'safety-stock', 'cycle-count', 'mfg-cost', 'procurement', 'vendor-performance'],
-  production: ['dashboard', 'inventory', 'warehouse', 'shipments', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks', 'approval', 'lot-tracking',
+  production: ['dashboard', 'inventory', 'warehouse', 'shipments', 'inventory-ledger', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks', 'approval', 'lot-tracking',
     'process-routing', 'equipment', 'mfg-cost', 'safety-stock', 'work-order'],
-  logistics: ['dashboard', 'inventory', 'warehouse', 'shipments', 'receipts', 'delivery-schedule', 'shipping', 'lot-tracking',
+  logistics: ['dashboard', 'inventory', 'warehouse', 'shipments', 'inventory-ledger', 'receipts', 'delivery-schedule', 'shipping', 'lot-tracking',
     'safety-stock', 'cycle-count', 'barcode', 'tasks', 'notes', 'board', 'notification', 'customer-orders'],
   sales_team: ['dashboard', 'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'sales-order', 'customer-orders', 'shipping',
     'inventory', 'warehouse', 'shipments', 'ar-ap', 'invoices', 'tasks', 'notes', 'board', 'notification', 'exec-dashboard', 'analytics', 'report'],
@@ -4786,6 +4787,112 @@ async function handleRequest(req, res) {
     } catch (e) {
       console.error('출고현황 조회 오류:', e.message);
       fail(res, 500, '출고현황 조회 오류: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  수불원장 (Inventory Ledger)
+  // ════════════════════════════════════════════════════════════════════
+
+  // GET /api/xerp-inventory-ledger — 수불원장 (월별 품목별 입출고 집계)
+  if (pathname === '/api/xerp-inventory-ledger' && method === 'GET') {
+    if (!await ensureXerpPool()) { fail(res, 503, 'XERP 데이터베이스 미연결 (재연결 시도 중)'); return; }
+
+    // 창고코드 → 창고명 매핑 (XERP에 창고 마스터 테이블 없음)
+    const WH_NAMES = {
+      MF01:'본사공장', MF02:'공장2', MF03:'공장부속', MF15:'공장보조',
+      MF21:'공장21', MF23:'후가공', MF24:'완제품', MT01:'자재창고',
+      MT04:'자재보조', MT09:'자재09', M006:'외주06', M011:'외주11', W062:'외부창고'
+    };
+
+    try {
+      const qFrom = parsed.searchParams.get('from');
+      const qTo = parsed.searchParams.get('to');
+      const qWarehouse = parsed.searchParams.get('warehouse');
+      const qItemCode = parsed.searchParams.get('item_code');
+
+      const today = new Date();
+      const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+      // 기본: 3개월 전 1일 ~ 오늘
+      const def = new Date(today); def.setMonth(def.getMonth() - 3); def.setDate(1);
+      let startStr = qFrom || fmt(def);
+      let endStr = qTo || fmt(today);
+      // endDate 포함을 위해 +1일
+      const endNext = new Date(parseInt(endStr.slice(0,4)), parseInt(endStr.slice(4,6))-1, parseInt(endStr.slice(6,8))+1);
+      const endNextStr = fmt(endNext);
+
+      // 1) 창고 목록 조회
+      const whResult = await xerpPool.request().query(`
+        SELECT DISTINCT RTRIM(WhCode) AS wh_code
+        FROM mmInoutItem WITH (NOLOCK)
+        WHERE SiteCode = 'BK10' AND WhCode IS NOT NULL AND RTRIM(WhCode) <> ''
+        ORDER BY RTRIM(WhCode)
+      `);
+      const warehouses = whResult.recordset.map(r => ({
+        code: r.wh_code,
+        name: WH_NAMES[r.wh_code] || r.wh_code
+      }));
+
+      // 2) 수불장 데이터 조회 — 월별 품목별 창고별 집계
+      const req = xerpPool.request()
+        .input('startDate', sql.NChar(16), startStr)
+        .input('endDate', sql.NChar(16), endNextStr);
+
+      let whereExtra = '';
+      if (qWarehouse) {
+        req.input('whFilter', sql.VarChar(20), qWarehouse);
+        whereExtra += ' AND RTRIM(WhCode) = @whFilter';
+      }
+      if (qItemCode) {
+        req.input('itemFilter', sql.VarChar(60), '%' + qItemCode + '%');
+        whereExtra += ' AND (RTRIM(ItemCode) LIKE @itemFilter OR RTRIM(ItemName) LIKE @itemFilter)';
+      }
+
+      const result = await req.query(`
+        SELECT RTRIM(ItemCode) AS item_code,
+               MAX(RTRIM(ItemName)) AS item_name,
+               RTRIM(WhCode) AS warehouse,
+               LEFT(RTRIM(InoutDate), 6) AS month,
+               SUM(CASE WHEN InoutGubun = 'SI' THEN InoutQty ELSE 0 END) AS si_qty,
+               SUM(CASE WHEN InoutGubun = 'MI' THEN InoutQty ELSE 0 END) AS mi_qty,
+               SUM(CASE WHEN InoutGubun = 'SO' THEN InoutQty ELSE 0 END) AS so_qty,
+               SUM(CASE WHEN InoutGubun = 'MO' THEN InoutQty ELSE 0 END) AS mo_qty,
+               SUM(CASE WHEN InoutGubun IN ('SI','MI') THEN InoutAmnt ELSE 0 END) AS in_amnt,
+               SUM(CASE WHEN InoutGubun IN ('SO','MO') THEN InoutAmnt ELSE 0 END) AS out_amnt
+        FROM mmInoutItem WITH (NOLOCK)
+        WHERE SiteCode = 'BK10'
+          AND InoutDate >= @startDate AND InoutDate < @endDate
+          ${whereExtra}
+        GROUP BY RTRIM(ItemCode), RTRIM(WhCode), LEFT(RTRIM(InoutDate), 6)
+        ORDER BY LEFT(RTRIM(InoutDate), 6) DESC, RTRIM(ItemCode), RTRIM(WhCode)
+      `);
+
+      const rows = result.recordset.map(r => ({
+        item_code: (r.item_code || '').trim(),
+        item_name: (r.item_name || '').trim(),
+        warehouse: (r.warehouse || '').trim(),
+        month: r.month || '',
+        si_qty: r.si_qty || 0,
+        mi_qty: r.mi_qty || 0,
+        so_qty: r.so_qty || 0,
+        mo_qty: r.mo_qty || 0,
+        in_amnt: r.in_amnt || 0,
+        out_amnt: r.out_amnt || 0
+      }));
+
+      // 합계
+      const totals = rows.reduce((acc, r) => {
+        acc.si_qty += r.si_qty; acc.mi_qty += r.mi_qty;
+        acc.so_qty += r.so_qty; acc.mo_qty += r.mo_qty;
+        acc.in_amnt += r.in_amnt; acc.out_amnt += r.out_amnt;
+        return acc;
+      }, { si_qty:0, mi_qty:0, so_qty:0, mo_qty:0, in_amnt:0, out_amnt:0 });
+
+      ok(res, { rows, warehouses, totals, range: { start: startStr, end: endStr } });
+    } catch (e) {
+      console.error('수불원장 조회 오류:', e.message);
+      fail(res, 500, '수불원장 조회 오류: ' + e.message);
     }
     return;
   }
