@@ -7878,7 +7878,12 @@ async function handleRequest(req, res) {
         if (it.ordered_qty !== undefined) { sets.push('ordered_qty=?'); vals.push(it.ordered_qty); }
         if (it.spec !== undefined) { sets.push('spec=?'); vals.push(it.spec); }
         if (it.notes !== undefined) { sets.push('notes=?'); vals.push(it.notes); }
+        if (it.process_type !== undefined) { sets.push('process_type=?'); vals.push(it.process_type); }
         if (sets.length) { vals.push(it.item_id, poId); await db.prepare(`UPDATE po_items SET ${sets.join(',')} WHERE item_id=? AND po_id=?`).run(...vals); updated++; }
+      }
+      // po_header 업데이트 (업체명 변경 등)
+      if (body.vendor_name) {
+        await db.prepare("UPDATE po_header SET vendor_name=?, updated_at=datetime('now','localtime') WHERE po_id=?").run(body.vendor_name, poId);
       }
       // total_qty 갱신
       const total = await db.prepare('SELECT COALESCE(SUM(ordered_qty),0) AS t FROM po_items WHERE po_id=?').get(poId);

@@ -15162,14 +15162,19 @@ function renderPOSubCard(po, idx, steps, icon) {
       ? `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;background:#FEF2F2;color:#DC2626;border:1px solid #FECACA">🔍 불량처리</span>`
       : '';
 
-    return `<div style="margin:8px 12px;padding:12px;border:1px solid #e5e7eb;border-radius:8px;border-left:3px solid ${stColor};background:#fff">
+    // 원재료: 보라색 계열, 후공정: 붉은색 계열
+    const typeColor = po.po_type === '원재료' ? '#7c3aed' : '#dc2626';
+    const typeBg = po.po_type === '원재료' ? '#f5f3ff' : '#fef2f2';
+    const typeBorder = po.po_type === '원재료' ? '#c4b5fd' : '#fecaca';
+
+    return `<div style="margin:8px 12px;padding:12px;border:1px solid ${typeBorder};border-radius:8px;border-left:4px solid ${typeColor};background:${typeBg}">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-bottom:8px">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <span style="font-size:14px">${icon}</span>
           <span style="font-weight:700;font-size:13px">${esc(po.po_number||'')}</span>
           ${defectBadge}
-          <span class="status-badge ${typeClass}" style="font-size:11px">${esc(po.po_type||'')}</span>
-          <span style="font-size:13px;color:#374151;font-weight:600">${esc(po.vendor_name||'')}</span>
+          <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:${typeColor}15;color:${typeColor};font-weight:700;border:1px solid ${typeColor}30">${esc(po.po_type||'')}</span>
+          <span style="font-size:13px;color:${typeColor};font-weight:600">${esc(po.vendor_name||'')}</span>
           <span style="font-size:11px;padding:2px 6px;border-radius:3px;background:${stColor}20;color:${stColor};font-weight:600">${esc(po.status)}</span>
           <span style="font-size:12px;color:#6b7280">${items.length}품목 · ${totalOrdered.toLocaleString()}매</span>
           <span style="font-size:12px;color:#6b7280">입고 <span class="recv-text ${overallCls}" style="font-weight:600">${overallPct}%</span></span>
@@ -15287,13 +15292,25 @@ function openPOItemEditModal(poIdx) {
   const statusNote = po.status === '완료' || po.status === '취소'
     ? `<div style="padding:8px 12px;background:#fef2f2;border-radius:6px;color:#991b1b;font-size:12px;margin-bottom:12px">⚠️ ${po.status} 상태 — ${isAdmin ? '관리자 권한으로 수정 가능합니다' : '수정이 제한됩니다'}</div>` : '';
 
-  let html = `<div style="background:#fff;border-radius:12px;padding:24px;width:90vw;max-width:800px;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+  // 후공정 업체 목록 (거래처관리에서)
+  const vendorOptions = (typeof vendorList !== 'undefined' && Array.isArray(vendorList))
+    ? vendorList.filter(v => v.type === '후공정' || v.type === '원재료' || !v.type).map(v => v.name || v.vendor_name || '')
+    : [];
+
+  let html = `<div style="background:#fff;border-radius:12px;padding:24px;width:90vw;max-width:900px;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
       <div>
         <h3 style="margin:0;font-size:16px">📝 품목 수정 — ${esc(po.po_number)}</h3>
-        <span style="font-size:12px;color:#6b7280">${esc(po.vendor_name||'')} · ${esc(po.po_type||'')} · ${esc(po.status)}</span>
+        <span style="font-size:12px;color:#6b7280">${esc(po.po_type||'')} · ${esc(po.status)}</span>
       </div>
       <button onclick="document.getElementById('poItemEditOverlay').remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#9ca3af">✕</button>
+    </div>
+    <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px">
+        <label style="font-size:11px;color:#64748b;font-weight:600">업체명</label>
+        <input id="poItemEditVendor" value="${esc(po.vendor_name||'')}" list="poItemVendorList" placeholder="업체명" style="width:100%;padding:6px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:13px;font-weight:600;color:#0369a1">
+        <datalist id="poItemVendorList">${vendorOptions.map(v=>'<option value="'+esc(v)+'">').join('')}</datalist>
+      </div>
     </div>
     ${statusNote}
     <div id="poItemEditList"></div>
@@ -15331,6 +15348,9 @@ function _poItemRenderList(items, isMat) {
   if (!items.length) { container.innerHTML = '<div style="padding:16px;text-align:center;color:#9ca3af;font-size:13px">품목이 없습니다</div>'; return; }
 
   const edits = window._poItemEdits;
+  // 공정 선택지 (동적 로드된 후공정 타입)
+  const procOptions = typeof getPostCols === 'function' ? getPostCols() : ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼'];
+
   let html = `<table style="width:100%;font-size:12px;border-collapse:collapse">
     <thead><tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">
       <th style="padding:8px;text-align:left">제품코드</th>
@@ -15347,11 +15367,12 @@ function _poItemRenderList(items, isMat) {
     const info = productInfo[it.product_code] || {};
     const updatedQty = edits.toUpdate[it.item_id]?.ordered_qty ?? it.ordered_qty ?? 0;
     const updatedNotes = edits.toUpdate[it.item_id]?.notes ?? it.notes ?? '';
+    const updatedProcess = edits.toUpdate[it.item_id]?.process_type ?? it.process_type ?? it.spec ?? '';
     html += `<tr style="${rowStyle};border-bottom:1px solid #f1f5f9" data-item-id="${it.item_id}">
       <td style="padding:8px;font-weight:600">${esc(it.product_code||'')}</td>
       ${isMat
         ? `<td style="padding:8px;color:#0369a1">${esc(info['원자재코드']||'')}</td><td style="padding:8px">${esc(info['원재료용지명']||it.spec||'')}</td>`
-        : `<td style="padding:8px">${esc(it.process_type||it.spec||'')}</td>`}
+        : `<td style="padding:8px"><input type="text" value="${esc(updatedProcess)}" list="poItemProcList" ${isRemoved?'disabled':''} onchange="_poItemUpdateProcess(${it.item_id},this.value)" style="width:100%;padding:4px;border:1px solid #d1d5db;border-radius:4px;font-size:12px;color:#7c3aed;font-weight:600" placeholder="공정명"></td>`}
       <td style="padding:8px;text-align:right"><input type="number" value="${updatedQty}" min="0" ${isRemoved?'disabled':''} onchange="_poItemUpdateQty(${it.item_id},this.value)" style="width:80px;padding:4px;border:1px solid #d1d5db;border-radius:4px;text-align:right;font-size:12px"></td>
       <td style="padding:8px;text-align:right;color:#6b7280">${(it.received_qty||0).toLocaleString()}</td>
       <td style="padding:8px;text-align:center"><input type="text" value="${esc(updatedNotes)}" ${isRemoved?'disabled':''} onchange="_poItemUpdateNotes(${it.item_id},this.value)" style="width:100%;padding:4px;border:1px solid #d1d5db;border-radius:4px;font-size:11px" placeholder="-"></td>
@@ -15377,6 +15398,8 @@ function _poItemRenderList(items, isMat) {
   });
 
   html += '</tbody></table>';
+  // 공정명 datalist
+  html += `<datalist id="poItemProcList">${procOptions.map(p=>'<option value="'+esc(p)+'">').join('')}</datalist>`;
   container.innerHTML = html;
 }
 
@@ -15389,6 +15412,11 @@ function _poItemUpdateNotes(itemId, val) {
   const edits = window._poItemEdits;
   if (!edits.toUpdate[itemId]) edits.toUpdate[itemId] = {};
   edits.toUpdate[itemId].notes = val;
+}
+function _poItemUpdateProcess(itemId, val) {
+  const edits = window._poItemEdits;
+  if (!edits.toUpdate[itemId]) edits.toUpdate[itemId] = {};
+  edits.toUpdate[itemId].process_type = val;
 }
 function _poItemRemove(itemId) {
   const edits = window._poItemEdits;
@@ -15445,40 +15473,50 @@ function _poItemAddRow() {
 async function _poItemSaveChanges(poId) {
   const edits = window._poItemEdits;
   const reason = document.getElementById('poItemEditReason')?.value?.trim() || '';
+  const newVendorName = document.getElementById('poItemEditVendor')?.value?.trim() || '';
 
   // 변경사항 확인
   const updateArr = [];
   for (const [itemId, changes] of Object.entries(edits.toUpdate)) {
-    if (edits.toRemove.includes(parseInt(itemId))) continue; // 삭제될 항목은 무시
+    if (edits.toRemove.includes(parseInt(itemId))) continue;
     const orig = edits.original.find(it => it.item_id === parseInt(itemId));
     if (!orig) continue;
     const hasChange = (changes.ordered_qty !== undefined && changes.ordered_qty !== orig.ordered_qty)
-                   || (changes.notes !== undefined && changes.notes !== (orig.notes||''));
+                   || (changes.notes !== undefined && changes.notes !== (orig.notes||''))
+                   || (changes.process_type !== undefined && changes.process_type !== (orig.process_type||''));
     if (hasChange) updateArr.push({ item_id: parseInt(itemId), ...changes });
   }
 
-  if (!edits.toRemove.length && !updateArr.length && !edits.toAdd.length) {
+  // 업체명 변경 확인
+  const origPo = poList.find(p => p.po_id === poId);
+  const vendorChanged = newVendorName && origPo && newVendorName !== origPo.vendor_name;
+
+  if (!edits.toRemove.length && !updateArr.length && !edits.toAdd.length && !vendorChanged) {
     alert('변경사항이 없습니다.');
     return;
   }
 
   // 변경 요약
   const summary = [];
+  if (vendorChanged) summary.push(`업체명: ${origPo.vendor_name} → ${newVendorName}`);
   if (edits.toAdd.length) summary.push(`추가 ${edits.toAdd.length}건`);
   if (updateArr.length) summary.push(`수정 ${updateArr.length}건`);
   if (edits.toRemove.length) summary.push(`삭제 ${edits.toRemove.length}건`);
   if (!confirm(`${summary.join(', ')} 변경하시겠습니까?${reason?'\n사유: '+reason:''}`)) return;
 
   try {
+    const payload = {
+      add: edits.toAdd,
+      remove: edits.toRemove,
+      update: updateArr,
+      reason: reason
+    };
+    if (vendorChanged) payload.vendor_name = newVendorName;
+
     const resp = await authFetch(`/api/po/${poId}/items`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        add: edits.toAdd,
-        remove: edits.toRemove,
-        update: updateArr,
-        reason: reason
-      })
+      body: JSON.stringify(payload)
     });
     const d = await resp.json();
     if (d.ok !== false && !d.error) {
