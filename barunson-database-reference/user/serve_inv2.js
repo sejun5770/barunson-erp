@@ -7984,10 +7984,11 @@ async function handleRequest(req, res) {
         const poForDoc = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(id);
         const itemsForDoc = await db.prepare('SELECT * FROM po_items WHERE po_id=?').all(id);
         const piMap = getProductInfo();
-        const docItems = itemsForDoc.map(item => {
+        const docItems = [];
+        for (const item of itemsForDoc) {
           const pi = piMap[item.product_code] || {};
-          const lastPrice = getLastVendorPrice(poForDoc.vendor_name, item.product_code);
-          return {
+          const lastPrice = await getLastVendorPrice(poForDoc.vendor_name, item.product_code);
+          docItems.push({
             product_code: item.product_code,
             product_name: item.brand || '',
             qty: item.ordered_qty,
@@ -7999,8 +8000,8 @@ async function handleRequest(req, res) {
             material_name: pi['원재료용지명'] || '',
             process_name: item.spec || '',
             last_price: lastPrice
-          };
-        });
+          });
+        }
         const vendorRow = await db.prepare('SELECT type FROM vendors WHERE name=?').get(poForDoc.vendor_name);
         const vendorType = vendorRow ? vendorRow.type : 'material';
         await db.prepare(`INSERT INTO trade_document (po_id, po_number, vendor_name, vendor_type, items_json, status) VALUES (?,?,?,?,?,'sent')`)
