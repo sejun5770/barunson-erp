@@ -6113,8 +6113,16 @@ async function handleRequest(req, res) {
         if (vendor.type === '후공정' && itemSteps.length > 0) {
           const vName = vendor.name || '';
           let foundIdx = -1;
+          // 1) 정확 매칭
           for (let si = 0; si < itemSteps.length; si++) {
             if (itemSteps[si].v === vName) { foundIdx = si; break; }
+          }
+          // 2) 부분 매칭 (코리아↔코리아패키지 등)
+          if (foundIdx < 0) {
+            for (let si = 0; si < itemSteps.length; si++) {
+              const sv = itemSteps[si].v;
+              if (vName.includes(sv) || sv.includes(vName)) { foundIdx = si; break; }
+            }
           }
           // 공정명: product_info 기반으로 보정 (DB에 깨진 한글 방지)
           if (foundIdx >= 0) {
