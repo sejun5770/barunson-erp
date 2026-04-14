@@ -1161,6 +1161,9 @@ try { await db.exec("ALTER TABLE products ADD COLUMN post_vendor TEXT DEFAULT ''
 try { await db.exec("ALTER TABLE products ADD COLUMN unit TEXT DEFAULT 'EA'"); } catch(e) {}
 try { await db.exec("ALTER TABLE products ADD COLUMN op_category TEXT DEFAULT ''"); } catch(e) {}
 try { await db.exec("ALTER TABLE products ADD COLUMN temp_code TEXT DEFAULT ''"); } catch(e) {}
+try { await db.exec("ALTER TABLE products ADD COLUMN moq TEXT DEFAULT ''"); } catch(e) {}
+try { await db.exec("ALTER TABLE products ADD COLUMN payment_terms TEXT DEFAULT ''"); } catch(e) {}
+try { await db.exec("ALTER TABLE products ADD COLUMN supplier_id INTEGER DEFAULT 0"); } catch(e) {}
 
 // ── 생산지별 기본 리드타임 (일) ──
 const ORIGIN_LEAD_TIME = { '중국': 50, '한국': 7, '더기프트': 14 };
@@ -4180,19 +4183,19 @@ async function handleRequest(req, res) {
       return s;
     };
     b.origin = _normOrigin(b.origin);
+    // temp_code 컬럼 존재 여부 런타임 체크
+    let _hasTempCode = false;
+    try { await db.prepare('SELECT temp_code FROM products LIMIT 1').get(); _hasTempCode = true; } catch(_){}
     try {
       let info;
-      if (_hasEntity.products) {
-        info = await db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo, legal_entity, temp_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-          b.product_code, b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-          b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', entity, b.temp_code||''
-        );
-      } else {
-        info = await db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo, temp_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-          b.product_code, b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-          b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.temp_code||''
-        );
-      }
+      const baseCols = 'product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo';
+      const baseVals = [b.product_code, b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
+        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||''];
+      let cols = baseCols, vals = [...baseVals];
+      if (_hasEntity.products) { cols += ', legal_entity'; vals.push(entity); }
+      if (_hasTempCode) { cols += ', temp_code'; vals.push(b.temp_code||''); }
+      const ph = vals.map((_,i)=>'?').join(',');
+      info = await db.prepare(`INSERT INTO products (${cols}) VALUES (${ph})`).run(...vals);
       ok(res, { id: info.lastInsertRowid });
     } catch(e) {
       fail(res, 400, e.message.includes('UNIQUE') ? '이미 등록된 품목코드입니다' : e.message);
@@ -4205,17 +4208,26 @@ async function handleRequest(req, res) {
     const id = parseInt(prodPut[1]);
     const b = await readJSON(req);
     const entity = (b.legal_entity === 'dd') ? 'dd' : 'barunson';
-    if (_hasEntity.products) {
-      await db.prepare(`UPDATE products SET product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?, legal_entity=?, temp_code=?, updated_at=datetime('now','localtime') WHERE id=?`).run(
-        b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', entity, b.temp_code||'', id
-      );
-    } else {
-      await db.prepare(`UPDATE products SET product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?, temp_code=?, updated_at=datetime('now','localtime') WHERE id=?`).run(
-        b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', b.temp_code||'', id
-      );
+    // temp_code 컬럼 존재 여부 런타임 체크
+    let _hasTempCodeU = false;
+    try { await db.prepare('SELECT temp_code FROM products LIMIT 1').get(); _hasTempCodeU = true; } catch(_){}
+    let setCols = 'product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?';
+    let setVals = [b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
+      b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||''];
+    if (_hasEntity.products) { setCols += ', legal_entity=?'; setVals.push(entity); }
+    if (_hasTempCodeU) { setCols += ', temp_code=?'; setVals.push(b.temp_code||''); }
+    // 매입관리 필드: lead_time_days, moq, payment_terms, supplier_id
+    const _procureCols = ['lead_time_days','moq','payment_terms','supplier_id'];
+    for (const pc of _procureCols) {
+      if (b[pc] !== undefined) {
+        let _hasPc = false;
+        try { await db.prepare(`SELECT ${pc} FROM products LIMIT 1`).get(); _hasPc = true; } catch(_){}
+        if (_hasPc) { setCols += `, ${pc}=?`; setVals.push(b[pc]); }
+      }
     }
+    setCols += ", updated_at=datetime('now','localtime')";
+    setVals.push(id);
+    await db.prepare(`UPDATE products SET ${setCols} WHERE id=?`).run(...setVals);
     // op_category → product_notes 동기화
     if (b.op_category) {
       const prod = await db.prepare('SELECT product_code FROM products WHERE id=?').get(id);
@@ -4368,15 +4380,25 @@ async function handleRequest(req, res) {
   if (prodFieldMatch && method === 'PUT') {
     const code = decodeURIComponent(prodFieldMatch[1]);
     const body = await readJSON(req);
-    const allowed = ['cut_spec','jopan','paper_maker','material_name','material_code','post_vendor'];
+    const allowed = ['cut_spec','jopan','paper_maker','material_name','material_code','post_vendor','lead_time_days','moq','payment_terms','supplier_id','memo'];
     if (!allowed.includes(body.field)) { fail(res, 400, '허용되지 않는 필드'); return; }
     // 이전 값 조회 후 이력 저장
-    const prev = await db.prepare(`SELECT ${body.field} as val FROM products WHERE product_code=?`).get(code);
+    let prev;
+    try { prev = await db.prepare(`SELECT ${body.field} as val FROM products WHERE product_code=?`).get(code); } catch(_) { prev = undefined; }
     const oldVal = prev ? (prev.val || '') : '';
     if (String(oldVal) !== String(body.value)) {
-      const reason = body.reason || '';
-      const changer = body.changed_by || (currentUser ? currentUser.username : '');
-      await db.prepare('INSERT INTO product_field_history (product_code, field_name, old_value, new_value, reason, changed_by) VALUES (?,?,?,?,?,?)').run(code, body.field, String(oldVal), String(body.value), reason, changer);
+      try {
+        // reason, changed_by 컬럼 존재 여부 런타임 체크
+        let _hasPfhReason = false;
+        try { await db.prepare('SELECT reason FROM product_field_history LIMIT 1').get(); _hasPfhReason = true; } catch(_){}
+        const reason = body.reason || '';
+        const changer = body.changed_by || (currentUser ? currentUser.username : '');
+        if (_hasPfhReason) {
+          await db.prepare('INSERT INTO product_field_history (product_code, field_name, old_value, new_value, reason, changed_by) VALUES (?,?,?,?,?,?)').run(code, body.field, String(oldVal), String(body.value), reason, changer);
+        } else {
+          await db.prepare('INSERT INTO product_field_history (product_code, field_name, old_value, new_value) VALUES (?,?,?,?)').run(code, body.field, String(oldVal), String(body.value));
+        }
+      } catch(histErr) { console.warn('[product_field_history] insert skip:', histErr.message); }
     }
     await db.prepare(`UPDATE products SET ${body.field}=?, updated_at=datetime('now','localtime') WHERE product_code=?`).run(body.value, code);
     if (currentUser) auditLog(currentUser.userId, currentUser.username, 'product_update', 'products', code, `품목수정: ${code} ${body.field} "${oldVal}"→"${body.value}"${body.reason ? ' 사유: '+body.reason : ''}`, clientIP);
@@ -5734,6 +5756,20 @@ async function handleRequest(req, res) {
         body.po_id, 'receive', body.received_by || 'system',
         JSON.stringify(items.map(i => ({ code: i.product_code, qty: i.received_qty })))
       );
+      // ── 입고 → 창고재고(warehouse_inventory) 자동 연동 ──
+      const defaultWh = await db.prepare("SELECT id FROM warehouses WHERE is_default=1 LIMIT 1").get();
+      if (defaultWh) {
+        for (const it of items) {
+          if (!it.product_code || !it.received_qty) continue;
+          const pName = (await db.prepare('SELECT product_name FROM products WHERE product_code=?').get(it.product_code))?.product_name || '';
+          const existing = await db.prepare('SELECT id, quantity FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?').get(defaultWh.id, it.product_code);
+          if (existing) {
+            await db.prepare('UPDATE warehouse_inventory SET quantity=quantity+?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(it.received_qty, existing.id);
+          } else {
+            await db.prepare('INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity) VALUES (?,?,?,?)').run(defaultWh.id, it.product_code, pName, it.received_qty);
+          }
+        }
+      }
       // 선적 연결 (중국인 경우)
       if (body.shipment_id) {
         const spStmt = db.prepare("INSERT OR REPLACE INTO shipment_po_items (shipment_id, po_id, po_item_id, product_code, shipped_qty, received_qty) VALUES (?,?,?,?,?,?)");
@@ -12012,6 +12048,36 @@ async function handleRequest(req, res) {
     if (!amount || amount <= 0) { fail(res, 400, '수량은 1 이상이어야 합니다'); return; }
     const gs = await db.prepare('SELECT * FROM gift_sets WHERE id=?').get(id);
     if (!gs) { fail(res, 404, '세트를 찾을 수 없습니다'); return; }
+
+    // ── shipment(판매출고) 시 재고 부족 사전 검증 ──
+    let bomItems = [];
+    let bomShortage = [];
+    if (tx_type === 'shipment') {
+      // 1) 세트 자체 재고 부족 체크
+      if (gs.current_stock < amount && !body.force) {
+        fail(res, 400, `세트 재고 부족: ${gs.set_name || gs.set_code} (보유:${gs.current_stock}, 요청:${amount})`);
+        return;
+      }
+      // 2) BOM 기반 원부재료 재고 부족 체크
+      bomItems = await db.prepare('SELECT * FROM gift_set_bom WHERE set_id=?').all(id);
+      if (bomItems.length > 0) {
+        const defaultWh = await db.prepare("SELECT id FROM warehouses WHERE is_default=1 LIMIT 1").get();
+        const whId = defaultWh?.id || 1;
+        for (const bom of bomItems) {
+          const needed = bom.qty_per * amount;
+          const inv = await db.prepare('SELECT quantity FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?').get(whId, bom.item_code);
+          const available = inv?.quantity || 0;
+          if (available < needed) {
+            bomShortage.push({ item_code: bom.item_code, item_name: bom.item_name, needed, available, short: needed - available });
+          }
+        }
+        if (bomShortage.length > 0 && !body.force) {
+          fail(res, 400, `원부재료 재고 부족: ${bomShortage.map(s => `${s.item_name||s.item_code} (필요:${s.needed}, 보유:${s.available}, 부족:${s.short})`).join(', ')}`);
+          return;
+        }
+      }
+    }
+
     const txRun = db.transaction(async () => {
       await db.prepare('INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo, expiry_date) VALUES (?,?,?,?,?,?)').run(id, tx_type, amount, operator || '', memo || '', expiry_date || '');
       // 소비기한 갱신: 가장 가까운 소비기한을 세트에 저장 (assembly 입고 시)
@@ -12024,13 +12090,24 @@ async function handleRequest(req, res) {
       let newStock;
       if (tx_type === 'base') {
         newStock = amount;
-        await db.prepare('UPDATE gift_sets SET current_stock=?, base_stock=?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, amount, id);
+        await db.prepare("UPDATE gift_sets SET current_stock=?, updated_at=datetime('now','localtime') WHERE id=?").run(amount, id);
+        await db.prepare("UPDATE gift_sets SET base_stock=? WHERE id=?").run(amount, id);
       } else if (tx_type === 'assembly') {
         newStock = gs.current_stock + amount;
         await db.prepare('UPDATE gift_sets SET current_stock=current_stock+?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, id);
       } else if (tx_type === 'shipment') {
         newStock = gs.current_stock - amount;
         await db.prepare('UPDATE gift_sets SET current_stock=current_stock-?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, id);
+
+        // ── BOM 역산: 원부재료 창고재고 자동차감 (백플러시) ──
+        if (bomItems.length > 0) {
+          const defaultWh = await db.prepare("SELECT id FROM warehouses WHERE is_default=1 LIMIT 1").get();
+          const whId = defaultWh?.id || 1;
+          for (const bom of bomItems) {
+            const deductQty = bom.qty_per * amount;
+            await db.prepare('UPDATE warehouse_inventory SET quantity=quantity-?, updated_at=datetime(\'now\',\'localtime\') WHERE warehouse_id=? AND product_code=?').run(deductQty, whId, bom.item_code);
+          }
+        }
       } else {
         newStock = gs.current_stock + amount;
         await db.prepare('UPDATE gift_sets SET current_stock=current_stock+?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, id);
@@ -12038,7 +12115,9 @@ async function handleRequest(req, res) {
       return newStock;
     });
     const newStock = await txRun();
-    ok(res, { new_stock: newStock });
+    // 응답에 BOM 차감 내역 포함
+    const bomDeducted = (tx_type === 'shipment' && bomItems.length > 0) ? bomItems.map(b => ({ item_code: b.item_code, item_name: b.item_name, deducted: b.qty_per * amount })) : [];
+    ok(res, { new_stock: newStock, bom_deducted: bomDeducted, shortage_warning: bomShortage });
     return;
   }
 
@@ -12050,6 +12129,58 @@ async function handleRequest(req, res) {
     const limit = parseInt(parsed.searchParams.get('limit')) || 200;
     const rows = await db.prepare("SELECT * FROM gift_set_transactions WHERE set_id=? AND date(created_at)=? ORDER BY created_at DESC LIMIT ?").all(id, date, limit);
     ok(res, rows);
+    return;
+  }
+
+  // POST /api/gift-sales/sync — 판매 동기화 (구글시트/외부 데이터 → BOM 역산 차감)
+  // body: { sales: [{ set_code: 'SET-XXX', qty: 10, order_ref: '주문번호', memo: '' }, ...] }
+  if (pathname === '/api/gift-sales/sync' && method === 'POST') {
+    const body = await readJSON(req);
+    const sales = body.sales || [];
+    if (!sales.length) { fail(res, 400, 'sales 배열이 필요합니다'); return; }
+    const defaultWh = await db.prepare("SELECT id FROM warehouses WHERE is_default=1 LIMIT 1").get();
+    const whId = defaultWh?.id || 1;
+    const results = [];
+    for (const sale of sales) {
+      const gs = await db.prepare('SELECT * FROM gift_sets WHERE set_code=?').get(sale.set_code);
+      if (!gs) { results.push({ set_code: sale.set_code, status: 'error', message: '세트 미등록' }); continue; }
+      const amount = parseInt(sale.qty) || 0;
+      if (amount <= 0) { results.push({ set_code: sale.set_code, status: 'skip', message: '수량 0' }); continue; }
+      // 세트 자체 재고 부족 체크
+      if (gs.current_stock < amount && !body.force) {
+        results.push({ set_code: sale.set_code, status: 'shortage', message: `세트 재고 부족 (보유:${gs.current_stock}, 요청:${amount})` });
+        continue;
+      }
+      // BOM 조회 + 재고 부족 검증
+      const bomItems = await db.prepare('SELECT * FROM gift_set_bom WHERE set_id=?').all(gs.id);
+      const shortage = [];
+      for (const bom of bomItems) {
+        const needed = bom.qty_per * amount;
+        const inv = await db.prepare('SELECT quantity FROM warehouse_inventory WHERE warehouse_id=? AND product_code=?').get(whId, bom.item_code);
+        const available = inv?.quantity || 0;
+        if (available < needed) shortage.push({ item_code: bom.item_code, item_name: bom.item_name, needed, available });
+      }
+      if (shortage.length > 0 && !body.force) {
+        results.push({ set_code: sale.set_code, status: 'shortage', shortage });
+        continue;
+      }
+      // 트랜잭션: 세트 재고 차감 + BOM 원부재료 차감
+      const tx = db.transaction(async () => {
+        await db.prepare('INSERT INTO gift_set_transactions (set_id, tx_type, qty, operator, memo) VALUES (?,?,?,?,?)').run(
+          gs.id, 'shipment', amount, body.operator || 'sync', sale.memo || `판매동기화: ${sale.order_ref || ''}`);
+        await db.prepare('UPDATE gift_sets SET current_stock=current_stock-?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(amount, gs.id);
+        const deducted = [];
+        for (const bom of bomItems) {
+          const deductQty = bom.qty_per * amount;
+          await db.prepare('UPDATE warehouse_inventory SET quantity=quantity-?, updated_at=datetime(\'now\',\'localtime\') WHERE warehouse_id=? AND product_code=?').run(deductQty, whId, bom.item_code);
+          deducted.push({ item_code: bom.item_code, item_name: bom.item_name, deducted: deductQty });
+        }
+        return { new_stock: gs.current_stock - amount, deducted };
+      });
+      const result = await tx();
+      results.push({ set_code: sale.set_code, status: 'ok', qty: amount, ...result });
+    }
+    ok(res, { synced: results.filter(r => r.status === 'ok').length, total: sales.length, results });
     return;
   }
 
