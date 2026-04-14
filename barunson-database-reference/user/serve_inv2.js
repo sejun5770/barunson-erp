@@ -229,6 +229,9 @@ async function connectXERP() {
     xerpReconnectAttempts = 0;
     console.log('XERP 데이터베이스 연결 완료');
 
+    // XERP 품목명 캐시 로딩 (비동기, 백그라운드)
+    loadXerpItemNames().catch(e => console.warn('XERP 품목명 캐시 실패:', e.message));
+
     // 연결 에러 이벤트 → 자동 재연결
     xerpPool.on('error', (err) => {
       console.error('XERP 연결 끊김:', err.message);
@@ -241,6 +244,33 @@ async function connectXERP() {
     xerpPool = null;
     return false;
   }
+}
+
+// XERP 품목코드→품목명 캐시 (수불원장용, 서버 시작 시 1회 로딩)
+let xerpItemNameCache = {};
+async function loadXerpItemNames() {
+  if (!xerpPool) return;
+  const cache = {};
+  try {
+    // 1) poOrderItem에서 품목명 (717개+, 가장 신뢰성 높음)
+    const poResult = await xerpPool.request().query(`
+      SELECT RTRIM(ItemCode) AS ic, MAX(RTRIM(ItemName)) AS nm
+      FROM poOrderItem WITH (NOLOCK)
+      WHERE SiteCode = 'BK10'
+        AND ItemName IS NOT NULL AND LEN(RTRIM(ItemName)) > 0
+      GROUP BY RTRIM(ItemCode)
+    `);
+    for (const r of poResult.recordset) {
+      const code = (r.ic||'').trim();
+      const name = (r.nm||'').trim();
+      if (code && name) cache[code] = name;
+    }
+    console.log(`XERP 품목명 캐시(poOrderItem): ${Object.keys(cache).length}개`);
+  } catch(e) { console.warn('poOrderItem 품목명 로딩 실패:', e.message); }
+  // mmInoutItem은 40M건으로 GROUP BY 쿼리가 타임아웃됨 — poOrderItem만 사용
+  // 향후 품목 마스터 테이블 별도 구축 필요
+  xerpItemNameCache = cache;
+  console.log(`XERP 품목명 캐시 총: ${Object.keys(cache).length}개 품목`);
 }
 
 function scheduleXerpReconnect() {
@@ -606,10 +636,18 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
   const subject = `[바른컴퍼니] ${typeLabel} 발주서 - ${po.po_number} (${vendorName})`;
 
   // 품목별 product_info 매핑 + 연(R) 계산: 발주수량 / 500 / 절 / 조판
+  // parseJeolServer: 'T3K'→3, '3TK'→3 등 문자열에서 절 숫자 추출
+  const parseJeolServer = (val) => {
+    if (!val) return 0;
+    const n = parseFloat(val);
+    if (!isNaN(n) && n > 0) return n;
+    const m = String(val).match(/(\d+)/);
+    return m ? parseFloat(m[1]) : 0;
+  };
   const enrichedItems = items.map(it => {
     const pi = pInfo[it.product_code] || {};
-    const cut = parseInt(pi['절']) || 1;
-    const jopan = parseInt(pi['조판']) || 1;
+    const cut = parseJeolServer(pi['절']) || 1;
+    const jopan = parseJeolServer(pi['조판']) || 1;
     const qty = it.ordered_qty || 0;
     const reams = qty / 500 / cut / jopan;
     const reamsStr = reams % 1 === 0 ? String(reams) : reams.toFixed(1);
@@ -4795,11 +4833,10 @@ async function handleRequest(req, res) {
   //  수불원장 (Inventory Ledger)
   // ════════════════════════════════════════════════════════════════════
 
-  // GET /api/xerp-inventory-ledger — 수불원장 (월별 품목별 입출고 집계)
+  // GET /api/xerp-inventory-ledger — 수불원장 (품목별 입출고 + 재고)
   if (pathname === '/api/xerp-inventory-ledger' && method === 'GET') {
     if (!await ensureXerpPool()) { fail(res, 503, 'XERP 데이터베이스 미연결 (재연결 시도 중)'); return; }
 
-    // 창고코드 → 창고명 매핑 (XERP에 창고 마스터 테이블 없음)
     const WH_NAMES = {
       MF01:'본사공장', MF02:'공장2', MF03:'공장부속', MF15:'공장보조',
       MF21:'공장21', MF23:'후가공', MF24:'완제품', MT01:'자재창고',
@@ -4814,15 +4851,30 @@ async function handleRequest(req, res) {
 
       const today = new Date();
       const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
-      // 기본: 3개월 전 1일 ~ 오늘
       const def = new Date(today); def.setMonth(def.getMonth() - 3); def.setDate(1);
       let startStr = qFrom || fmt(def);
       let endStr = qTo || fmt(today);
-      // endDate 포함을 위해 +1일
       const endNext = new Date(parseInt(endStr.slice(0,4)), parseInt(endStr.slice(4,6))-1, parseInt(endStr.slice(6,8))+1);
       const endNextStr = fmt(endNext);
 
-      // 1) 창고 목록 조회
+      // 1) 기간 입출고 + 품목명 (단일 쿼리로 최적화)
+      // 품목명: 기간 데이터에서 MAX(ItemName)으로 가져오되, 빈 것은 나중에 보충
+      // 2) 현재고 (mmInventory — 76K건, 빠름)
+      const invResult = await xerpPool.request().query(`
+        SELECT RTRIM(ItemCode) AS ic, RTRIM(WhCode) AS wh,
+               SUM(ISNULL(OhQty,0)) AS stock_qty
+        FROM mmInventory WITH (NOLOCK)
+        WHERE SiteCode = 'BK10'
+        GROUP BY RTRIM(ItemCode), RTRIM(WhCode)
+      `);
+      const stockMap = {};
+      // 품목명도 mmInventory에서 안 나오므로, 나중에 결과에서 빈 이름만 보충 쿼리
+      for (const r of invResult.recordset) {
+        const key = `${(r.ic||'').trim()}|${(r.wh||'').trim()}`;
+        stockMap[key] = r.stock_qty || 0;
+      }
+
+      // 3) 창고 목록
       const whResult = await xerpPool.request().query(`
         SELECT DISTINCT RTRIM(WhCode) AS wh_code
         FROM mmInoutItem WITH (NOLOCK)
@@ -4830,64 +4882,72 @@ async function handleRequest(req, res) {
         ORDER BY RTRIM(WhCode)
       `);
       const warehouses = whResult.recordset.map(r => ({
-        code: r.wh_code,
-        name: WH_NAMES[r.wh_code] || r.wh_code
+        code: r.wh_code, name: WH_NAMES[r.wh_code] || r.wh_code
       }));
 
-      // 2) 수불장 데이터 조회 — 월별 품목별 창고별 집계
+      // 4) 기간 입출고 — 품목×창고별 집계
       const req = xerpPool.request()
         .input('startDate', sql.NChar(16), startStr)
         .input('endDate', sql.NChar(16), endNextStr);
-
       let whereExtra = '';
-      if (qWarehouse) {
-        req.input('whFilter', sql.VarChar(20), qWarehouse);
-        whereExtra += ' AND RTRIM(WhCode) = @whFilter';
-      }
-      if (qItemCode) {
-        req.input('itemFilter', sql.VarChar(60), '%' + qItemCode + '%');
-        whereExtra += ' AND (RTRIM(ItemCode) LIKE @itemFilter OR RTRIM(ItemName) LIKE @itemFilter)';
-      }
+      if (qWarehouse) { req.input('whFilter', sql.VarChar(20), qWarehouse); whereExtra += ' AND RTRIM(WhCode) = @whFilter'; }
+      if (qItemCode) { req.input('itemFilter', sql.VarChar(60), '%' + qItemCode + '%'); whereExtra += ' AND (RTRIM(ItemCode) LIKE @itemFilter OR RTRIM(ItemName) LIKE @itemFilter)'; }
 
       const result = await req.query(`
         SELECT RTRIM(ItemCode) AS item_code,
                MAX(RTRIM(ItemName)) AS item_name,
                RTRIM(WhCode) AS warehouse,
-               LEFT(RTRIM(InoutDate), 6) AS month,
-               SUM(CASE WHEN InoutGubun = 'SI' THEN InoutQty ELSE 0 END) AS si_qty,
-               SUM(CASE WHEN InoutGubun = 'MI' THEN InoutQty ELSE 0 END) AS mi_qty,
-               SUM(CASE WHEN InoutGubun = 'SO' THEN InoutQty ELSE 0 END) AS so_qty,
-               SUM(CASE WHEN InoutGubun = 'MO' THEN InoutQty ELSE 0 END) AS mo_qty,
+               SUM(CASE WHEN InoutGubun IN ('SI','MI') THEN InoutQty ELSE 0 END) AS in_qty,
+               SUM(CASE WHEN InoutGubun IN ('SO','MO') THEN InoutQty ELSE 0 END) AS out_qty,
                SUM(CASE WHEN InoutGubun IN ('SI','MI') THEN InoutAmnt ELSE 0 END) AS in_amnt,
                SUM(CASE WHEN InoutGubun IN ('SO','MO') THEN InoutAmnt ELSE 0 END) AS out_amnt
         FROM mmInoutItem WITH (NOLOCK)
         WHERE SiteCode = 'BK10'
           AND InoutDate >= @startDate AND InoutDate < @endDate
           ${whereExtra}
-        GROUP BY RTRIM(ItemCode), RTRIM(WhCode), LEFT(RTRIM(InoutDate), 6)
-        ORDER BY LEFT(RTRIM(InoutDate), 6) DESC, RTRIM(ItemCode), RTRIM(WhCode)
+        GROUP BY RTRIM(ItemCode), RTRIM(WhCode)
+        ORDER BY RTRIM(ItemCode), RTRIM(WhCode)
       `);
 
-      const rows = result.recordset.map(r => ({
-        item_code: (r.item_code || '').trim(),
-        item_name: (r.item_name || '').trim(),
-        warehouse: (r.warehouse || '').trim(),
-        month: r.month || '',
-        si_qty: r.si_qty || 0,
-        mi_qty: r.mi_qty || 0,
-        so_qty: r.so_qty || 0,
-        mo_qty: r.mo_qty || 0,
-        in_amnt: r.in_amnt || 0,
-        out_amnt: r.out_amnt || 0
-      }));
+      // 5) 품목명: XERP 캐시 + 로컬 products 테이블에서 보충
+      const nameMap = { ...xerpItemNameCache };
+      try {
+        const localProds = await db.prepare('SELECT product_code, product_name, material_name, brand FROM products').all();
+        for (const p of localProds) {
+          if (!p.product_code || nameMap[p.product_code]) continue;
+          const nm = (p.product_name||'').trim() || (p.material_name||'').trim() || (p.brand||'').trim();
+          if (nm) nameMap[p.product_code] = nm;
+        }
+      } catch(e) { /* 로컬 DB 없으면 무시 */ }
 
-      // 합계
+      // 6) 행 구성: 품목×창고 + 품목명 + 현재고 + 기초재고 계산
+      const rows = result.recordset.map(r => {
+        const code = (r.item_code||'').trim();
+        const wh = (r.warehouse||'').trim();
+        const inQty = r.in_qty || 0;
+        const outQty = r.out_qty || 0;
+        const curStock = stockMap[`${code}|${wh}`] || 0;
+        const beginStock = curStock - inQty + outQty;
+        const name = (r.item_name||'').trim() || nameMap[code] || '';
+        return {
+          item_code: code,
+          item_name: name,
+          warehouse: wh,
+          wh_name: WH_NAMES[wh] || wh,
+          begin_stock: beginStock,
+          in_qty: inQty,
+          out_qty: outQty,
+          end_stock: curStock,
+          in_amnt: r.in_amnt || 0,
+          out_amnt: r.out_amnt || 0
+        };
+      });
+
       const totals = rows.reduce((acc, r) => {
-        acc.si_qty += r.si_qty; acc.mi_qty += r.mi_qty;
-        acc.so_qty += r.so_qty; acc.mo_qty += r.mo_qty;
+        acc.in_qty += r.in_qty; acc.out_qty += r.out_qty;
         acc.in_amnt += r.in_amnt; acc.out_amnt += r.out_amnt;
         return acc;
-      }, { si_qty:0, mi_qty:0, so_qty:0, mo_qty:0, in_amnt:0, out_amnt:0 });
+      }, { in_qty:0, out_qty:0, in_amnt:0, out_amnt:0 });
 
       ok(res, { rows, warehouses, totals, range: { start: startStr, end: endStr } });
     } catch (e) {
@@ -6041,10 +6101,10 @@ async function handleRequest(req, res) {
         it.cut = info['절'] || '';
         it.imposition = info['조판'] || '';
         it.product_spec = info['제품사양'] || it.spec || '';
-        // 품목별 후공정 체인 (순서대로)
+        // 품목별 후공정 체인 (순서대로) — 숫자만 있는 값은 업체명이 아니므로 제외
         const itemSteps = [];
         postCols.forEach(c => {
-          if (info[c] && info[c] !== '0') itemSteps.push({ p: c, v: info[c] });
+          if (info[c] && info[c] !== '0' && !/^\d+(\.\d+)?$/.test(String(info[c]).trim())) itemSteps.push({ p: c, v: info[c] });
         });
         it.first_process = itemSteps.length ? itemSteps[0].p : '';
         it.first_process_vendor = itemSteps.length ? itemSteps[0].v : '';

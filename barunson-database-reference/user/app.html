@@ -2458,74 +2458,65 @@ function closeMegaMenu() { /* no-op */ }
 <!-- PAGE: 수불원장 (Inventory Ledger) -->
 <!-- ============================================================ -->
 <div class="page" id="page-inventory-ledger">
-  <!-- KPI 카드 -->
-  <div class="kpi-grid" style="margin-bottom:8px">
-    <div class="kpi-card" style="border-left:4px solid #27ae60">
-      <div class="kpi-label">총 입고수량</div>
-      <div class="kpi-value" id="ilTotalInQty">-</div>
-      <div class="kpi-sub" id="ilInDetail">SI: - / MI: -</div>
+  <!-- KPI -->
+  <div class="kpi-grid" style="margin-bottom:10px">
+    <div class="kpi-card" style="border-left:4px solid #2563eb">
+      <div class="kpi-label">조회 품목</div>
+      <div class="kpi-value" id="ilKpiItems">-</div>
+      <div class="kpi-sub" id="ilKpiItemsSub">-</div>
     </div>
-    <div class="kpi-card" style="border-left:4px solid #e74c3c">
-      <div class="kpi-label">총 출고수량</div>
-      <div class="kpi-value" id="ilTotalOutQty">-</div>
-      <div class="kpi-sub" id="ilOutDetail">SO: - / MO: -</div>
+    <div class="kpi-card" style="border-left:4px solid #16a34a">
+      <div class="kpi-label">총 입고</div>
+      <div class="kpi-value" id="ilTotalInQty" style="color:#16a34a">-</div>
+      <div class="kpi-sub" id="ilInAmnt">-</div>
     </div>
-    <div class="kpi-card" style="border-left:4px solid #2980b9">
-      <div class="kpi-label">입고금액</div>
-      <div class="kpi-value" id="ilInAmnt">-</div>
+    <div class="kpi-card" style="border-left:4px solid #dc2626">
+      <div class="kpi-label">총 출고</div>
+      <div class="kpi-value" id="ilTotalOutQty" style="color:#dc2626">-</div>
+      <div class="kpi-sub" id="ilOutAmnt">-</div>
     </div>
-    <div class="kpi-card" style="border-left:4px solid #e67e22">
-      <div class="kpi-label">출고금액</div>
-      <div class="kpi-value" id="ilOutAmnt">-</div>
+    <div class="kpi-card" style="border-left:4px solid #9333ea">
+      <div class="kpi-label">입출고 차이</div>
+      <div class="kpi-value" id="ilKpiDiff">-</div>
+      <div class="kpi-sub" id="ilKpiDiffSub">입고 - 출고</div>
     </div>
   </div>
 
-  <!-- 필터 -->
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+  <!-- 필터 바 -->
+  <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap;padding:10px 12px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border)">
     <label style="font-size:12px;font-weight:600">기간</label>
-    <input type="date" id="ilDateFrom" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:4px">
-    <span style="font-size:12px">~</span>
-    <input type="date" id="ilDateTo" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:4px">
+    <input type="date" id="ilDateFrom" style="font-size:12px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary)">
+    <span style="font-size:12px;color:var(--text-muted)">~</span>
+    <input type="date" id="ilDateTo" style="font-size:12px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary)">
     <button class="btn btn-sm" onclick="setILDateRange(1)" style="font-size:11px">1개월</button>
     <button class="btn btn-sm" onclick="setILDateRange(3)" style="font-size:11px">3개월</button>
     <button class="btn btn-sm" onclick="setILDateRange(6)" style="font-size:11px">6개월</button>
-    <label style="font-size:12px;font-weight:600;margin-left:8px">창고</label>
-    <select id="ilWarehouse" onchange="renderInvLedger()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:4px">
-      <option value="">전체</option>
+    <div style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+    <label style="font-size:12px;font-weight:600">창고</label>
+    <select id="ilWarehouse" onchange="renderInvLedger()" style="font-size:12px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary);min-width:120px">
+      <option value="">전체 창고</option>
     </select>
-    <label style="font-size:12px;font-weight:600;margin-left:8px">품목검색</label>
-    <input type="text" id="ilItemSearch" placeholder="품목코드/품목명" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;width:160px" oninput="renderInvLedger()">
-    <button class="btn btn-sm btn-primary" onclick="loadInventoryLedger()" style="font-size:11px">🔍 조회</button>
+    <div style="width:1px;height:24px;background:var(--border);margin:0 4px"></div>
+    <label style="font-size:12px;font-weight:600">품목</label>
+    <input type="text" id="ilItemSearch" placeholder="코드 또는 품명 입력" oninput="renderInvLedger()" style="font-size:12px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;width:160px;background:var(--bg-primary);color:var(--text-primary)">
+    <button class="btn btn-sm btn-primary" onclick="loadInventoryLedger()" style="font-size:11px;padding:5px 14px">조회</button>
     <div style="flex:1"></div>
-    <button class="btn btn-sm" onclick="exportInvLedgerExcel()" style="font-size:11px;background:#27ae60;color:#fff">📥 엑셀 다운로드</button>
+    <button class="btn btn-sm" onclick="exportInvLedgerExcel()" style="font-size:11px;background:#16a34a;color:#fff;padding:5px 12px">엑셀 다운로드</button>
   </div>
 
-  <!-- 보기 모드 탭 -->
-  <div style="display:flex;gap:4px;margin-bottom:8px">
-    <button id="ilTabAll" class="btn btn-sm btn-primary" onclick="setILView('all')" style="font-size:11px">📋 전체</button>
-    <button id="ilTabWh" class="btn btn-sm" onclick="setILView('warehouse')" style="font-size:11px">🏭 창고별 집계</button>
-    <button id="ilTabItem" class="btn btn-sm" onclick="setILView('item')" style="font-size:11px">📦 품목별 집계</button>
+  <!-- 뷰 모드 탭 -->
+  <div style="display:flex;align-items:center;gap:4px;margin-bottom:6px">
+    <button id="ilTabAll" class="btn btn-sm btn-primary" onclick="setILView('all')" style="font-size:11px">품목×창고</button>
+    <button id="ilTabItem" class="btn btn-sm" onclick="setILView('item')" style="font-size:11px">품목별 합계</button>
+    <button id="ilTabWh" class="btn btn-sm" onclick="setILView('warehouse')" style="font-size:11px">창고별 합계</button>
     <div style="flex:1"></div>
-    <span id="ilResultInfo" style="font-size:11px;color:var(--text-muted);align-self:center"></span>
+    <span id="ilResultInfo" style="font-size:11px;color:var(--text-muted)"></span>
   </div>
 
   <div class="table-container">
-    <div class="table-wrap" style="max-height:calc(100vh - 380px)">
+    <div class="table-wrap" style="max-height:calc(100vh - 340px)">
       <table>
-        <thead id="ilThead"><tr>
-          <th style="min-width:70px">월</th>
-          <th style="min-width:100px">품목코드</th>
-          <th style="min-width:140px">품목명</th>
-          <th style="min-width:60px">창고</th>
-          <th style="min-width:70px;text-align:right;background:#e8f5e9;color:#2e7d32">입고(SI)</th>
-          <th style="min-width:70px;text-align:right;background:#e8f5e9;color:#2e7d32">자재입고(MI)</th>
-          <th style="min-width:70px;text-align:right;background:#ffebee;color:#c62828">출고(SO)</th>
-          <th style="min-width:70px;text-align:right;background:#ffebee;color:#c62828">자재출고(MO)</th>
-          <th style="min-width:80px;text-align:right;background:#e8f5e9;color:#2e7d32">입고합계</th>
-          <th style="min-width:80px;text-align:right;background:#ffebee;color:#c62828">출고합계</th>
-          <th style="min-width:90px;text-align:right">입고금액</th>
-          <th style="min-width:90px;text-align:right">출고금액</th>
-        </tr></thead>
+        <thead id="ilThead"></thead>
         <tbody id="ilTb"></tbody>
         <tfoot id="ilTfoot"></tfoot>
       </table>
@@ -16519,7 +16510,7 @@ async function loadTradeDocManagement() {
             </div>
             <table style="width:100%;border-collapse:collapse;font-size:12px">
               <tbody>${doc.items.map(it => {
-                const cut = parseFloat(it.cut)||0, imp = parseFloat(it.imposition)||0;
+                const cut = parseJeol(it.cut), imp = parseJeol(it.imposition);
                 const ream = (cut && imp && it.qty) ? (it.qty/500/cut/imp).toFixed(1) + 'R' : '';
                 const chg = it.price_change_rate;
                 const chgLabel = chg > 0 ? `<span style="color:#dc2626;font-weight:600">↑${chg}%</span>` : chg < 0 ? `<span style="color:#2563eb;font-weight:600">↓${Math.abs(chg)}%</span>` : '';
@@ -19038,7 +19029,7 @@ function exportShipmentsExcel() {
 // ===== 수불원장 (Inventory Ledger) =====
 let ilRows = [];
 let ilWarehouses = [];
-let ilViewMode = 'all'; // 'all' | 'warehouse' | 'item'
+let ilViewMode = 'all'; // 'all' | 'item' | 'warehouse'
 
 function initInvLedgerDates() {
   const today = new Date();
@@ -19052,14 +19043,13 @@ function initInvLedgerDates() {
 
 function setILView(mode) {
   ilViewMode = mode;
-  // 탭 스타일 전환
   ['ilTabAll','ilTabWh','ilTabItem'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) { el.classList.remove('btn-primary'); }
+    if (el) el.classList.remove('btn-primary');
   });
-  const activeMap = { all:'ilTabAll', warehouse:'ilTabWh', item:'ilTabItem' };
-  const activeEl = document.getElementById(activeMap[mode]);
-  if (activeEl) activeEl.classList.add('btn-primary');
+  const map = { all:'ilTabAll', warehouse:'ilTabWh', item:'ilTabItem' };
+  const el = document.getElementById(map[mode]);
+  if (el) el.classList.add('btn-primary');
   renderInvLedger();
 }
 
@@ -19074,16 +19064,19 @@ function setILDateRange(months) {
   loadInventoryLedger();
 }
 
+const _ilN = v => v ? v.toLocaleString() : '-';
+const _ilNz = v => v ? v.toLocaleString() : '0';
+
 async function loadInventoryLedger() {
   const tb = document.getElementById('ilTb');
   const tfoot = document.getElementById('ilTfoot');
   if (!tb) return;
-  tb.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:40px;color:var(--text-muted)">XERP 데이터 로딩중...</td></tr>';
+  tb.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:48px;color:var(--text-muted)"><div style="font-size:14px;margin-bottom:6px">XERP 수불 데이터 조회 중...</div><div style="font-size:11px">품목명 + 현재고 + 입출고 내역을 불러오고 있습니다</div></td></tr>';
   tfoot.innerHTML = '';
 
   const fromVal = document.getElementById('ilDateFrom').value;
   const toVal = document.getElementById('ilDateTo').value;
-  if (!fromVal || !toVal) { initInvLedgerDates(); }
+  if (!fromVal || !toVal) initInvLedgerDates();
 
   const from = (fromVal || document.getElementById('ilDateFrom').value).replace(/-/g, '');
   const to = (toVal || document.getElementById('ilDateTo').value).replace(/-/g, '');
@@ -19098,35 +19091,41 @@ async function loadInventoryLedger() {
     const r = await fetch(url);
     const d = await r.json();
     if (!d.ok && d.error) {
-      tb.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:40px;color:var(--urgent)">${d.error}</td></tr>`;
+      tb.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:48px;color:var(--urgent)">${esc(d.error)}</td></tr>`;
       return;
     }
     const data = d.data || d;
     ilRows = data.rows || [];
     ilWarehouses = data.warehouses || [];
 
-    // 창고 드롭다운 갱신 (서버에서 {code, name} 객체 배열)
+    // 창고 드롭다운
     const whSel = document.getElementById('ilWarehouse');
     const curWh = whSel.value;
-    whSel.innerHTML = '<option value="">전체</option>';
+    whSel.innerHTML = '<option value="">전체 창고</option>';
     ilWarehouses.forEach(w => {
-      const code = typeof w === 'object' ? w.code : w;
-      const name = typeof w === 'object' ? w.name : w;
-      whSel.innerHTML += `<option value="${esc(code)}" ${code===curWh?'selected':''}>${esc(code)} (${esc(name)})</option>`;
+      const c = typeof w === 'object' ? w.code : w;
+      const n = typeof w === 'object' ? w.name : w;
+      whSel.innerHTML += `<option value="${esc(c)}" ${c===curWh?'selected':''}>${esc(c)} ${esc(n)}</option>`;
     });
 
-    // KPI 업데이트
-    const totals = data.totals || {};
-    document.getElementById('ilTotalInQty').textContent = ((totals.si_qty||0) + (totals.mi_qty||0)).toLocaleString();
-    document.getElementById('ilInDetail').textContent = `SI: ${(totals.si_qty||0).toLocaleString()} / MI: ${(totals.mi_qty||0).toLocaleString()}`;
-    document.getElementById('ilTotalOutQty').textContent = ((totals.so_qty||0) + (totals.mo_qty||0)).toLocaleString();
-    document.getElementById('ilOutDetail').textContent = `SO: ${(totals.so_qty||0).toLocaleString()} / MO: ${(totals.mo_qty||0).toLocaleString()}`;
-    document.getElementById('ilInAmnt').textContent = (totals.in_amnt||0).toLocaleString() + '원';
-    document.getElementById('ilOutAmnt').textContent = (totals.out_amnt||0).toLocaleString() + '원';
+    // KPI
+    const t = data.totals || {};
+    const diff = (t.in_qty||0) - (t.out_qty||0);
+    const items = new Set(ilRows.map(r=>r.item_code)).size;
+    document.getElementById('ilKpiItems').textContent = items.toLocaleString() + '개';
+    document.getElementById('ilKpiItemsSub').textContent = `${ilRows.length}건 (품목×창고)`;
+    document.getElementById('ilTotalInQty').textContent = _ilN(t.in_qty);
+    document.getElementById('ilInAmnt').textContent = (t.in_amnt||0).toLocaleString() + '원';
+    document.getElementById('ilTotalOutQty').textContent = _ilN(t.out_qty);
+    document.getElementById('ilOutAmnt').textContent = (t.out_amnt||0).toLocaleString() + '원';
+    const diffEl = document.getElementById('ilKpiDiff');
+    diffEl.textContent = (diff>=0?'+':'') + diff.toLocaleString();
+    diffEl.style.color = diff >= 0 ? '#16a34a' : '#dc2626';
+    document.getElementById('ilKpiDiffSub').textContent = '입고 - 출고';
 
-    try { renderInvLedger(); } catch(re) { console.error('수불원장 렌더 오류:', re); }
+    try { renderInvLedger(); } catch(e) { console.error('수불원장 렌더 오류:', e); }
   } catch (e) {
-    tb.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:40px;color:var(--urgent)">오류: ${e.message}</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:48px;color:var(--urgent)">오류: ${esc(e.message)}</td></tr>`;
   }
 }
 
@@ -19136,253 +19135,191 @@ function renderInvLedger() {
   const thead = document.getElementById('ilThead');
   const infoEl = document.getElementById('ilResultInfo');
 
-  // 클라이언트 필터링 (창고 선택 + 품목 검색)
-  const whFilter = document.getElementById('ilWarehouse').value;
-  const itemFilter = document.getElementById('ilItemSearch').value.trim().toLowerCase();
+  const whF = document.getElementById('ilWarehouse').value;
+  const itF = document.getElementById('ilItemSearch').value.trim().toLowerCase();
   let filtered = ilRows;
-  if (whFilter) filtered = filtered.filter(r => r.warehouse === whFilter);
-  if (itemFilter) filtered = filtered.filter(r =>
-    (r.item_code||'').toLowerCase().includes(itemFilter) || (r.item_name||'').toLowerCase().includes(itemFilter)
+  if (whF) filtered = filtered.filter(r => r.warehouse === whF);
+  if (itF) filtered = filtered.filter(r =>
+    (r.item_code||'').toLowerCase().includes(itF) || (r.item_name||'').toLowerCase().includes(itF)
   );
 
-  if (ilViewMode === 'warehouse') {
-    renderILWarehouseView(filtered, thead, tb, tfoot, infoEl);
-  } else if (ilViewMode === 'item') {
-    renderILItemView(filtered, thead, tb, tfoot, infoEl);
-  } else {
-    renderILAllView(filtered, thead, tb, tfoot, infoEl);
-  }
+  if (ilViewMode === 'warehouse') renderILWarehouseView(filtered, thead, tb, tfoot, infoEl);
+  else if (ilViewMode === 'item') renderILItemView(filtered, thead, tb, tfoot, infoEl);
+  else renderILAllView(filtered, thead, tb, tfoot, infoEl);
 }
 
+// === 품목×창고 상세 ===
 function renderILAllView(rows, thead, tb, tfoot, infoEl) {
   thead.innerHTML = `<tr>
-    <th style="min-width:70px">월</th>
-    <th style="min-width:100px">품목코드</th>
-    <th style="min-width:140px">품목명</th>
-    <th style="min-width:60px">창고</th>
-    <th style="min-width:70px;text-align:right;background:#e8f5e9;color:#2e7d32">입고(SI)</th>
-    <th style="min-width:70px;text-align:right;background:#e8f5e9;color:#2e7d32">자재입고(MI)</th>
-    <th style="min-width:70px;text-align:right;background:#ffebee;color:#c62828">출고(SO)</th>
-    <th style="min-width:70px;text-align:right;background:#ffebee;color:#c62828">자재출고(MO)</th>
-    <th style="min-width:80px;text-align:right;background:#e8f5e9;color:#2e7d32">입고합계</th>
-    <th style="min-width:80px;text-align:right;background:#ffebee;color:#c62828">출고합계</th>
+    <th style="min-width:45px;text-align:center">#</th>
+    <th style="min-width:95px">품목코드</th>
+    <th style="min-width:160px">품목명</th>
+    <th style="min-width:55px">창고</th>
+    <th style="min-width:80px;text-align:right;background:rgba(22,101,52,0.08)">기초재고</th>
+    <th style="min-width:80px;text-align:right;color:#16a34a;background:rgba(22,163,74,0.08)">입고</th>
+    <th style="min-width:80px;text-align:right;color:#dc2626;background:rgba(220,38,38,0.06)">출고</th>
+    <th style="min-width:80px;text-align:right;background:rgba(37,99,235,0.06);font-weight:700">기말재고</th>
+    <th style="min-width:90px;text-align:right">입고금액</th>
+    <th style="min-width:90px;text-align:right">출고금액</th>
+  </tr>`;
+  if (infoEl) infoEl.textContent = `${rows.length}건`;
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:48px;color:var(--text-muted)">데이터가 없습니다</td></tr>'; tfoot.innerHTML = ''; return; }
+
+  let html = '', sIn=0, sOut=0, sInA=0, sOutA=0, sBeg=0, sEnd=0;
+  rows.forEach((r, i) => {
+    sIn += r.in_qty; sOut += r.out_qty; sInA += r.in_amnt; sOutA += r.out_amnt;
+    sBeg += r.begin_stock; sEnd += r.end_stock;
+    const endColor = r.end_stock < 0 ? '#dc2626' : r.end_stock > 0 ? '#2563eb' : 'var(--text-muted)';
+    html += `<tr style="${i%2?'':'background:var(--bg-secondary)'}">
+      <td style="text-align:center;color:var(--text-muted);font-size:11px">${i+1}</td>
+      <td style="font-weight:600;font-family:monospace;font-size:12px">${esc(r.item_code)}</td>
+      <td style="font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.item_name)}">${esc(r.item_name)||'<span style="color:var(--text-muted)">-</span>'}</td>
+      <td style="font-size:11px;color:var(--text-muted)">${esc(r.warehouse)}</td>
+      <td class="n" style="font-size:12px">${_ilNz(r.begin_stock)}</td>
+      <td class="n" style="font-size:12px;color:#16a34a;font-weight:${r.in_qty?600:400}">${_ilN(r.in_qty)}</td>
+      <td class="n" style="font-size:12px;color:#dc2626;font-weight:${r.out_qty?600:400}">${_ilN(r.out_qty)}</td>
+      <td class="n" style="font-size:12px;font-weight:700;color:${endColor}">${_ilNz(r.end_stock)}</td>
+      <td class="n" style="font-size:11px;color:var(--text-muted)">${_ilN(r.in_amnt)}</td>
+      <td class="n" style="font-size:11px;color:var(--text-muted)">${_ilN(r.out_amnt)}</td>
+    </tr>`;
+  });
+  tb.innerHTML = html;
+  tfoot.innerHTML = `<tr style="background:var(--bg-secondary);font-weight:700;font-size:12px;border-top:2px solid var(--border)">
+    <td colspan="4" style="text-align:right;padding-right:12px">합계</td>
+    <td class="n">${sBeg.toLocaleString()}</td>
+    <td class="n" style="color:#16a34a">${sIn.toLocaleString()}</td>
+    <td class="n" style="color:#dc2626">${sOut.toLocaleString()}</td>
+    <td class="n" style="color:#2563eb">${sEnd.toLocaleString()}</td>
+    <td class="n" style="color:var(--text-muted)">${sInA.toLocaleString()}</td>
+    <td class="n" style="color:var(--text-muted)">${sOutA.toLocaleString()}</td>
+  </tr>`;
+}
+
+// === 품목별 합계 ===
+function renderILItemView(rows, thead, tb, tfoot, infoEl) {
+  thead.innerHTML = `<tr>
+    <th style="min-width:45px;text-align:center">#</th>
+    <th style="min-width:95px">품목코드</th>
+    <th style="min-width:180px">품목명</th>
+    <th style="min-width:55px;text-align:center">창고수</th>
+    <th style="min-width:80px;text-align:right;background:rgba(22,101,52,0.08)">기초재고</th>
+    <th style="min-width:80px;text-align:right;color:#16a34a;background:rgba(22,163,74,0.08)">입고</th>
+    <th style="min-width:80px;text-align:right;color:#dc2626;background:rgba(220,38,38,0.06)">출고</th>
+    <th style="min-width:80px;text-align:right;background:rgba(37,99,235,0.06);font-weight:700">기말재고</th>
     <th style="min-width:90px;text-align:right">입고금액</th>
     <th style="min-width:90px;text-align:right">출고금액</th>
   </tr>`;
 
-  if (infoEl) infoEl.textContent = `${rows.length}건`;
-
-  if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:40px;color:var(--text-muted)">데이터가 없습니다</td></tr>';
-    tfoot.innerHTML = ''; return;
-  }
-
-  let html = '';
-  let sumSI=0, sumMI=0, sumSO=0, sumMO=0, sumInAmnt=0, sumOutAmnt=0;
-
-  rows.forEach(r => {
-    const inTotal = r.si_qty + r.mi_qty;
-    const outTotal = r.so_qty + r.mo_qty;
-    sumSI += r.si_qty; sumMI += r.mi_qty;
-    sumSO += r.so_qty; sumMO += r.mo_qty;
-    sumInAmnt += r.in_amnt; sumOutAmnt += r.out_amnt;
-    const md = r.month ? r.month.slice(0,4) + '-' + r.month.slice(4,6) : '';
-    html += `<tr>
-      <td>${md}</td><td>${esc(r.item_code)}</td><td>${esc(r.item_name)}</td><td>${esc(r.warehouse)}</td>
-      <td class="n" style="background:#f0fdf4;color:#166534">${r.si_qty ? r.si_qty.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#f0fdf4;color:#166534">${r.mi_qty ? r.mi_qty.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#fef2f2;color:#991b1b">${r.so_qty ? r.so_qty.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#fef2f2;color:#991b1b">${r.mo_qty ? r.mo_qty.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#dcfce7;color:#166534;font-weight:600">${inTotal ? inTotal.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#fee2e2;color:#991b1b;font-weight:600">${outTotal ? outTotal.toLocaleString() : '-'}</td>
-      <td class="n">${r.in_amnt ? r.in_amnt.toLocaleString() : '-'}</td>
-      <td class="n">${r.out_amnt ? r.out_amnt.toLocaleString() : '-'}</td>
-    </tr>`;
-  });
-  tb.innerHTML = html;
-  tfoot.innerHTML = `<tr style="background:#f1f5f9;font-weight:700;font-size:12px">
-    <td colspan="4" style="text-align:right;padding-right:12px">합계</td>
-    <td class="n" style="color:#166534">${sumSI.toLocaleString()}</td>
-    <td class="n" style="color:#166534">${sumMI.toLocaleString()}</td>
-    <td class="n" style="color:#991b1b">${sumSO.toLocaleString()}</td>
-    <td class="n" style="color:#991b1b">${sumMO.toLocaleString()}</td>
-    <td class="n" style="color:#166534;font-weight:700">${(sumSI+sumMI).toLocaleString()}</td>
-    <td class="n" style="color:#991b1b;font-weight:700">${(sumSO+sumMO).toLocaleString()}</td>
-    <td class="n">${sumInAmnt.toLocaleString()}</td>
-    <td class="n">${sumOutAmnt.toLocaleString()}</td>
-  </tr>`;
-}
-
-function renderILWarehouseView(rows, thead, tb, tfoot, infoEl) {
-  // 서버에서 받은 ilWarehouses로 코드→이름 매핑 구성
-  const whNames = {};
-  ilWarehouses.forEach(w => {
-    if (typeof w === 'object') whNames[w.code] = w.name;
-    else whNames[w] = w;
-  });
-
-  thead.innerHTML = `<tr>
-    <th style="min-width:80px">창고코드</th>
-    <th style="min-width:100px">창고명</th>
-    <th style="min-width:60px">품목수</th>
-    <th style="min-width:80px;text-align:right;background:#e8f5e9;color:#2e7d32">입고(SI)</th>
-    <th style="min-width:80px;text-align:right;background:#e8f5e9;color:#2e7d32">자재입고(MI)</th>
-    <th style="min-width:80px;text-align:right;background:#ffebee;color:#c62828">출고(SO)</th>
-    <th style="min-width:80px;text-align:right;background:#ffebee;color:#c62828">자재출고(MO)</th>
-    <th style="min-width:90px;text-align:right;background:#e8f5e9;color:#2e7d32">입고합계</th>
-    <th style="min-width:90px;text-align:right;background:#ffebee;color:#c62828">출고합계</th>
-    <th style="min-width:100px;text-align:right">입고금액</th>
-    <th style="min-width:100px;text-align:right">출고금액</th>
-    <th style="min-width:90px;text-align:right">차이(입-출)</th>
-  </tr>`;
-
-  // 창고별 집계
   const agg = {};
   rows.forEach(r => {
-    if (!agg[r.warehouse]) agg[r.warehouse] = { items: new Set(), si:0, mi:0, so:0, mo:0, inAmnt:0, outAmnt:0 };
-    const a = agg[r.warehouse];
-    a.items.add(r.item_code);
-    a.si += r.si_qty; a.mi += r.mi_qty;
-    a.so += r.so_qty; a.mo += r.mo_qty;
-    a.inAmnt += r.in_amnt; a.outAmnt += r.out_amnt;
-  });
-
-  const keys = Object.keys(agg).sort();
-  if (infoEl) infoEl.textContent = `${keys.length}개 창고`;
-
-  if (!keys.length) {
-    tb.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:40px;color:var(--text-muted)">데이터가 없습니다</td></tr>';
-    tfoot.innerHTML = ''; return;
-  }
-
-  let html = '';
-  let tSI=0, tMI=0, tSO=0, tMO=0, tInA=0, tOutA=0;
-
-  keys.forEach(wh => {
-    const a = agg[wh];
-    const inT = a.si + a.mi, outT = a.so + a.mo, diff = inT - outT;
-    tSI += a.si; tMI += a.mi; tSO += a.so; tMO += a.mo; tInA += a.inAmnt; tOutA += a.outAmnt;
-    const diffColor = diff > 0 ? '#166534' : diff < 0 ? '#991b1b' : '#666';
-    html += `<tr>
-      <td><strong>${esc(wh)}</strong></td>
-      <td>${esc(whNames[wh] || wh)}</td>
-      <td class="n">${a.items.size.toLocaleString()}</td>
-      <td class="n" style="background:#f0fdf4;color:#166534">${a.si ? a.si.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#f0fdf4;color:#166534">${a.mi ? a.mi.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#fef2f2;color:#991b1b">${a.so ? a.so.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#fef2f2;color:#991b1b">${a.mo ? a.mo.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#dcfce7;color:#166534;font-weight:600">${inT ? inT.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#fee2e2;color:#991b1b;font-weight:600">${outT ? outT.toLocaleString() : '-'}</td>
-      <td class="n">${a.inAmnt ? a.inAmnt.toLocaleString() : '-'}</td>
-      <td class="n">${a.outAmnt ? a.outAmnt.toLocaleString() : '-'}</td>
-      <td class="n" style="color:${diffColor};font-weight:600">${diff ? diff.toLocaleString() : '-'}</td>
-    </tr>`;
-  });
-  tb.innerHTML = html;
-  const tDiff = (tSI+tMI) - (tSO+tMO);
-  tfoot.innerHTML = `<tr style="background:#f1f5f9;font-weight:700;font-size:12px">
-    <td colspan="3" style="text-align:right;padding-right:12px">합계</td>
-    <td class="n" style="color:#166534">${tSI.toLocaleString()}</td>
-    <td class="n" style="color:#166534">${tMI.toLocaleString()}</td>
-    <td class="n" style="color:#991b1b">${tSO.toLocaleString()}</td>
-    <td class="n" style="color:#991b1b">${tMO.toLocaleString()}</td>
-    <td class="n" style="color:#166534;font-weight:700">${(tSI+tMI).toLocaleString()}</td>
-    <td class="n" style="color:#991b1b;font-weight:700">${(tSO+tMO).toLocaleString()}</td>
-    <td class="n">${tInA.toLocaleString()}</td>
-    <td class="n">${tOutA.toLocaleString()}</td>
-    <td class="n" style="font-weight:700;color:${tDiff>=0?'#166534':'#991b1b'}">${tDiff.toLocaleString()}</td>
-  </tr>`;
-}
-
-function renderILItemView(rows, thead, tb, tfoot, infoEl) {
-  thead.innerHTML = `<tr>
-    <th style="min-width:100px">품목코드</th>
-    <th style="min-width:160px">품목명</th>
-    <th style="min-width:60px">창고수</th>
-    <th style="min-width:80px;text-align:right;background:#e8f5e9;color:#2e7d32">입고(SI)</th>
-    <th style="min-width:80px;text-align:right;background:#e8f5e9;color:#2e7d32">자재입고(MI)</th>
-    <th style="min-width:80px;text-align:right;background:#ffebee;color:#c62828">출고(SO)</th>
-    <th style="min-width:80px;text-align:right;background:#ffebee;color:#c62828">자재출고(MO)</th>
-    <th style="min-width:90px;text-align:right;background:#e8f5e9;color:#2e7d32">입고합계</th>
-    <th style="min-width:90px;text-align:right;background:#ffebee;color:#c62828">출고합계</th>
-    <th style="min-width:100px;text-align:right">입고금액</th>
-    <th style="min-width:100px;text-align:right">출고금액</th>
-    <th style="min-width:90px;text-align:right">차이(입-출)</th>
-  </tr>`;
-
-  // 품목별 집계
-  const agg = {};
-  rows.forEach(r => {
-    if (!agg[r.item_code]) agg[r.item_code] = { name: r.item_name||'', whs: new Set(), si:0, mi:0, so:0, mo:0, inAmnt:0, outAmnt:0 };
+    if (!agg[r.item_code]) agg[r.item_code] = { name:r.item_name||'', whs:new Set(), beg:0, inQ:0, outQ:0, end:0, inA:0, outA:0 };
     const a = agg[r.item_code];
     if (r.item_name) a.name = r.item_name;
     a.whs.add(r.warehouse);
-    a.si += r.si_qty; a.mi += r.mi_qty;
-    a.so += r.so_qty; a.mo += r.mo_qty;
-    a.inAmnt += r.in_amnt; a.outAmnt += r.out_amnt;
+    a.beg += r.begin_stock; a.inQ += r.in_qty; a.outQ += r.out_qty; a.end += r.end_stock;
+    a.inA += r.in_amnt; a.outA += r.out_amnt;
   });
 
   const keys = Object.keys(agg).sort();
   if (infoEl) infoEl.textContent = `${keys.length}개 품목`;
+  if (!keys.length) { tb.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:48px;color:var(--text-muted)">데이터가 없습니다</td></tr>'; tfoot.innerHTML = ''; return; }
 
-  if (!keys.length) {
-    tb.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:40px;color:var(--text-muted)">데이터가 없습니다</td></tr>';
-    tfoot.innerHTML = ''; return;
-  }
-
-  let html = '';
-  let tSI=0, tMI=0, tSO=0, tMO=0, tInA=0, tOutA=0;
-
-  keys.forEach(code => {
+  let html = '', sIn=0, sOut=0, sInA=0, sOutA=0, sBeg=0, sEnd=0;
+  keys.forEach((code, i) => {
     const a = agg[code];
-    const inT = a.si + a.mi, outT = a.so + a.mo, diff = inT - outT;
-    tSI += a.si; tMI += a.mi; tSO += a.so; tMO += a.mo; tInA += a.inAmnt; tOutA += a.outAmnt;
-    const diffColor = diff > 0 ? '#166534' : diff < 0 ? '#991b1b' : '#666';
-    html += `<tr>
-      <td><strong>${esc(code)}</strong></td>
-      <td>${esc(a.name)}</td>
-      <td class="n">${a.whs.size}</td>
-      <td class="n" style="background:#f0fdf4;color:#166534">${a.si ? a.si.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#f0fdf4;color:#166534">${a.mi ? a.mi.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#fef2f2;color:#991b1b">${a.so ? a.so.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#fef2f2;color:#991b1b">${a.mo ? a.mo.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#dcfce7;color:#166534;font-weight:600">${inT ? inT.toLocaleString() : '-'}</td>
-      <td class="n" style="background:#fee2e2;color:#991b1b;font-weight:600">${outT ? outT.toLocaleString() : '-'}</td>
-      <td class="n">${a.inAmnt ? a.inAmnt.toLocaleString() : '-'}</td>
-      <td class="n">${a.outAmnt ? a.outAmnt.toLocaleString() : '-'}</td>
-      <td class="n" style="color:${diffColor};font-weight:600">${diff ? diff.toLocaleString() : '-'}</td>
+    sIn += a.inQ; sOut += a.outQ; sInA += a.inA; sOutA += a.outA; sBeg += a.beg; sEnd += a.end;
+    const endColor = a.end < 0 ? '#dc2626' : a.end > 0 ? '#2563eb' : 'var(--text-muted)';
+    html += `<tr style="${i%2?'':'background:var(--bg-secondary)'}">
+      <td style="text-align:center;color:var(--text-muted);font-size:11px">${i+1}</td>
+      <td style="font-weight:600;font-family:monospace;font-size:12px">${esc(code)}</td>
+      <td style="font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.name)}">${esc(a.name)||'<span style="color:var(--text-muted)">-</span>'}</td>
+      <td style="text-align:center;font-size:11px;color:var(--text-muted)">${a.whs.size}</td>
+      <td class="n" style="font-size:12px">${_ilNz(a.beg)}</td>
+      <td class="n" style="font-size:12px;color:#16a34a;font-weight:${a.inQ?600:400}">${_ilN(a.inQ)}</td>
+      <td class="n" style="font-size:12px;color:#dc2626;font-weight:${a.outQ?600:400}">${_ilN(a.outQ)}</td>
+      <td class="n" style="font-size:12px;font-weight:700;color:${endColor}">${_ilNz(a.end)}</td>
+      <td class="n" style="font-size:11px;color:var(--text-muted)">${_ilN(a.inA)}</td>
+      <td class="n" style="font-size:11px;color:var(--text-muted)">${_ilN(a.outA)}</td>
     </tr>`;
   });
   tb.innerHTML = html;
-  const tDiff = (tSI+tMI) - (tSO+tMO);
-  tfoot.innerHTML = `<tr style="background:#f1f5f9;font-weight:700;font-size:12px">
-    <td colspan="3" style="text-align:right;padding-right:12px">합계</td>
-    <td class="n" style="color:#166534">${tSI.toLocaleString()}</td>
-    <td class="n" style="color:#166534">${tMI.toLocaleString()}</td>
-    <td class="n" style="color:#991b1b">${tSO.toLocaleString()}</td>
-    <td class="n" style="color:#991b1b">${tMO.toLocaleString()}</td>
-    <td class="n" style="color:#166534;font-weight:700">${(tSI+tMI).toLocaleString()}</td>
-    <td class="n" style="color:#991b1b;font-weight:700">${(tSO+tMO).toLocaleString()}</td>
-    <td class="n">${tInA.toLocaleString()}</td>
-    <td class="n">${tOutA.toLocaleString()}</td>
-    <td class="n" style="font-weight:700;color:${tDiff>=0?'#166534':'#991b1b'}">${tDiff.toLocaleString()}</td>
+  tfoot.innerHTML = `<tr style="background:var(--bg-secondary);font-weight:700;font-size:12px;border-top:2px solid var(--border)">
+    <td colspan="4" style="text-align:right;padding-right:12px">합계</td>
+    <td class="n">${sBeg.toLocaleString()}</td>
+    <td class="n" style="color:#16a34a">${sIn.toLocaleString()}</td>
+    <td class="n" style="color:#dc2626">${sOut.toLocaleString()}</td>
+    <td class="n" style="color:#2563eb">${sEnd.toLocaleString()}</td>
+    <td class="n" style="color:var(--text-muted)">${sInA.toLocaleString()}</td>
+    <td class="n" style="color:var(--text-muted)">${sOutA.toLocaleString()}</td>
+  </tr>`;
+}
+
+// === 창고별 합계 ===
+function renderILWarehouseView(rows, thead, tb, tfoot, infoEl) {
+  const whNames = {};
+  ilWarehouses.forEach(w => { if (typeof w === 'object') whNames[w.code] = w.name; });
+
+  thead.innerHTML = `<tr>
+    <th style="min-width:45px;text-align:center">#</th>
+    <th style="min-width:80px">창고코드</th>
+    <th style="min-width:100px">창고명</th>
+    <th style="min-width:55px;text-align:center">품목수</th>
+    <th style="min-width:90px;text-align:right;color:#16a34a;background:rgba(22,163,74,0.08)">입고합계</th>
+    <th style="min-width:90px;text-align:right;color:#dc2626;background:rgba(220,38,38,0.06)">출고합계</th>
+    <th style="min-width:90px;text-align:right;font-weight:700">차이(입-출)</th>
+    <th style="min-width:100px;text-align:right">입고금액</th>
+    <th style="min-width:100px;text-align:right">출고금액</th>
+  </tr>`;
+
+  const agg = {};
+  rows.forEach(r => {
+    if (!agg[r.warehouse]) agg[r.warehouse] = { items:new Set(), inQ:0, outQ:0, inA:0, outA:0 };
+    const a = agg[r.warehouse];
+    a.items.add(r.item_code); a.inQ += r.in_qty; a.outQ += r.out_qty; a.inA += r.in_amnt; a.outA += r.out_amnt;
+  });
+
+  const keys = Object.keys(agg).sort();
+  if (infoEl) infoEl.textContent = `${keys.length}개 창고`;
+  if (!keys.length) { tb.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:48px;color:var(--text-muted)">데이터가 없습니다</td></tr>'; tfoot.innerHTML = ''; return; }
+
+  let html = '', tIn=0, tOut=0, tInA=0, tOutA=0;
+  keys.forEach((wh, i) => {
+    const a = agg[wh];
+    const diff = a.inQ - a.outQ;
+    tIn += a.inQ; tOut += a.outQ; tInA += a.inA; tOutA += a.outA;
+    const diffColor = diff > 0 ? '#16a34a' : diff < 0 ? '#dc2626' : 'var(--text-muted)';
+    html += `<tr style="${i%2?'':'background:var(--bg-secondary)'}">
+      <td style="text-align:center;color:var(--text-muted);font-size:11px">${i+1}</td>
+      <td style="font-weight:700;font-family:monospace">${esc(wh)}</td>
+      <td>${esc(whNames[wh]||wh)}</td>
+      <td style="text-align:center">${a.items.size.toLocaleString()}</td>
+      <td class="n" style="color:#16a34a;font-weight:600">${_ilN(a.inQ)}</td>
+      <td class="n" style="color:#dc2626;font-weight:600">${_ilN(a.outQ)}</td>
+      <td class="n" style="color:${diffColor};font-weight:700">${(diff>=0?'+':'') + diff.toLocaleString()}</td>
+      <td class="n" style="color:var(--text-muted)">${_ilN(a.inA)}</td>
+      <td class="n" style="color:var(--text-muted)">${_ilN(a.outA)}</td>
+    </tr>`;
+  });
+  tb.innerHTML = html;
+  const tDiff = tIn - tOut;
+  tfoot.innerHTML = `<tr style="background:var(--bg-secondary);font-weight:700;font-size:12px;border-top:2px solid var(--border)">
+    <td colspan="4" style="text-align:right;padding-right:12px">합계</td>
+    <td class="n" style="color:#16a34a">${tIn.toLocaleString()}</td>
+    <td class="n" style="color:#dc2626">${tOut.toLocaleString()}</td>
+    <td class="n" style="color:${tDiff>=0?'#16a34a':'#dc2626'}">${(tDiff>=0?'+':'')+tDiff.toLocaleString()}</td>
+    <td class="n" style="color:var(--text-muted)">${tInA.toLocaleString()}</td>
+    <td class="n" style="color:var(--text-muted)">${tOutA.toLocaleString()}</td>
   </tr>`;
 }
 
 function exportInvLedgerExcel() {
   if (!ilRows.length) { alert('다운로드할 데이터가 없습니다.'); return; }
-
   const fromVal = document.getElementById('ilDateFrom').value;
   const toVal = document.getElementById('ilDateTo').value;
-
-  let csv = '\uFEFF월,품목코드,품목명,창고,입고(SI),자재입고(MI),출고(SO),자재출고(MO),입고합계,출고합계,입고금액,출고금액\n';
+  let csv = '\uFEFF품목코드,품목명,창고,창고명,기초재고,입고,출고,기말재고,입고금액,출고금액\n';
   ilRows.forEach(r => {
-    const monthDisplay = r.month ? r.month.slice(0,4) + '-' + r.month.slice(4,6) : '';
-    const inTotal = r.si_qty + r.mi_qty;
-    const outTotal = r.so_qty + r.mo_qty;
-    csv += `${monthDisplay},"${r.item_code}","${(r.item_name||'').replace(/"/g,'""')}","${r.warehouse}",${r.si_qty},${r.mi_qty},${r.so_qty},${r.mo_qty},${inTotal},${outTotal},${r.in_amnt},${r.out_amnt}\n`;
+    csv += `"${r.item_code}","${(r.item_name||'').replace(/"/g,'""')}","${r.warehouse}","${r.wh_name||''}",${r.begin_stock},${r.in_qty},${r.out_qty},${r.end_stock},${r.in_amnt},${r.out_amnt}\n`;
   });
-
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
@@ -20520,7 +20457,7 @@ async function loadVendorPortal(){
         poList.forEach(po=>{
           (po.items||[]).forEach(it=>{
             monthTotalQty+=(it.ordered_qty||0);
-            const j=parseFloat(it.cut)||0, jp=parseFloat(it.imposition)||0;
+            const j=parseJeol(it.cut), jp=parseJeol(it.imposition);
             if(j&&jp) monthTotalR+=(it.ordered_qty||0)/500/j/jp;
           });
         });
@@ -20585,7 +20522,7 @@ async function loadVendorPortal(){
                 ${isDd?'<span style="font-size:10px;padding:2px 6px;border-radius:3px;background:#fecaca;color:#dc2626;font-weight:700">DD</span>':'<span style="font-size:10px;padding:2px 6px;border-radius:3px;background:#dbeafe;color:#1d4ed8;font-weight:700">바른</span>'}
                 <span style="font-size:11px;padding:2px 6px;border-radius:3px;background:${stBorder}20;color:${stBorder};font-weight:600">${esc(po.status)}</span>
                 <span style="font-size:13px;color:#64748b">${esc(po.po_date||'')} · ${vendor.type==='원재료' ? (()=>{
-                  let totalR=0; items.forEach(it=>{const j=parseFloat(it.cut)||0,jp=parseFloat(it.imposition)||0; totalR+=(j&&jp)?(it.ordered_qty||0)/500/j/jp:0;}); return totalR.toFixed(1)+' R';
+                  let totalR=0; items.forEach(it=>{const j=parseJeol(it.cut),jp=parseJeol(it.imposition); totalR+=(j&&jp)?(it.ordered_qty||0)/500/j/jp:0;}); return totalR.toFixed(1)+' R';
                 })() : totalQty.toLocaleString()+'매'} · ${items.length}품목</span>
                 ${vendor.type!=='원재료' ? `<span style="font-size:11px;padding:2px 8px;border-radius:3px;background:#fef3c7;color:#92400e;font-weight:500">입고처: ${esc(dest)}</span>` : ''}
               </div>
@@ -20606,8 +20543,8 @@ async function loadVendorPortal(){
                 <th style="padding:8px 6px;text-align:left;border-bottom:2px solid #94a3b8;font-weight:700;color:#334155;font-size:12px">전체공정</th>
               </tr></thead>
               <tbody>${items.map((it,idx)=>{
-                const jeol=parseFloat(it.cut)||0;
-                const jopan=parseFloat(it.imposition)||0;
+                const jeol=parseJeol(it.cut);
+                const jopan=parseJeol(it.imposition);
                 const qty=it.ordered_qty||0;
                 const ream=(jeol&&jopan)? (qty/500/jeol/jopan).toFixed(1) : qty.toLocaleString();
                 const today=new Date().toISOString().slice(0,10);
