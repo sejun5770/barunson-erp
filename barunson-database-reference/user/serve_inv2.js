@@ -1,7 +1,7 @@
 const _startTime = Date.now();
 // ERP 애플리케이션 버전 (MANUAL.md / CHANGELOG.md 와 동기화)
-const APP_VERSION = '1.1.0';
-const APP_VERSION_DATE = '2026-04-13';
+const APP_VERSION = '1.1.1';
+const APP_VERSION_DATE = '2026-04-14';
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -1184,7 +1184,9 @@ const _defaultPostTypes = [
   {id:7,name:'레이져',category:'post',group_name:'',icon:'⚙️',sort_order:7,is_active:1,default_vendor:''},
   {id:8,name:'실크',category:'post',group_name:'',icon:'⚙️',sort_order:8,is_active:1,default_vendor:''},
   {id:9,name:'임가공',category:'post',group_name:'',icon:'⚙️',sort_order:9,is_active:1,default_vendor:''},
-  {id:10,name:'우찌누끼',category:'post',group_name:'',icon:'⚙️',sort_order:10,is_active:1,default_vendor:'예지가'}
+  {id:10,name:'우찌누끼',category:'post',group_name:'',icon:'⚙️',sort_order:10,is_active:1,default_vendor:'예지가'},
+  {id:21,name:'접지',category:'post',group_name:'',icon:'⚙️',sort_order:11,is_active:1,default_vendor:''},
+  {id:22,name:'단면접착',category:'post',group_name:'',icon:'⚙️',sort_order:12,is_active:1,default_vendor:''}
 ];
 const _defaultBomTypes = [
   {id:11,name:'오프셋인쇄',category:'bom',group_name:'인쇄',icon:'🖨️',sort_order:1,is_active:1,default_vendor:''},
@@ -1196,7 +1198,8 @@ const _defaultBomTypes = [
   {id:17,name:'코팅/라미',category:'bom',group_name:'후가공',icon:'🛡️',sort_order:7,is_active:1,default_vendor:''},
   {id:18,name:'접지',category:'bom',group_name:'제본',icon:'📐',sort_order:8,is_active:1,default_vendor:''},
   {id:19,name:'제본',category:'bom',group_name:'제본',icon:'📚',sort_order:9,is_active:1,default_vendor:''},
-  {id:20,name:'포장',category:'bom',group_name:'포장',icon:'📦',sort_order:10,is_active:1,default_vendor:''}
+  {id:20,name:'포장',category:'bom',group_name:'포장',icon:'📦',sort_order:10,is_active:1,default_vendor:''},
+  {id:23,name:'단면접착',category:'bom',group_name:'후가공',icon:'🩹',sort_order:11,is_active:1,default_vendor:''}
 ];
 let _processTypesTableExists = null;
 
@@ -1235,7 +1238,7 @@ async function getPostProcessTypes() {
     _cachedPostCols = _processTypesInMemory.filter(p => p.category === 'post' && p.is_active).sort((a,b) => a.sort_order - b.sort_order).map(p => p.name);
     return _cachedPostCols;
   }
-  return ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼'];
+  return ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼','접지','단면접착'];
 }
 function invalidatePostColsCache() { _cachedPostCols = null; }
 
@@ -1500,14 +1503,16 @@ try {
   const seedPost = [
     {name:'재단',sort:1},{name:'인쇄',sort:2},{name:'박/형압',sort:3},{name:'톰슨',sort:4},
     {name:'봉투가공',sort:5},{name:'세아리',sort:6},{name:'레이져',sort:7},{name:'실크',sort:8},
-    {name:'임가공',sort:9},{name:'우찌누끼',sort:10,vendor:'예지가'}
+    {name:'임가공',sort:9},{name:'우찌누끼',sort:10,vendor:'예지가'},
+    {name:'접지',sort:11},{name:'단면접착',sort:12}
   ];
   const seedBom = [
     {name:'오프셋인쇄',group:'인쇄',icon:'🖨️',sort:1},{name:'디지털인쇄',group:'인쇄',icon:'💻',sort:2},
     {name:'박가공',group:'후가공',icon:'✨',sort:3},{name:'형압',group:'후가공',icon:'🔲',sort:4},
     {name:'에폭시',group:'후가공',icon:'💎',sort:5},{name:'톰슨',group:'후가공',icon:'✂️',sort:6},
     {name:'코팅/라미',group:'후가공',icon:'🛡️',sort:7},{name:'접지',group:'제본',icon:'📐',sort:8},
-    {name:'제본',group:'제본',icon:'📚',sort:9},{name:'포장',group:'포장',icon:'📦',sort:10}
+    {name:'제본',group:'제본',icon:'📚',sort:9},{name:'포장',group:'포장',icon:'📦',sort:10},
+    {name:'단면접착',group:'후가공',icon:'🩹',sort:11}
   ];
   const ins = db.prepare("INSERT OR IGNORE INTO process_types (name,category,group_name,icon,sort_order,default_vendor) VALUES (?,?,?,?,?,?)");
   for (const s of seedPost) await ins.run(s.name,'post','',s.icon||'⚙️',s.sort,s.vendor||'');

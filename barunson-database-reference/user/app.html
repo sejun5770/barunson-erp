@@ -7140,7 +7140,7 @@ async function loadProcessTypes() {
 }
 function getPostCols() {
   if (window._postProcessTypes.length > 0) return window._postProcessTypes.map(p => p.name);
-  return ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼'];
+  return ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼','접지','단면접착'];
 }
 loadProcessTypes().then(() => { if(typeof buildHistoryTableHeader==='function') buildHistoryTableHeader(); });
 
@@ -15489,7 +15489,7 @@ function _poItemRenderList(items, isMat) {
 
   const edits = window._poItemEdits;
   // 공정 선택지 (동적 로드된 후공정 타입)
-  const procOptions = typeof getPostCols === 'function' ? getPostCols() : ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼'];
+  const procOptions = typeof getPostCols === 'function' ? getPostCols() : ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼','접지','단면접착'];
 
   let html = `<table style="width:100%;font-size:12px;border-collapse:collapse">
     <thead><tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">
