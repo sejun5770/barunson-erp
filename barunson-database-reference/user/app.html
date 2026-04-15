@@ -20124,30 +20124,35 @@ function renderCalendar() {
     const isPost = po.po_type === 'postprocess' || po.po_type === '후공정' || (po.vendor_name && ['코리아패키지','예지가'].some(v => (po.vendor_name||'').includes(v)));
     const isChinaPO = po.po_type === '자동발주' && po.notes && po.notes.includes('중국');
 
-    // 입고일 3단계:
-    // 1) vendor_confirmed_date → 입고확정 (거래처가 확정한 입고일)
-    // 2) expected_date → 입고예정 (발주 시 내가 적은 날짜)
-    // 3) 리드타임 기반 → 예상일 (날짜 미정 시 자동 계산)
-    let expectedDate;
-    let dateType; // 'confirmed' | 'expected' | 'estimated'
-    if (po.vendor_confirmed_date) {
-      expectedDate = po.vendor_confirmed_date;
-      dateType = 'confirmed';
-    } else if (po.expected_date) {
-      expectedDate = po.expected_date;
-      dateType = 'expected';
-    } else if (isChinaPO) {
-      expectedDate = addCalDays(poDate, LEAD_TIMES['중국']);
-      dateType = 'estimated';
-    } else {
-      const leadDays = isPost ? LEAD_TIMES['후공정'] : LEAD_TIMES['원재료'];
-      expectedDate = addBizDays(poDate, leadDays);
-      dateType = 'estimated';
-    }
-
+    // 입고일 판정 (품목별):
+    // 1) item.ship_date → 거래처 포털에서 품목별 출고일
+    // 2) po.vendor_confirmed_date → PO 단위 거래처 확정일
+    // 3) po.expected_date → 발주 시 내가 적은 입고예정일
+    // 4) 리드타임 기반 → 자동 추정
     (po.items || []).forEach(item => {
       const code = item.product_code || '';
       if (!code) return;
+
+      let expectedDate;
+      let dateType;
+      if (item.ship_date) {
+        expectedDate = item.ship_date;
+        dateType = 'confirmed';
+      } else if (po.vendor_confirmed_date) {
+        expectedDate = po.vendor_confirmed_date;
+        dateType = 'confirmed';
+      } else if (po.expected_date) {
+        expectedDate = po.expected_date;
+        dateType = 'expected';
+      } else if (isChinaPO) {
+        expectedDate = addCalDays(poDate, LEAD_TIMES['중국']);
+        dateType = 'estimated';
+      } else {
+        const leadDays = isPost ? LEAD_TIMES['후공정'] : LEAD_TIMES['원재료'];
+        expectedDate = addBizDays(poDate, leadDays);
+        dateType = 'estimated';
+      }
+
       if (!calEntries[expectedDate]) calEntries[expectedDate] = [];
       calEntries[expectedDate].push({
         code, qty: item.ordered_qty || 0, received: item.received_qty || 0,
