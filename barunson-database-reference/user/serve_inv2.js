@@ -4616,7 +4616,8 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/xerp-inventory' && method === 'GET') {
-    if (!await ensureXerpPool()) { fail(res, 503, 'XERP 데이터베이스 미연결 (재연결 시도 중)'); return; }
+    // XERP 풀이 없어도 폴백 경로(products 테이블만)로 응답
+    await ensureXerpPool().catch(()=>null);
 
     // 법인 파라미터 (all/barunson/dd)
     const company = parsed.searchParams.get('company') || 'all';
@@ -4671,6 +4672,7 @@ async function handleRequest(req, res) {
       }
 
       try {
+        if (!workPool) throw new Error('XERP pool not connected');
         // 1. 현재고
         const invResult = await workPool.request().query(`
           SELECT RTRIM(ItemCode) AS item_code, SUM(OhQty) AS oh_qty
@@ -4754,6 +4756,30 @@ async function handleRequest(req, res) {
         }
         console.log(`${dbName}/${siteCode} 재고 로드 (${legalEntity}): ${out.length}개 품목`);
         return out;
+      } catch (xerpErr) {
+        console.warn(`[xerp-inventory] ${dbName}/${siteCode} XERP 실패 — products 테이블 폴백: ${xerpErr.message}`);
+        return registeredProducts.map(p => ({
+          '제품코드': p.product_code,
+          '품목명': p.product_name || '',
+          '브랜드': p.brand || '',
+          '생산지': p.origin || '',
+          '현재고': 0,
+          '가용재고': 0,
+          '요청량': 0,
+          '_xerpMonthly': 0,
+          '_xerpDaily': 0,
+          '_xerpTotal3m': 0,
+          '_원자재코드': p.material_code || '',
+          '_원재료용지명': p.material_name || '',
+          '_절': p.cut_spec || '',
+          '_조판': p.jopan || '',
+          '_원지사': p.paper_maker || '',
+          '_후공정업체': p.post_vendor || '',
+          'legal_entity': isDd ? 'dd' : 'barunson',
+          '_invSource': 'fallback:products',
+          '_siteCode': siteCode,
+          '_xerpError': xerpErr.message
+        }));
       } finally {
         if (createdLocal && workPool) {
           try { await workPool.close(); } catch(_){}
