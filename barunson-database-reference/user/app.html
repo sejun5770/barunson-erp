@@ -7149,6 +7149,7 @@ var pageTitles={
 // ===== GLOBAL STATE =====
 let RAW=[], classified={urgent:[],nohistory:[],danger:[],safe:[],nosale:[],printwarehouse:[],etc:[]};
 let currentTab='urgent', sortK='', sortD='asc', orderQty={}, orderChecked={}, loadTime='';
+let manualOrderCodes=new Set(); // 재고현황 탭에서 '+ 발주'로 수동 추가한 품목코드
 let productInfo={}, productNotes={}, orderedToday={}, postVendorMap={}; // postVendorMap: {code_process: vendorName}
 let vendors=JSON.parse(localStorage.getItem('vendors')||'[]');
 let poList=[];
@@ -7588,6 +7589,20 @@ function switchOrigin(origin){
 }
 
 // ===== MAIN TAB SWITCHING (재고현황/발주제안/분석) =====
+function quickAddOrder(code){
+  if(!code) return;
+  manualOrderCodes.add(code);
+  switchInvMainTab('order');
+  // 발주제안 탭으로 이동 후 해당 품목으로 검색 필터 적용
+  setTimeout(()=>{
+    const si=document.getElementById('searchInput');
+    if(si){ si.value=code; if(typeof render==='function') render(); }
+    // 해당 행의 수량 입력 포커스
+    const inp=document.querySelector(`#invTableArea input.qty-input[data-code="${code}"]`);
+    if(inp){ inp.focus(); inp.select&&inp.select(); }
+  }, 50);
+}
+
 function switchInvMainTab(tab){
   invMainTab=tab;
   document.querySelectorAll('#invMainTabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.mtab===tab));
@@ -7731,7 +7746,7 @@ function renderCell(c, p){
       return`<td style="text-align:center"><span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;color:#dc2626;background:#fee2e2">발주필요</span></td>`;
     }
     if(orderedToday[code])return`<td style="text-align:center"><span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:700;color:#fff;background:#16a34a;letter-spacing:0.5px">✓ 발주완료</span><div style="font-size:9px;color:#16a34a;margin-top:1px">${orderedToday[code].toLocaleString()}개</div></td>`;
-    return`<td style="text-align:center;color:#ddd">-</td>`;
+    return`<td style="text-align:center"><button onclick="quickAddOrder('${esc(code)}')" style="background:#eff6ff;border:1px solid #bfdbfe;color:#2563eb;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:600;cursor:pointer" title="발주제안 탭으로 이동하여 수량 입력">+ 발주</button></td>`;
   }
   if(c.special==='shortage'){
     const sh=p._shortage||0;
@@ -7897,10 +7912,10 @@ function renderOrderTab(){
   // 발주필요 품목: 긴급+위험+이력없음 중 발주필요 표시 + 기존 발주입력 품목 + 오늘 발주완료
   let data=[];
   const dataSet=new Set();
-  ['urgent','nohistory','danger','safe'].forEach(s=>{
+  ['urgent','nohistory','danger','safe','nosale'].forEach(s=>{
     (classified[s]||[]).forEach(p=>{
       const code=p['제품코드']||'';
-      if(p._needOrder||p._pendingQty>0||orderQty[code]>0||orderedToday[code]) { data.push(p); dataSet.add(code); }
+      if(p._needOrder||p._pendingQty>0||orderQty[code]>0||orderedToday[code]||manualOrderCodes.has(code)) { data.push(p); dataSet.add(code); }
     });
   });
 
