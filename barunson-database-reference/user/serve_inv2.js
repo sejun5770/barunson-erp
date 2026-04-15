@@ -4675,19 +4675,25 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const { mappings } = body; // [{product_code, process_type, vendor_name, step_order}, ...]
     if (!mappings || !mappings.length) { fail(res, 400, 'mappings 필요'); return; }
-    const upsert = db.prepare(`INSERT INTO product_post_vendor (product_code, process_type, vendor_name, step_order, updated_at)
-      VALUES (?, ?, ?, ?, datetime('now','localtime'))
-      ON CONFLICT(product_code, process_type) DO UPDATE SET vendor_name=excluded.vendor_name, step_order=excluded.step_order, updated_at=datetime('now','localtime')`);
+    // replace-all-for-code: mappings에 포함된 product_code들의 기존 행을 모두 삭제한 뒤 새로 INSERT
+    // 기존 UPSERT 방식은 사용자가 UI에서 지운 행이 DB에 남아있던 버그가 있었음.
+    const codes = [...new Set(mappings.map(m => m.product_code).filter(Boolean))];
+    const insert = db.prepare(`INSERT INTO product_post_vendor (product_code, process_type, vendor_name, step_order, updated_at)
+      VALUES (?, ?, ?, ?, datetime('now','localtime'))`);
+    const delByCode = db.prepare('DELETE FROM product_post_vendor WHERE product_code=?');
     const tx = db.transaction(async () => {
+      for (const code of codes) {
+        await delByCode.run(code);
+      }
       for (const m of mappings) {
         if (m.product_code && m.process_type && m.vendor_name) {
-          await upsert.run(m.product_code, m.process_type, m.vendor_name, m.step_order || 1);
+          await insert.run(m.product_code, m.process_type, m.vendor_name, m.step_order || 1);
         }
       }
     });
     await tx();
     scheduleProductInfoReload();
-    ok(res, { ok: true, saved: mappings.length });
+    ok(res, { ok: true, saved: mappings.length, replaced_codes: codes.length });
     return;
   }
 
