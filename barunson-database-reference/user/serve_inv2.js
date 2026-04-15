@@ -2081,6 +2081,23 @@ await db.exec(`CREATE TABLE IF NOT EXISTS vendor_notes (
 )`);
 try { await db.exec("ALTER TABLE vendor_notes ADD COLUMN status TEXT DEFAULT 'open'"); } catch(_) {}
 try { await db.exec("ALTER TABLE vendor_notes ADD COLUMN updated_at TEXT DEFAULT (datetime('now','localtime'))"); } catch(_) {}
+
+// ── 자료함 (reference docs) ──
+await db.exec(`CREATE TABLE IF NOT EXISTS reference_docs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL DEFAULT 'link',
+  title TEXT NOT NULL DEFAULT '',
+  url TEXT DEFAULT '',
+  file_path TEXT DEFAULT '',
+  file_name TEXT DEFAULT '',
+  file_size INTEGER DEFAULT 0,
+  category TEXT DEFAULT '',
+  memo TEXT DEFAULT '',
+  uploader TEXT DEFAULT '',
+  uploader_id INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+)`);
 // v1.0.8: po_drafts 법인 분리
 try { await db.exec("ALTER TABLE po_drafts ADD COLUMN legal_entity TEXT DEFAULT 'barunson'"); } catch(_) {}
 // v1.0.9: po_drafts 완료/연결PO
@@ -4132,6 +4149,144 @@ async function handleRequest(req, res) {
     const id = parseInt(vendorDel[1]);
     await db.prepare('DELETE FROM vendors WHERE vendor_id = ?').run(id);
     if (currentUser) auditLog(currentUser.userId, currentUser.username, 'vendor_delete', 'vendors', id, `거래처 삭제`, clientIP);
+    ok(res, { deleted: id });
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  REFERENCE DOCS (자료함)
+  // ════════════════════════════════════════════════════════════════════
+
+  if (pathname === '/api/reference-docs' && method === 'GET') {
+    const cat = parsed.searchParams.get('category') || '';
+    const q = parsed.searchParams.get('q') || '';
+    let sql = 'SELECT * FROM reference_docs WHERE 1=1';
+    const params = [];
+    if (cat) { sql += ' AND category = ?'; params.push(cat); }
+    if (q) { sql += ' AND (title LIKE ? OR memo LIKE ?)'; params.push('%'+q+'%', '%'+q+'%'); }
+    sql += ' ORDER BY created_at DESC';
+    const rows = await db.prepare(sql).all(...params);
+    ok(res, rows);
+    return;
+  }
+
+  if (pathname === '/api/reference-docs/categories' && method === 'GET') {
+    const rows = await db.prepare("SELECT DISTINCT category FROM reference_docs WHERE category != '' ORDER BY category").all();
+    ok(res, rows.map(r => r.category));
+    return;
+  }
+
+  if (pathname === '/api/reference-docs' && method === 'POST') {
+    const body = await readJSON(req);
+    if (!body.title) { fail(res, 400, 'title 필수'); return; }
+    if (!body.url) { fail(res, 400, 'url 필수'); return; }
+    const uploader = currentUser ? (currentUser.username || '') : '';
+    const uploaderId = currentUser ? (currentUser.userId || 0) : 0;
+    const info = await db.prepare(
+      `INSERT INTO reference_docs (type, title, url, category, memo, uploader, uploader_id) VALUES ('link', ?, ?, ?, ?, ?, ?)`
+    ).run(body.title, body.url, body.category || '', body.memo || '', uploader, uploaderId);
+    ok(res, { id: info.lastInsertRowid });
+    return;
+  }
+
+  if (pathname === '/api/reference-docs/upload' && method === 'POST') {
+    try {
+      const contentType = req.headers['content-type'] || '';
+      if (!contentType.includes('multipart/form-data')) { fail(res, 400, 'multipart/form-data 필요'); return; }
+      const boundary = contentType.split('boundary=')[1];
+      if (!boundary) { fail(res, 400, 'boundary 없음'); return; }
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const buf = Buffer.concat(chunks);
+      const sep = Buffer.from('--' + boundary);
+      const fields = {};
+      let fileData = null, fileName = '';
+      const parts = [];
+      let start = 0;
+      while (true) {
+        const idx = buf.indexOf(sep, start);
+        if (idx === -1) break;
+        if (start > 0) parts.push(buf.slice(start, idx - 2));
+        start = idx + sep.length + 2;
+      }
+      for (const part of parts) {
+        const headerEnd = part.indexOf('\r\n\r\n');
+        if (headerEnd === -1) continue;
+        const header = part.slice(0, headerEnd).toString('utf8');
+        const pbody = part.slice(headerEnd + 4);
+        const nameMatch = header.match(/name="([^"]+)"/);
+        const fileMatch = header.match(/filename="([^"]+)"/);
+        if (nameMatch) {
+          if (fileMatch) { fileData = pbody; fileName = fileMatch[1]; }
+          else { fields[nameMatch[1]] = pbody.toString('utf8').trim(); }
+        }
+      }
+      if (!fileData || !fileName) { fail(res, 400, '파일 없음'); return; }
+      const title = fields.title || fileName;
+      const category = fields.category || '';
+      const memo = fields.memo || '';
+      const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
+      const refDir = path.join(uploadDir, 'reference');
+      const fsMod = require('fs');
+      if (!fsMod.existsSync(refDir)) fsMod.mkdirSync(refDir, { recursive: true });
+      const safeName = `${Date.now()}_${fileName.replace(/[^a-zA-Z0-9가-힣._-]/g, '_')}`;
+      const filePath = path.join(refDir, safeName);
+      fsMod.writeFileSync(filePath, fileData);
+      const uploader = currentUser ? (currentUser.username || '') : '';
+      const uploaderId = currentUser ? (currentUser.userId || 0) : 0;
+      const info = await db.prepare(
+        `INSERT INTO reference_docs (type, title, file_path, file_name, file_size, category, memo, uploader, uploader_id) VALUES ('file', ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(title, filePath, fileName, fileData.length, category, memo, uploader, uploaderId);
+      ok(res, { id: info.lastInsertRowid, file_name: fileName });
+    } catch(e) {
+      console.error('자료함 업로드 오류:', e.message);
+      fail(res, 500, '업로드 실패: ' + e.message);
+    }
+    return;
+  }
+
+  const refFile = pathname.match(/^\/api\/reference-docs\/(\d+)\/file$/);
+  if (refFile && method === 'GET') {
+    const id = parseInt(refFile[1]);
+    const row = await db.prepare('SELECT file_path, file_name FROM reference_docs WHERE id = ?').get(id);
+    if (!row || !row.file_path) { fail(res, 404, '파일 없음'); return; }
+    const fsMod = require('fs');
+    if (!fsMod.existsSync(row.file_path)) { fail(res, 404, '파일이 디스크에 없음'); return; }
+    const ext = path.extname(row.file_name || '').toLowerCase();
+    const ct = (typeof MIME !== 'undefined' && MIME[ext]) || 'application/octet-stream';
+    res.writeHead(200, {
+      'Content-Type': ct,
+      'Content-Disposition': `inline; filename="${encodeURIComponent(row.file_name || 'file')}"`,
+      ...CORS,
+    });
+    fsMod.createReadStream(row.file_path).pipe(res);
+    return;
+  }
+
+  const refUpd = pathname.match(/^\/api\/reference-docs\/(\d+)$/);
+  if (refUpd && method === 'PATCH') {
+    const id = parseInt(refUpd[1]);
+    const body = await readJSON(req);
+    const fields = [];
+    const params = [];
+    for (const k of ['title','url','category','memo']) {
+      if (body[k] !== undefined) { fields.push(`${k}=?`); params.push(body[k]); }
+    }
+    if (!fields.length) { fail(res, 400, '수정할 필드 없음'); return; }
+    fields.push("updated_at=datetime('now','localtime')");
+    params.push(id);
+    await db.prepare(`UPDATE reference_docs SET ${fields.join(',')} WHERE id = ?`).run(...params);
+    ok(res, { updated: id });
+    return;
+  }
+
+  if (refUpd && method === 'DELETE') {
+    const id = parseInt(refUpd[1]);
+    const row = await db.prepare('SELECT file_path FROM reference_docs WHERE id = ?').get(id);
+    if (row && row.file_path) {
+      try { require('fs').unlinkSync(row.file_path); } catch(_) {}
+    }
+    await db.prepare('DELETE FROM reference_docs WHERE id = ?').run(id);
     ok(res, { deleted: id });
     return;
   }

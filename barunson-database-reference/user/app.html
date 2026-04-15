@@ -1511,7 +1511,8 @@ var _megaData = {
       {icon:'✅',bg:'#ecfdf5',fg:'#10b981',name:'업무관리',desc:'등록 + 추적 + 협업',page:'tasks',badgeId:'qmTaskTodo'},
       {icon:'📓',bg:'#fef9c3',fg:'#a16207',name:'미팅일지',desc:'회의 기록 + 공유',page:'notes'},
       {icon:'📢',bg:'#fef2f2',fg:'#dc2626',name:'공지/게시판',desc:'공지사항 + 팝업 관리',page:'board'},
-      {icon:'✍️',bg:'#e0e7ff',fg:'#4338ca',name:'전자결재',desc:'결재 상신/승인/반려',page:'approval'}
+      {icon:'✍️',bg:'#e0e7ff',fg:'#4338ca',name:'전자결재',desc:'결재 상신/승인/반려',page:'approval'},
+      {icon:'📁',bg:'#fef9c3',fg:'#a16207',name:'자료함',desc:'업무 링크/파일 공유 보관함',page:'reference-docs'}
     ]
   },
   system: {
@@ -6566,6 +6567,59 @@ function closeMegaMenu() { /* no-op */ }
   </div>
 </div>
 
+<!-- ========== REFERENCE DOCS (자료함) PAGE ========== -->
+<div class="page" id="page-reference-docs" style="background:#fff;color:#111">
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+    <input id="rdSearch" type="search" placeholder="제목/메모 검색" oninput="loadReferenceDocs()" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;min-width:200px" />
+    <select id="rdCategoryFilter" onchange="loadReferenceDocs()" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+      <option value="">전체 카테고리</option>
+    </select>
+    <div style="flex:1"></div>
+    <button onclick="openRdLinkModal()" style="background:#2563eb;color:#fff;padding:6px 12px;border-radius:6px;border:none;cursor:pointer;font-size:13px">+ 링크 추가</button>
+    <button onclick="openRdFileModal()" style="background:#059669;color:#fff;padding:6px 12px;border-radius:6px;border:none;cursor:pointer;font-size:13px">+ 파일 업로드</button>
+  </div>
+  <div id="rdList" style="min-height:400px"></div>
+</div>
+
+<div id="rdLinkModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center" onclick="if(event.target===this) closeRdLinkModal()">
+  <div style="background:#fff;padding:24px;border-radius:12px;width:460px;max-width:90vw">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div style="font-size:16px;font-weight:700" id="rdLinkModalTitle">링크 추가</div>
+      <button onclick="closeRdLinkModal()" style="background:none;border:none;font-size:20px;cursor:pointer">✕</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <input id="rdLinkTitle" placeholder="제목" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px" />
+      <input id="rdLinkUrl" placeholder="URL (https://...)" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px" />
+      <input id="rdLinkCategory" list="rdCategoryList" placeholder="카테고리 (자유입력)" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px" />
+      <datalist id="rdCategoryList"></datalist>
+      <textarea id="rdLinkMemo" placeholder="메모 (선택)" rows="3" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;resize:vertical"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button onclick="closeRdLinkModal()" style="padding:8px 16px;border:1px solid #d1d5db;background:#fff;border-radius:6px;cursor:pointer">취소</button>
+      <button onclick="saveRdLink()" style="padding:8px 16px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer">저장</button>
+    </div>
+  </div>
+</div>
+
+<div id="rdFileModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center" onclick="if(event.target===this) closeRdFileModal()">
+  <div style="background:#fff;padding:24px;border-radius:12px;width:460px;max-width:90vw">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div style="font-size:16px;font-weight:700">파일 업로드</div>
+      <button onclick="closeRdFileModal()" style="background:none;border:none;font-size:20px;cursor:pointer">✕</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <input id="rdFileInput" type="file" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px" />
+      <input id="rdFileTitle" placeholder="제목 (비우면 파일명)" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px" />
+      <input id="rdFileCategory" list="rdCategoryList" placeholder="카테고리 (자유입력)" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px" />
+      <textarea id="rdFileMemo" placeholder="메모 (선택)" rows="3" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;resize:vertical"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button onclick="closeRdFileModal()" style="padding:8px 16px;border:1px solid #d1d5db;background:#fff;border-radius:6px;cursor:pointer">취소</button>
+      <button onclick="saveRdFile()" style="padding:8px 16px;background:#059669;color:#fff;border:none;border-radius:6px;cursor:pointer">업로드</button>
+    </div>
+  </div>
+</div>
+
 <!-- ========== JOURNAL AUTO (자동 분개) PAGE ========== -->
 <div class="page" id="page-journal-auto" style="background:#fff;color:#111">
   <div style="display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin-bottom:12px" id="jaTabs">
@@ -7088,7 +7142,8 @@ var pageTitles={
   'barcode':'바코드/QR','report-builder':'보고서 빌더',
   'china-hub':'중국 종합관리',
   'help':'사용 설명서','vendor-performance':'업체성과',
-  'purchase-closing':'구매마감'
+  'purchase-closing':'구매마감',
+  'reference-docs':'자료함'
 };
 
 // ===== GLOBAL STATE =====
@@ -8820,6 +8875,7 @@ function showPage(page, opts){
   if(page==='production-req') loadProductionReq();
   if(page==='user-mgmt') loadUserMgmt();
   if(page==='tasks') loadTasks();
+  if(page==='reference-docs') loadReferenceDocs();
   if(page==='production-stock') loadProductionStock();
   if(page==='warehouse') loadWarehousePage();
   if(page==='sales') loadSalesPage();
@@ -31548,6 +31604,159 @@ async function confirmAllPurchaseClosing() {
 
 // ===== 앱 시작: 거래처 포탈 우선 체크 → 아니면 일반 인증 =====
 if(!initVendorPortal()) { initAuth(); }
+
+// ===== REFERENCE DOCS (자료함) =====
+let _rdCategories = [];
+
+async function loadReferenceDocs() {
+  const q = (document.getElementById('rdSearch')?.value || '').trim();
+  const cat = document.getElementById('rdCategoryFilter')?.value || '';
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (cat) params.set('category', cat);
+  try {
+    const [listResp, catResp] = await Promise.all([
+      (typeof authFetch === 'function' ? authFetch : fetch)('/api/reference-docs?' + params.toString()),
+      (typeof authFetch === 'function' ? authFetch : fetch)('/api/reference-docs/categories'),
+    ]);
+    const listJson = await listResp.json();
+    const catJson = await catResp.json();
+    _rdCategories = catJson.data || [];
+    renderRdCategoryOptions();
+    renderRdList(listJson.data || []);
+  } catch(e) {
+    console.error('자료함 로드 실패', e);
+    document.getElementById('rdList').innerHTML = '<div style="padding:40px;text-align:center;color:#64748b">로드 실패: ' + (e.message||e) + '</div>';
+  }
+}
+
+function renderRdCategoryOptions() {
+  const filter = document.getElementById('rdCategoryFilter');
+  if (filter) {
+    const cur = filter.value;
+    filter.innerHTML = '<option value="">전체 카테고리</option>' + _rdCategories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+    filter.value = cur;
+  }
+  const dl = document.getElementById('rdCategoryList');
+  if (dl) dl.innerHTML = _rdCategories.map(c => `<option value="${escapeHtml(c)}">`).join('');
+}
+
+function renderRdList(list) {
+  const el = document.getElementById('rdList');
+  if (!el) return;
+  if (!list.length) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:#64748b">등록된 자료가 없습니다</div>';
+    return;
+  }
+  const rows = list.map(r => {
+    const isFile = r.type === 'file';
+    const icon = isFile ? '📄' : '🔗';
+    const openHref = isFile ? `/api/reference-docs/${r.id}/file` : (r.url || '#');
+    const typeLabel = isFile ? '파일' : '링크';
+    const size = isFile && r.file_size ? ` (${(r.file_size/1024).toFixed(1)}KB)` : '';
+    return `<tr style="border-bottom:1px solid #e5e7eb">
+      <td style="padding:10px 8px;font-size:18px">${icon}</td>
+      <td style="padding:10px 8px">
+        <a href="${escapeHtml(openHref)}" target="_blank" rel="noopener" style="color:#2563eb;font-weight:600;text-decoration:none">${escapeHtml(r.title || '(제목 없음)')}</a>
+        ${r.memo ? `<div style="font-size:12px;color:#64748b;margin-top:2px">${escapeHtml(r.memo)}</div>` : ''}
+      </td>
+      <td style="padding:10px 8px;font-size:12px;color:#475569">${escapeHtml(typeLabel)}${size}</td>
+      <td style="padding:10px 8px;font-size:12px"><span style="background:#f1f5f9;padding:2px 8px;border-radius:10px;color:#475569">${escapeHtml(r.category || '-')}</span></td>
+      <td style="padding:10px 8px;font-size:12px;color:#64748b">${escapeHtml(r.uploader || '-')}</td>
+      <td style="padding:10px 8px;font-size:12px;color:#64748b">${escapeHtml((r.created_at||'').slice(0,10))}</td>
+      <td style="padding:10px 8px;text-align:right">
+        <button onclick="deleteRdDoc(${r.id})" style="background:none;border:1px solid #fecaca;color:#dc2626;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">삭제</button>
+      </td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<table style="width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+    <thead><tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">
+      <th style="padding:10px 8px;text-align:left;width:40px"></th>
+      <th style="padding:10px 8px;text-align:left;font-size:12px;color:#475569">제목</th>
+      <th style="padding:10px 8px;text-align:left;font-size:12px;color:#475569;width:100px">종류</th>
+      <th style="padding:10px 8px;text-align:left;font-size:12px;color:#475569;width:120px">카테고리</th>
+      <th style="padding:10px 8px;text-align:left;font-size:12px;color:#475569;width:100px">등록자</th>
+      <th style="padding:10px 8px;text-align:left;font-size:12px;color:#475569;width:110px">등록일</th>
+      <th style="padding:10px 8px;width:80px"></th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function openRdLinkModal() {
+  document.getElementById('rdLinkTitle').value = '';
+  document.getElementById('rdLinkUrl').value = '';
+  document.getElementById('rdLinkCategory').value = '';
+  document.getElementById('rdLinkMemo').value = '';
+  renderRdCategoryOptions();
+  document.getElementById('rdLinkModal').style.display = 'flex';
+}
+function closeRdLinkModal() { document.getElementById('rdLinkModal').style.display = 'none'; }
+
+async function saveRdLink() {
+  const title = document.getElementById('rdLinkTitle').value.trim();
+  const url = document.getElementById('rdLinkUrl').value.trim();
+  const category = document.getElementById('rdLinkCategory').value.trim();
+  const memo = document.getElementById('rdLinkMemo').value.trim();
+  if (!title) { alert('제목을 입력하세요'); return; }
+  if (!url) { alert('URL을 입력하세요'); return; }
+  try {
+    const resp = await (typeof authFetch === 'function' ? authFetch : fetch)('/api/reference-docs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, url, category, memo })
+    });
+    const j = await resp.json();
+    if (!j.ok) { alert('저장 실패: ' + (j.error || '')); return; }
+    closeRdLinkModal();
+    loadReferenceDocs();
+  } catch(e) { alert('저장 실패: ' + e.message); }
+}
+
+function openRdFileModal() {
+  document.getElementById('rdFileInput').value = '';
+  document.getElementById('rdFileTitle').value = '';
+  document.getElementById('rdFileCategory').value = '';
+  document.getElementById('rdFileMemo').value = '';
+  renderRdCategoryOptions();
+  document.getElementById('rdFileModal').style.display = 'flex';
+}
+function closeRdFileModal() { document.getElementById('rdFileModal').style.display = 'none'; }
+
+async function saveRdFile() {
+  const fileInput = document.getElementById('rdFileInput');
+  if (!fileInput.files.length) { alert('파일을 선택하세요'); return; }
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+  fd.append('title', document.getElementById('rdFileTitle').value.trim());
+  fd.append('category', document.getElementById('rdFileCategory').value.trim());
+  fd.append('memo', document.getElementById('rdFileMemo').value.trim());
+  try {
+    const token = localStorage.getItem('auth_token') || localStorage.getItem('authToken') || '';
+    const resp = await fetch('/api/reference-docs/upload', {
+      method: 'POST',
+      headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+      body: fd
+    });
+    const j = await resp.json();
+    if (!j.ok) { alert('업로드 실패: ' + (j.error || '')); return; }
+    closeRdFileModal();
+    loadReferenceDocs();
+  } catch(e) { alert('업로드 실패: ' + e.message); }
+}
+
+async function deleteRdDoc(id) {
+  if (!confirm('삭제하시겠습니까?')) return;
+  try {
+    const resp = await (typeof authFetch === 'function' ? authFetch : fetch)('/api/reference-docs/' + id, { method: 'DELETE' });
+    const j = await resp.json();
+    if (!j.ok) { alert('삭제 실패: ' + (j.error || '')); return; }
+    loadReferenceDocs();
+  } catch(e) { alert('삭제 실패: ' + e.message); }
+}
+
 </script>
 </body>
 </html>
