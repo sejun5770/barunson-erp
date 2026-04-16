@@ -15280,8 +15280,80 @@ async function handleRequest(req, res) {
       INNER JOIN (SELECT product_code, vendor_name, MAX(apply_month) AS max_month FROM material_prices GROUP BY product_code, vendor_name) g
       ON m.product_code=g.product_code AND m.vendor_name=g.vendor_name AND m.apply_month=g.max_month
       WHERE ${where} ORDER BY m.vendor_name, m.product_code`).all(...params);
-    const vendors = (await db.prepare('SELECT DISTINCT vendor_name FROM material_prices ORDER BY vendor_name').all()).map(r => r.vendor_name);
-    ok(res, { items, vendors, count: items.length }); return;
+
+    // XERP MI(매입입고) 실가격 병합 — material_prices에 없는 BP코드도 표시
+    let xerpMerged = false;
+    try {
+      const pool = await ensureXerpPool();
+      if (pool) {
+        const now = new Date();
+        const s6m = new Date(now); s6m.setMonth(s6m.getMonth() - 6);
+        const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+        const xReq = pool.request().input('from6m', fmt(s6m)).input('toNow', fmt(now));
+        let xSearch = '';
+        if (search) { xSearch = " AND (RTRIM(i.ItemCode) LIKE @xs)"; xReq.input('xs', '%'+search+'%'); }
+        const xr = await xReq.query(`
+          SELECT RTRIM(i.ItemCode) AS item_code,
+                 COUNT(*) AS txn_count,
+                 SUM(i.InoutQty) AS total_qty,
+                 SUM(i.InoutAmnt) AS total_amt,
+                 CASE WHEN SUM(i.InoutQty)>0 THEN SUM(i.InoutAmnt)/SUM(i.InoutQty) ELSE 0 END AS avg_price,
+                 MAX(i.InoutPrice) AS last_price,
+                 MAX(h.InoutDate) AS last_date
+          FROM mmInoutItem i WITH(NOLOCK)
+          JOIN mmInoutHeader h WITH(NOLOCK) ON i.SiteCode=h.SiteCode AND i.InoutNo=h.InoutNo AND i.InoutGubun=h.InoutGubun
+          WHERE h.SiteCode='BK10' AND h.InoutGubun='MI'
+            AND h.InoutDate>=@from6m AND h.InoutDate<=@toNow
+            AND RTRIM(i.ItemCode) LIKE 'BP%' ${xSearch}
+          GROUP BY RTRIM(i.ItemCode)
+          ORDER BY RTRIM(i.ItemCode)
+        `);
+        // 품목명 매핑 (product_info에서 원자재코드→원재료용지명)
+        const pi = getProductInfo();
+        const nameMap = {};
+        for (const [, info] of Object.entries(pi || {})) {
+          const mc = (info['원자재코드']||'').trim();
+          const mn = (info['원재료용지명']||'').trim();
+          const maker = (info['제지사']||'').trim();
+          if (mc && mn) nameMap[mc] = { name: mn, vendor: maker };
+        }
+        const existingCodes = new Set(items.map(it => it.product_code));
+        for (const xr2 of (xr.recordset || [])) {
+          const code = xr2.item_code;
+          const avg = Math.round(xr2.avg_price || 0);
+          const info = nameMap[code] || {};
+          // 기존 항목에 XERP 실매입가 추가
+          const existing = items.find(it => it.product_code === code);
+          if (existing) {
+            existing.xerp_price = avg;
+            existing.xerp_qty = xr2.total_qty;
+            existing.xerp_last_date = xr2.last_date;
+          } else if (!vendor || (info.vendor || '').includes(vendor)) {
+            // material_prices에 없는 BP코드 — XERP 데이터로 추가
+            items.push({
+              product_code: code,
+              product_name: info.name || code,
+              spec: '',
+              unit: 'R',
+              vendor_name: info.vendor || '(XERP)',
+              list_price: 0,
+              apply_price: avg,
+              discount_rate: 0,
+              apply_month: xr2.last_date ? xr2.last_date.slice(0,6) : '',
+              xerp_price: avg,
+              xerp_qty: xr2.total_qty,
+              xerp_last_date: xr2.last_date,
+              source: 'xerp'
+            });
+          }
+        }
+        items.sort((a,b) => (a.vendor_name||'').localeCompare(b.vendor_name||'') || (a.product_code||'').localeCompare(b.product_code||''));
+        xerpMerged = true;
+      }
+    } catch(e) { console.warn('material-price/latest XERP 병합 실패:', e.message); }
+
+    const vendors = [...new Set(items.map(it => it.vendor_name).filter(Boolean))].sort();
+    ok(res, { items, vendors, count: items.length, xerp_merged: xerpMerged }); return;
   }
 
   // ── GET /api/material-price/trend ── 품목별 단가추이 (월별)
@@ -15401,9 +15473,14 @@ async function handleRequest(req, res) {
     const months = parseInt(qs.get('months') || '12');
     const vendorFilter = qs.get('vendor') || '';
     const search = qs.get('search') || '';
-    // 거래처 코드→이름 매핑
+    // 거래처 코드→이름 매핑 (기본 + 동적 확장)
     const vendorCodeMap = {'2015259':'대한통상','2100005':'두성종이','2100013':'삼원특수지상사','2100006':'서경','2013391':'한솔PNS'};
     const vendorCodes = Object.keys(vendorCodeMap);
+    // 동적으로 poOrderHeader에서 신규 거래처 코드 수집
+    try {
+      const dynVendors = await pool.request().query("SELECT DISTINCT RTRIM(CsCode) AS code FROM poOrderHeader WHERE SiteCode='BK10' AND RTRIM(CsCode) NOT IN ('2015259','2100005','2100013','2100006','2013391')");
+      for (const dv of (dynVendors.recordset||[])) { if (dv.code && !vendorCodeMap[dv.code]) { vendorCodeMap[dv.code] = dv.code; vendorCodes.push(dv.code); } }
+    } catch(_) {}
     try {
       const pool = await ensureXerpPool();
       const now = new Date();
@@ -15429,7 +15506,7 @@ async function handleRequest(req, res) {
         FROM poOrderHeader h WITH(NOLOCK)
         JOIN poOrderItem i WITH(NOLOCK) ON h.SiteCode=i.SiteCode AND h.OrderNo=i.OrderNo
         WHERE h.SiteCode='BK10' AND h.OrderDate>=@from AND h.OrderDate<=@to
-          AND RTRIM(h.CsCode) IN ('2015259','2100005','2100013','2100006','2013391') ${extraWhere}
+          AND RTRIM(h.CsCode) IN (${vendorCodes.map(c => "'"+c+"'").join(',')}) ${extraWhere}
         GROUP BY RTRIM(h.CsCode), RTRIM(i.ItemCode), LEFT(h.OrderDate,6)
         ORDER BY RTRIM(h.CsCode), RTRIM(i.ItemCode), LEFT(h.OrderDate,6)
       `);
