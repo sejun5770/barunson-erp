@@ -7209,15 +7209,16 @@ fetch('/api/xerp-monthly-usage').then(r=>r.json()).then(d=>{
 // 품목관리 origin 매핑 로드
 let originMap={}; // {product_code: '한국'|'중국'|'더기프트'}
 let currentOrigin='all';
+// 원재료 단가 별도 로드 (인증 필요할 수 있으므로 독립 실행)
+fetch('/api/material-price/latest').then(r=>r.json()).catch(()=>({data:{items:[]}})).then(priceResp=>{
+  const priceItems=(priceResp.data||priceResp)?.items||[];
+  window._materialPrices={};
+  priceItems.forEach(p=>{if(p.product_code) window._materialPrices[p.product_code]={apply_price:p.apply_price||p.xerp_price||0,vendor:p.vendor_name||'',source:p.source||'sqlite'};});
+  console.log('[단가] 원재료 단가 로드:', Object.keys(window._materialPrices).length, '건');
+}).catch(()=>{window._materialPrices={};});
 Promise.all([
   fetch('/api/products').then(r=>r.json()).catch(()=>({data:[]})),
   fetch('/api/product-post-vendor').then(r=>r.json()).catch(()=>({data:[]}))
-  fetch('/api/material-price/latest').then(r=>r.json()).catch(()=>({data:{items:[]}})).then(priceResp=>{
-    const priceItems=(priceResp.data||priceResp)?.items||[];
-    window._materialPrices={};
-    priceItems.forEach(p=>{if(p.product_code) window._materialPrices[p.product_code]={apply_price:p.apply_price||p.xerp_price||0,vendor:p.vendor_name||'',source:p.source||'sqlite'};});
-    console.log('[단가] 원재료 단가 로드:', Object.keys(window._materialPrices).length, '건');
-  })
 ]).then(([prodResp, ppvResp])=>{
   const list=prodResp.data||prodResp||[];
   const ppvList=ppvResp.data||ppvResp||[];
@@ -7870,8 +7871,8 @@ function renderCell(c, p){
     const mc=info['원자재코드']||'';
     const mp=window._materialPrices||{};
     const price=mp[mc]?.apply_price||0;
-    if(!price) return\`<td class="n" style="color:#ccc;font-size:10px">-</td>\`;
-    return\`<td class="n" style="font-size:10px">\${price.toLocaleString()}</td>\`;
+    if(!price) return`<td class="n" style="color:#ccc;font-size:10px">-</td>`;
+    return`<td class="n" style="font-size:10px">${price.toLocaleString()}</td>`;
   }
   if(c.special==='estAmount'){
     const info=productInfo[code]||{};
@@ -7883,8 +7884,8 @@ function renderCell(c, p){
     const jpn=parseFloat(info['조판'])||1;
     const reams=(jeol>0&&jpn>0&&qty>0)?(qty/500/jeol/jpn):0;
     const amt=Math.round(reams*price);
-    if(!amt) return\`<td class="n" style="color:#ccc;font-size:10px">-</td>\`;
-    return\`<td class="n" style="font-size:10px;font-weight:600;color:#0f172a">\${amt.toLocaleString()}</td>\`;
+    if(!amt) return`<td class="n" style="color:#ccc;font-size:10px">-</td>`;
+    return`<td class="n" style="font-size:10px;font-weight:600;color:#0f172a">${amt.toLocaleString()}</td>`;
   }
   if(c.special==='postChain'){
     const info=productInfo[code]||{};
@@ -7898,20 +7899,20 @@ function renderCell(c, p){
       pc.forEach(col=>{if(info[col]&&info[col]!=='0'&&!/^[\d,.]+$/.test(String(info[col]).trim()))parts.push(info[col]+'('+col+')');});
       chain=parts.join(' → ');
     }
-    if(!chain) return\`<td style="color:#ccc;font-size:10px">-</td>\`;
-    return\`<td style="font-size:9px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="\${esc(chain)}">\${esc(chain)}</td>\`;
+    if(!chain) return`<td style="color:#ccc;font-size:10px">-</td>`;
+    return`<td style="font-size:9px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(chain)}">${esc(chain)}</td>`;
   }
   if(c.special==='productSpec'){
     const info=productInfo[code]||{};
     const spec=info['제품사양']||'';
-    return\`<td style="font-size:9px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="\${esc(spec)}">\${esc(spec||'-')}</td>\`;
+    return`<td style="font-size:9px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(spec)}">${esc(spec||'-')}</td>`;
   }
   const v=p[c.k];
   if(c.num){
     const n=typeof v==='number'?v:0;
-    return\`<td class="n">\${fN(v)}</td>\`;
+    return`<td class="n">${fN(v)}</td>`;
   }
-  return\`<td>\${esc(v)}</td>\`;
+  return`<td>${esc(v)}</td>`;
 }
 
 // ===== RENDER: 재고현황 테이블 =====
