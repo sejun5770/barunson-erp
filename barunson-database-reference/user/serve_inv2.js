@@ -3567,6 +3567,8 @@ http.createServer(async (req, res) => {
   logger.info(`스마트재고현황: http://localhost:${PORT}  (startup: ${((Date.now() - _startTime)/1000).toFixed(1)}s)`);
   logger.info(`헬스체크: http://localhost:${PORT}/api/health`);
   logger.info(`로그 디렉토리: ${LOG_DIR}`);
+  // product_info 캐시를 DB에서 즉시 로드 (첫 요청 전에 완료)
+  reloadProductInfoFromDB().catch(e => console.warn('[startup] product_info 초기 로드 실패:', e.message));
   // 외부 DB 연결은 서버 기동 후 백그라운드에서 (Docker 헬스체크 타임아웃 방지)
   initXERP();
   initDD();
