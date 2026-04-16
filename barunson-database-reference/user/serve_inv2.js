@@ -9119,9 +9119,15 @@ async function handleRequest(req, res) {
       const updatePoItem = db.prepare(`UPDATE po_items SET received_qty = received_qty + ? WHERE item_id = ?`);
 
       for (const it of items) {
-        await riStmt.run(receiptId, it.po_item_id || null, it.product_code || '', it.received_qty || 0, it.defect_qty || 0, it.notes || '');
-        if (it.po_item_id && it.received_qty) {
-          await updatePoItem.run(it.received_qty, it.po_item_id);
+        let poItemId = it.po_item_id || null;
+        // po_item_id가 없으면 product_code + po_id로 자동 매칭
+        if (!poItemId && it.product_code && body.po_id) {
+          const match = await db.prepare('SELECT item_id FROM po_items WHERE po_id=? AND product_code=? LIMIT 1').get(body.po_id, it.product_code);
+          if (match) poItemId = match.item_id;
+        }
+        await riStmt.run(receiptId, poItemId, it.product_code || '', it.received_qty || 0, it.defect_qty || 0, it.notes || '');
+        if (poItemId && it.received_qty) {
+          await updatePoItem.run(it.received_qty, poItemId);
         }
       }
 
