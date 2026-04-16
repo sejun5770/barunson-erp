@@ -661,9 +661,19 @@ function scheduleProductInfoReload() {
 
 function getProductInfo() {
   if (productInfoCache) return productInfoCache;
-  // 첫 호출 — DB 재로드 트리거 + 레거시 파일로 즉시 응답
+  // 첫 호출 — 레거시 파일에서 기본정보만 로드 (후공정 키는 즉시 제거)
+  const _defaultPostTypes = ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼','접지','단면접착'];
   try {
-    productInfoCache = JSON.parse(fs.readFileSync(path.join(__dir, 'product_info.json'), 'utf8'));
+    const raw = JSON.parse(fs.readFileSync(path.join(__dir, 'product_info.json'), 'utf8'));
+    const cleaned = {};
+    for (const code in raw) {
+      const row = {};
+      for (const [k, v] of Object.entries(raw[code] || {})) {
+        if (!_defaultPostTypes.includes(k)) row[k] = v;
+      }
+      cleaned[code] = row;
+    }
+    productInfoCache = cleaned;
   } catch (e) { productInfoCache = {}; }
   scheduleProductInfoReload();
   return productInfoCache;
