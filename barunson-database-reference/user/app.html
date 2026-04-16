@@ -8810,8 +8810,29 @@ async function loadXerpInventory(forceRefresh) {
       });
     } catch(e){ console.warn('productInfo 머지 실패:', e); }
 
-    // orderQty 보존 (발주 진행 중 데이터 유지)
-    await processData(data.products);
+    // fallback 데이터(재고 전부 0)인 경우 기존 /data.json 데이터 보존
+    const isFallback = data.products.every(p => (p['현재고']||0)===0 && (p['_xerpMonthly']||0)===0);
+    if (isFallback && RAW && RAW.length > 0 && RAW.some(p => (p['가용재고']||0) > 0)) {
+      console.log('[XERP] fallback 감지 — 기존 데이터 보존 (' + RAW.length + '개, fallback ' + data.products.length + '개)');
+      // 기존 RAW에 없는 품목만 추가 (fallback에서 신규 품목 보완)
+      const existingCodes = new Set(RAW.map(p => p['제품코드']));
+      let added = 0;
+      data.products.forEach(p => {
+        if (p['제품코드'] && !existingCodes.has(p['제품코드'])) {
+          RAW.push(p);
+          added++;
+        }
+      });
+      if (added > 0) console.log('[XERP] fallback에서 신규 품목 ' + added + '개 추가');
+      // 재분류 + 렌더
+      classified = {urgent:[],nohistory:[],danger:[],safe:[],nosale:[],printwarehouse:[],etc:[]};
+      RAW.forEach(p => { if (typeof classifyItem === 'function') classifyItem(p); });
+      buildHeader();
+      render();
+    } else {
+      // 정상 데이터 — 기존대로 processData
+      await processData(data.products);
+    }
   } catch (e) {
     // 에러
     if(bar) bar.style.cssText = 'margin-bottom:8px;padding:10px 16px;border-radius:8px;display:flex;align-items:center;justify-content:space-between;background:#fef2f2;border:1px solid #fecaca';
