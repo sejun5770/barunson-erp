@@ -595,12 +595,17 @@ async function reloadProductInfoFromDB() {
   try {
     const products = await db.prepare("SELECT product_code, material_code, material_name, cut_spec, jopan, paper_maker, product_spec, thomson, envelope, seari, laser, cutting, silk FROM products").all();
     let ppv = [];
-    try { ppv = await db.prepare('SELECT product_code, process_type, vendor_name FROM product_post_vendor').all(); } catch(_) {}
+    try { ppv = await db.prepare('SELECT product_code, process_type, vendor_name, step_order FROM product_post_vendor ORDER BY product_code, step_order').all(); } catch(_) {}
     const ppvByCode = {};
+    const ppvStepsByCode = {};
     for (const r of ppv) {
       if (!r.product_code) continue;
       if (!ppvByCode[r.product_code]) ppvByCode[r.product_code] = {};
-      if (r.process_type && r.vendor_name) ppvByCode[r.product_code][r.process_type] = r.vendor_name;
+      if (!ppvStepsByCode[r.product_code]) ppvStepsByCode[r.product_code] = [];
+      if (r.process_type && r.vendor_name) {
+        ppvByCode[r.product_code][r.process_type] = r.vendor_name;
+        ppvStepsByCode[r.product_code].push({ step: r.step_order || 1, process: r.process_type, vendor: r.vendor_name });
+      }
     }
     // 후공정 타입 목록 (이 키들은 product_post_vendor에서만 관리)
     let postProcessTypes = ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼','접지','단면접착','코팅'];
@@ -638,6 +643,10 @@ async function reloadProductInfoFromDB() {
     for (const [code, ptMap] of Object.entries(ppvByCode)) {
       if (!out[code]) out[code] = {};
       for (const [pt, vn] of Object.entries(ptMap)) out[code][pt] = vn;
+      // step_order 기반 정렬된 후공정 체인 (_steps)
+      if (ppvStepsByCode[code]?.length) {
+        out[code]._steps = ppvStepsByCode[code].sort((a, b) => a.step - b.step);
+      }
     }
     productInfoCache = out;
     console.log(`[product_info] DB 재로드 완료: ${Object.keys(out).length}개 품목`);
@@ -6919,11 +6928,15 @@ async function handleRequest(req, res) {
         it.cut = info['절'] || '';
         it.imposition = info['조판'] || '';
         it.product_spec = info['제품사양'] || it.spec || '';
-        // 품목별 후공정 체인 (순서대로) — 숫자만 있는 값은 업체명이 아니므로 제외
-        const itemSteps = [];
-        postCols.forEach(c => {
-          if (info[c] && info[c] !== '0' && !/^[\d,.]+$/.test(String(info[c]).trim())) itemSteps.push({ p: c, v: info[c] });
-        });
+        // 품목별 후공정 체인 — _steps(step_order) 우선, 없으면 postCols 순서 fallback
+        let itemSteps = [];
+        if (info._steps && info._steps.length) {
+          itemSteps = info._steps.map(s => ({ p: s.process, v: s.vendor }));
+        } else {
+          postCols.forEach(c => {
+            if (info[c] && info[c] !== '0' && !/^[\d,.]+$/.test(String(info[c]).trim())) itemSteps.push({ p: c, v: info[c] });
+          });
+        }
         it.first_process = itemSteps.length ? itemSteps[0].p : '';
         it.first_process_vendor = itemSteps.length ? itemSteps[0].v : '';
         it.process_chain_full = itemSteps.map(s => s.v + '(' + s.p + ')').join(' → ');
@@ -8805,14 +8818,20 @@ async function handleRequest(req, res) {
         const postCols = await getPostProcessTypes();
         // 첫 번째 품목 기준으로 후공정 체인 구성
         const info = pInfo[items[0].product_code] || {};
-        const chainSteps = [];
-        let stepNum = 1;
-        postCols.forEach(col => {
-          if (info[col] && info[col] !== '0') {
-            chainSteps.push({ step: stepNum, process: col, vendor: info[col] });
-            stepNum++;
-          }
-        });
+        let chainSteps = [];
+        // _steps가 있으면 step_order 기반 (product_post_vendor 직접 사용)
+        if (info._steps && info._steps.length) {
+          chainSteps = info._steps.map((s, i) => ({ step: i + 1, process: s.process, vendor: s.vendor }));
+        } else {
+          // fallback: postCols 순서로 빌드
+          let stepNum = 1;
+          postCols.forEach(col => {
+            if (info[col] && info[col] !== '0') {
+              chainSteps.push({ step: stepNum, process: col, vendor: info[col] });
+              stepNum++;
+            }
+          });
+        }
         if (chainSteps.length > 0) {
           // 현재 PO의 vendor가 체인의 몇 번째 step인지 확인
           const myStep = chainSteps.findIndex(s => {
