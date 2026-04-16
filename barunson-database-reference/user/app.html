@@ -8849,7 +8849,7 @@ async function loadXerpInventory(forceRefresh) {
 // ===== 재고현황 페이지 진입 =====
 function loadInventoryPage(){
   // 캐시된 데이터가 있으면 재로드 없이 바로 렌더링 (단, 정규화된 데이터만)
-  if (RAW && RAW.length > 0 && RAW[0]['제품코드']) {
+  if (RAW && RAW.length > 0 && (RAW[0]['제품코드'] || RAW[0]['품목코드'])) {
     updateOriginCounts();
     updateStatusCounts();
     updatePendingCount();
