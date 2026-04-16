@@ -601,13 +601,24 @@ async function reloadProductInfoFromDB() {
       if (!ppvByCode[r.product_code]) ppvByCode[r.product_code] = {};
       if (r.process_type && r.vendor_name) ppvByCode[r.product_code][r.process_type] = r.vendor_name;
     }
-    // 레거시 JSON을 기본값으로 두고 DB가 override
+    // 후공정 타입 목록 (이 키들은 product_post_vendor에서만 관리)
+    let postProcessTypes = ['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공','우찌누끼','접지','단면접착'];
+    try { const pt = await getPostProcessTypes(); if (pt.length) postProcessTypes = pt; } catch(_) {}
+    const postTypeSet = new Set(postProcessTypes);
+
+    // 레거시 JSON은 기본정보(원자재코드 등)의 폴백으로만 사용 — 후공정 필드는 무시
     let legacy = {};
     try { legacy = JSON.parse(fs.readFileSync(path.join(__dir, 'product_info.json'), 'utf8')); } catch(_) {}
     const out = {};
-    // 먼저 legacy 복사 (DB에 없는 코드/필드 보존)
-    for (const code in legacy) { out[code] = Object.assign({}, legacy[code]); }
-    // DB 값으로 override
+    // 레거시에서 기본정보만 복사 (후공정 키는 제외)
+    for (const code in legacy) {
+      const row = {};
+      for (const [k, v] of Object.entries(legacy[code] || {})) {
+        if (!postTypeSet.has(k)) row[k] = v;
+      }
+      out[code] = row;
+    }
+    // DB products 테이블로 override (단일 소스)
     for (const p of products) {
       const code = p.product_code;
       if (!code) continue;
@@ -618,14 +629,11 @@ async function reloadProductInfoFromDB() {
       if (p.cut_spec !== null && p.cut_spec !== undefined && p.cut_spec !== '') row['절'] = String(p.cut_spec);
       if (p.jopan !== null && p.jopan !== undefined && p.jopan !== '') row['조판'] = String(p.jopan);
       if (p.product_spec) row['제품사양'] = p.product_spec;
-      // products 테이블의 영문 후공정 컬럼 반영
-      for (const [col, kr] of Object.entries(_POST_COL_TO_KR)) {
-        const v = p[col];
-        if (v !== null && v !== undefined && String(v).trim() !== '') row[kr] = String(v).trim();
-      }
+      // 레거시 후공정 키가 남아있으면 제거
+      for (const pt of postProcessTypes) { delete row[pt]; }
       out[code] = row;
     }
-    // product_post_vendor가 최종 override (사용자가 품목관리에서 바꾼 값)
+    // product_post_vendor가 유일한 후공정 소스 (사용자가 품목관리에서 관리)
     for (const [code, ptMap] of Object.entries(ppvByCode)) {
       if (!out[code]) out[code] = {};
       for (const [pt, vn] of Object.entries(ptMap)) out[code][pt] = vn;
