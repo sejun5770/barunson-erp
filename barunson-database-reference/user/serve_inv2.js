@@ -4455,6 +4455,9 @@ async function handleRequest(req, res) {
 
   if (pathname === '/api/products' && method === 'POST') {
     const b = await readJSON(req);
+    // product_code 정제: trim + 보이지 않는 유니코드 제거 (엑셀 복사/XERP nchar 패딩 유입 차단)
+    b.product_code = (b.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
+    if (b.temp_code) b.temp_code = (b.temp_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
     if (!b.product_code) { fail(res, 400, 'product_code required'); return; }
     const entity = (b.legal_entity === 'dd') ? 'dd' : 'barunson';
     // 생산지 정규화 (DD의 "예지가/코리아/마커엘엔피" 변형값 → "한국")
@@ -4590,7 +4593,7 @@ async function handleRequest(req, res) {
     // mode: 'upsert'(기본, 전부반영) | 'insert_only'(신규만 등록, 기존은 skip)
     const mode = body.mode === 'insert_only' ? 'insert_only' : 'upsert';
     if (!items.length) { fail(res, 400, 'items required'); return; }
-    // 서버측 방어: 생산지 변형값 정규화
+    // 서버측 방어: 생산지 변형값 정규화 + product_code 공백/유니코드 제거
     const _normOriginBulk = (v) => {
       const s = String(v||'').trim();
       if (!s) return '한국';
@@ -4599,7 +4602,12 @@ async function handleRequest(req, res) {
           s.indexOf('코리아') === 0 || s.indexOf('예지가') === 0 || s.indexOf('마커') === 0) return '한국';
       return s;
     };
-    for (const it of items) { if (it) it.origin = _normOriginBulk(it.origin); }
+    const _cleanCode = (v) => (v || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
+    for (const it of items) {
+      if (!it) continue;
+      it.origin = _normOriginBulk(it.origin);
+      it.product_code = _cleanCode(it.product_code);
+    }
 
     const upsert = _hasEntity.products
       ? db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, memo, op_category, legal_entity)
@@ -8679,6 +8687,10 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const items = body.items || [];
     if (!items.length) { fail(res, 400, '항목이 없습니다'); return; }
+    // 품목코드 정제
+    for (const it of items) {
+      if (it && it.product_code) it.product_code = String(it.product_code).replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
+    }
 
     // vendor_name별 그룹핑
     const vendorGroups = {};
@@ -8761,6 +8773,10 @@ async function handleRequest(req, res) {
   if (pathname === '/api/po' && method === 'POST') {
     const body = await readJSON(req);
     const items = body.items || [];
+    // 품목코드 정제: 공백/보이지 않는 유니코드 문자 제거 (XERP 재고 매칭 보호)
+    for (const it of items) {
+      if (it && it.product_code) it.product_code = String(it.product_code).replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
+    }
     const totalQty = items.reduce((s, it) => s + (it.ordered_qty || 0), 0);
 
     // vendor_id로 vendor_name 자동 조회
