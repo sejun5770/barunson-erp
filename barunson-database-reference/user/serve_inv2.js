@@ -4802,10 +4802,14 @@ async function handleRequest(req, res) {
       }
       const productCodes = registeredProducts.map(p => p.product_code).filter(Boolean);
       // IN절용 (SQL Injection 방지: 영숫자_만 허용)
-      const safeCodeList = productCodes
-        .filter(c => /^[A-Za-z0-9_\-]+$/.test(c))
-        .map(c => `'${c}'`).join(',');
-      if (!safeCodeList) return [];
+      const safeCodes = productCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
+      if (!safeCodes.length) return [];
+      // readonly 계정 10초 쿼리 타임아웃 대응: 100개씩 배치로 분할하여 병렬 실행
+      const CHUNK_SIZE = 100;
+      const codeChunks = [];
+      for (let i = 0; i < safeCodes.length; i += CHUNK_SIZE) {
+        codeChunks.push(safeCodes.slice(i, i + CHUNK_SIZE));
+      }
 
       // DB 풀 + SiteCode 분기
       const dbName = isDd ? 'BHC' : 'XERP';
@@ -4823,54 +4827,69 @@ async function handleRequest(req, res) {
 
       try {
         if (!workPool) throw new Error('XERP pool not connected');
-        // 1. 현재고
-        const invResult = await workPool.request().query(`
-          SELECT RTRIM(ItemCode) AS item_code, SUM(OhQty) AS oh_qty
-          FROM mmInventory WITH (NOLOCK)
-          WHERE SiteCode = '${siteCode}' AND RTRIM(ItemCode) IN (${safeCodeList})
-          GROUP BY RTRIM(ItemCode)
-        `);
+        // 1. 현재고 — 100개씩 배치 병렬 조회 (readonly 10초 타임아웃 대응)
         const invMap = {};
-        for (const r of invResult.recordset) {
-          invMap[(r.item_code || '').trim().toUpperCase()] = Math.round(r.oh_qty || 0);
-        }
-
-        // 2. 최근 3개월 출고
-        const today = new Date();
-        const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
-        const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
-        const shipResult = await workPool.request()
-          .input('start3m', sql.NChar(16), fmt(start3m))
-          .input('today', sql.NChar(16), fmt(today))
-          .query(`
-            SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty
-            FROM mmInoutItem WITH (NOLOCK)
-            WHERE SiteCode = '${siteCode}' AND InoutGubun = 'SO'
-              AND InoutDate >= @start3m AND InoutDate < @today
-              AND RTRIM(ItemCode) IN (${safeCodeList})
+        const invResults = await Promise.all(codeChunks.map(chunk => {
+          const inClause = chunk.map(c => `'${c}'`).join(',');
+          return workPool.request().query(`
+            SELECT RTRIM(ItemCode) AS item_code, SUM(OhQty) AS oh_qty
+            FROM mmInventory WITH (NOLOCK)
+            WHERE SiteCode = '${siteCode}' AND RTRIM(ItemCode) IN (${inClause})
             GROUP BY RTRIM(ItemCode)
           `);
-        const shipMap = {};
-        for (const r of shipResult.recordset) {
-          const code = (r.item_code || '').trim().toUpperCase();
-          if (code) {
-            const total = Math.round(r.total_qty || 0);
-            shipMap[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
+        }));
+        for (const r of invResults) {
+          for (const row of r.recordset) {
+            invMap[(row.item_code || '').trim().toUpperCase()] = Math.round(row.oh_qty || 0);
           }
         }
 
-        // 3. 품목명 (S2_Card) — 한 번만 조회해도 됨, 바른손 모드에서만 의미있음
+        // 2. 최근 3개월 출고 — 100개씩 배치 병렬 조회
+        const today = new Date();
+        const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
+        const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+        const shipMap = {};
+        const shipResults = await Promise.all(codeChunks.map(chunk => {
+          const inClause = chunk.map(c => `'${c}'`).join(',');
+          return workPool.request()
+            .input('start3m', sql.NChar(16), fmt(start3m))
+            .input('today', sql.NChar(16), fmt(today))
+            .query(`
+              SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty
+              FROM mmInoutItem WITH (NOLOCK)
+              WHERE SiteCode = '${siteCode}' AND InoutGubun = 'SO'
+                AND InoutDate >= @start3m AND InoutDate < @today
+                AND RTRIM(ItemCode) IN (${inClause})
+              GROUP BY RTRIM(ItemCode)
+            `);
+        }));
+        for (const r of shipResults) {
+          for (const row of r.recordset) {
+            const code = (row.item_code || '').trim().toUpperCase();
+            if (code) {
+              const total = Math.round(row.total_qty || 0);
+              shipMap[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
+            }
+          }
+        }
+
+        // 3. 품목명 (S2_Card) — 100개씩 배치 병렬 조회 (바른손 모드만)
         let itemNames = {};
         if (!isDd) {
           try {
             const bar1Pool = new sql.ConnectionPool({ ...xerpConfig, database: 'bar_shop1' });
             await bar1Pool.connect();
-            const nameResult = await bar1Pool.request().query(
-              `SELECT Card_Code, Card_Name FROM S2_Card WHERE RTRIM(Card_Code) IN (${safeCodeList})`
-            );
-            nameResult.recordset.forEach(r => {
-              itemNames[(r.Card_Code || '').trim().toUpperCase()] = (r.Card_Name || '').trim();
-            });
+            const nameResults = await Promise.all(codeChunks.map(chunk => {
+              const inClause = chunk.map(c => `'${c}'`).join(',');
+              return bar1Pool.request().query(
+                `SELECT Card_Code, Card_Name FROM S2_Card WHERE RTRIM(Card_Code) IN (${inClause})`
+              );
+            }));
+            for (const r of nameResults) {
+              r.recordset.forEach(row => {
+                itemNames[(row.Card_Code || '').trim().toUpperCase()] = (row.Card_Name || '').trim();
+              });
+            }
             await bar1Pool.close();
           } catch (e) { console.warn('품목명 로드 실패:', e.message); }
         }
@@ -5104,27 +5123,38 @@ async function handleRequest(req, res) {
       const cleanCode = s => (s || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
       const cleanedCodes = registeredProductsRaw.map(r => cleanCode(r.product_code)).filter(Boolean);
       const registeredCodes = new Set(cleanedCodes);
-      const safeCodeList = cleanedCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).map(c => `'${c}'`).join(',');
-      if (!safeCodeList) { ok(res, {}); return; }
+      const safeCodes = cleanedCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
+      if (!safeCodes.length) { ok(res, {}); return; }
 
-      const result = await xerpPool.request()
-        .input('start3m', sql.NChar(16), fmt(start3m))
-        .input('today', sql.NChar(16), fmt(today))
-        .query(`
-          SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty, COUNT(DISTINCT RTRIM(InoutDate)) AS ship_days
-          FROM mmInoutItem WITH (NOLOCK)
-          WHERE SiteCode = 'BK10' AND InoutGubun = 'SO'
-            AND InoutDate >= @start3m AND InoutDate < @today
-            AND RTRIM(ItemCode) IN (${safeCodeList})
-          GROUP BY RTRIM(ItemCode)
-        `);
+      // readonly 10초 타임아웃 대응: 100개씩 배치 병렬 조회
+      const CHUNK_SIZE = 100;
+      const codeChunks = [];
+      for (let i = 0; i < safeCodes.length; i += CHUNK_SIZE) {
+        codeChunks.push(safeCodes.slice(i, i + CHUNK_SIZE));
+      }
+      const batchResults = await Promise.all(codeChunks.map(chunk => {
+        const inClause = chunk.map(c => `'${c}'`).join(',');
+        return xerpPool.request()
+          .input('start3m', sql.NChar(16), fmt(start3m))
+          .input('today', sql.NChar(16), fmt(today))
+          .query(`
+            SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty, COUNT(DISTINCT RTRIM(InoutDate)) AS ship_days
+            FROM mmInoutItem WITH (NOLOCK)
+            WHERE SiteCode = 'BK10' AND InoutGubun = 'SO'
+              AND InoutDate >= @start3m AND InoutDate < @today
+              AND RTRIM(ItemCode) IN (${inClause})
+            GROUP BY RTRIM(ItemCode)
+          `);
+      }));
 
       const usage = {};
-      for (const row of result.recordset) {
-        const code = (row.item_code || '').trim();
-        if (!code || !registeredCodes.has(code)) continue;
-        const total = Math.round(row.total_qty || 0);
-        usage[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
+      for (const r of batchResults) {
+        for (const row of r.recordset) {
+          const code = (row.item_code || '').trim();
+          if (!code || !registeredCodes.has(code)) continue;
+          const total = Math.round(row.total_qty || 0);
+          usage[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
+        }
       }
 
       xerpUsageCache = usage;
@@ -7038,15 +7068,29 @@ async function handleRequest(req, res) {
             const codes = new Set();
             for (const po of rows) { for (const it of (po.items||[])) { if (it.product_code) codes.add((it.product_code||'').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g,'').trim()); } }
             if (codes.size > 0) {
-              const safeList = [...codes].filter(c => c && /^[A-Za-z0-9_\-]+$/.test(c)).map(c => `'${c}'`).join(',');
-              if (safeList) {
-                const invR = await xerpPool.request().query(`SELECT RTRIM(ItemCode) AS code, SUM(OhQty) AS qty FROM mmInventory WITH(NOLOCK) WHERE SiteCode='BK10' AND RTRIM(ItemCode) IN (${safeList}) GROUP BY RTRIM(ItemCode)`);
-                for (const r of (invR.recordset||[])) { invMap[r.code.trim()] = { stock: Math.round(r.qty||0), monthly: 0 }; }
+              const safeArr = [...codes].filter(c => c && /^[A-Za-z0-9_\-]+$/.test(c));
+              if (safeArr.length) {
+                // readonly 10초 타임아웃 대응: 100개씩 배치 병렬
+                const CHUNK = 100;
+                const chunks = [];
+                for (let i = 0; i < safeArr.length; i += CHUNK) chunks.push(safeArr.slice(i, i + CHUNK));
+                const invResults = await Promise.all(chunks.map(ch => {
+                  const inClause = ch.map(c => `'${c}'`).join(',');
+                  return xerpPool.request().query(`SELECT RTRIM(ItemCode) AS code, SUM(OhQty) AS qty FROM mmInventory WITH(NOLOCK) WHERE SiteCode='BK10' AND RTRIM(ItemCode) IN (${inClause}) GROUP BY RTRIM(ItemCode)`);
+                }));
+                for (const invR of invResults) {
+                  for (const r of (invR.recordset||[])) { invMap[r.code.trim()] = { stock: Math.round(r.qty||0), monthly: 0 }; }
+                }
                 // 월출고
                 const today = new Date(); const s3m = new Date(today); s3m.setMonth(s3m.getMonth()-3);
                 const fmt = d => d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
-                const shipR = await xerpPool.request().input('s3',sql.NChar(16),fmt(s3m)).input('t',sql.NChar(16),fmt(today)).query(`SELECT RTRIM(ItemCode) AS code, SUM(InoutQty) AS qty FROM mmInoutItem WITH(NOLOCK) WHERE SiteCode='BK10' AND InoutGubun='SO' AND InoutDate>=@s3 AND InoutDate<@t AND RTRIM(ItemCode) IN (${safeList}) GROUP BY RTRIM(ItemCode)`);
-                for (const r of (shipR.recordset||[])) { const c=r.code.trim(); if(invMap[c]) invMap[c].monthly = Math.round((r.qty||0)/3); }
+                const shipResults = await Promise.all(chunks.map(ch => {
+                  const inClause = ch.map(c => `'${c}'`).join(',');
+                  return xerpPool.request().input('s3',sql.NChar(16),fmt(s3m)).input('t',sql.NChar(16),fmt(today)).query(`SELECT RTRIM(ItemCode) AS code, SUM(InoutQty) AS qty FROM mmInoutItem WITH(NOLOCK) WHERE SiteCode='BK10' AND InoutGubun='SO' AND InoutDate>=@s3 AND InoutDate<@t AND RTRIM(ItemCode) IN (${inClause}) GROUP BY RTRIM(ItemCode)`);
+                }));
+                for (const shipR of shipResults) {
+                  for (const r of (shipR.recordset||[])) { const c=r.code.trim(); if(invMap[c]) invMap[c].monthly = Math.round((r.qty||0)/3); }
+                }
               }
             }
           }
