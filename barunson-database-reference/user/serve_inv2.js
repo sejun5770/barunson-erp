@@ -5149,8 +5149,12 @@ async function handleRequest(req, res) {
           try {
             const req = workPool.request();
             req.timeout = 7000;
+            // ★ 현재고 계산 수정 (2026-04): XERP 스마트재고현황과 일치시키려면 양수 OhQty 만 SUM.
+            //   mmInventory 는 lot/location 별 여러 row 로 저장되며, 예약/조정/불량 lot 은 음수 OhQty 로 존재.
+            //   전체 SUM 하면 음수로 왜곡됨. 양수만 SUM = 실제 현재고 (BI202: -8,706 → 27,474 예상).
             const r = await req.query(`
-              SELECT RTRIM(ItemCode) AS item_code, SUM(OhQty) AS oh_qty
+              SELECT RTRIM(ItemCode) AS item_code,
+                     SUM(CASE WHEN OhQty > 0 THEN OhQty ELSE 0 END) AS oh_qty
               FROM mmInventory WITH (NOLOCK)
               WHERE SiteCode = '${siteCode}' AND RTRIM(ItemCode) IN (${inClause})
               GROUP BY RTRIM(ItemCode)
@@ -5427,14 +5431,26 @@ async function handleRequest(req, res) {
       await ensureXerpPool();
       if (!xerpPool) { out.xerp_error = 'XERP 풀 미연결'; }
       else {
-        // 2) XERP mmInventory - 정확 매칭
+        // 2) XERP mmInventory - 정확 매칭 (모든 row + 모든 column)
         const exact = await xerpPool.request().query(`
-          SELECT TOP 5 RTRIM(ItemCode) AS item_code, SiteCode, OhQty,
-                 LEN(ItemCode) AS len_ic, DATALENGTH(ItemCode) AS bytes_ic
-          FROM mmInventory WITH (NOLOCK)
+          SELECT * FROM mmInventory WITH (NOLOCK)
           WHERE RTRIM(ItemCode) = '${cleanCode.replace(/'/g, "''")}'
         `);
         out.xerp_inventory_exact = exact.recordset;
+        // 집계 방식별 비교
+        const rows = exact.recordset || [];
+        const sumAll = rows.reduce((s,r) => s + Number(r.OhQty || 0), 0);
+        const sumPositiveOnly = rows.filter(r => Number(r.OhQty || 0) > 0).reduce((s,r) => s + Number(r.OhQty || 0), 0);
+        const sumByBK10 = rows.filter(r => (r.SiteCode || '').trim() === 'BK10').reduce((s,r) => s + Number(r.OhQty || 0), 0);
+        const sumBK10PositiveOnly = rows.filter(r => (r.SiteCode || '').trim() === 'BK10' && Number(r.OhQty || 0) > 0).reduce((s,r) => s + Number(r.OhQty || 0), 0);
+        out.xerp_inventory_summary = {
+          row_count: rows.length,
+          sites: [...new Set(rows.map(r => (r.SiteCode || '').trim()))],
+          sum_all: sumAll,                              // 전체 rows SUM (저희 현재 방식)
+          sum_positive_only: sumPositiveOnly,           // 양수 rows만 SUM
+          sum_bk10_all: sumBK10PositiveOnly,            // BK10만 + 양수만
+          sum_bk10_including_negative: sumByBK10        // BK10만 (음수 포함)
+        };
 
         // 3) XERP mmInventory - LIKE 매칭 (prefix/suffix 차이 확인)
         const like = await xerpPool.request().query(`
@@ -5871,9 +5887,10 @@ async function handleRequest(req, res) {
       // 1) 기간 입출고 + 품목명 (단일 쿼리로 최적화)
       // 품목명: 기간 데이터에서 MAX(ItemName)으로 가져오되, 빈 것은 나중에 보충
       // 2) 현재고 (mmInventory — 76K건, 빠름)
+      // ★ 양수 OhQty 만 SUM — XERP 스마트재고현황과 일치 (음수 예약/조정 lot 제외)
       const invResult = await xerpPool.request().query(`
         SELECT RTRIM(ItemCode) AS ic, RTRIM(WhCode) AS wh,
-               SUM(ISNULL(OhQty,0)) AS stock_qty
+               SUM(CASE WHEN ISNULL(OhQty,0) > 0 THEN OhQty ELSE 0 END) AS stock_qty
         FROM mmInventory WITH (NOLOCK)
         WHERE SiteCode = 'BK10'
         GROUP BY RTRIM(ItemCode), RTRIM(WhCode)
@@ -7819,7 +7836,8 @@ async function handleRequest(req, res) {
             if (codes.size > 0) {
               const safeList = [...codes].filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).map(c => `'${c}'`).join(',');
               if (safeList) {
-                const invR = await xerpPool.request().query(`SELECT RTRIM(ItemCode) AS code, SUM(OhQty) AS qty FROM mmInventory WITH(NOLOCK) WHERE SiteCode='BK10' AND RTRIM(ItemCode) IN (${safeList}) GROUP BY RTRIM(ItemCode)`);
+                // ★ 양수 OhQty 만 SUM — XERP 스마트재고현황과 일치 (음수 예약/조정 lot 제외)
+                const invR = await xerpPool.request().query(`SELECT RTRIM(ItemCode) AS code, SUM(CASE WHEN OhQty > 0 THEN OhQty ELSE 0 END) AS qty FROM mmInventory WITH(NOLOCK) WHERE SiteCode='BK10' AND RTRIM(ItemCode) IN (${safeList}) GROUP BY RTRIM(ItemCode)`);
                 for (const r of (invR.recordset||[])) { invMap[r.code.trim()] = { stock: Math.round(r.qty||0), monthly: 0 }; }
                 // 월출고
                 const today = new Date(); const s3m = new Date(today); s3m.setMonth(s3m.getMonth()-3);
