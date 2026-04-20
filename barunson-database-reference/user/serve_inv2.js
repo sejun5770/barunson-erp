@@ -5048,6 +5048,77 @@ async function handleRequest(req, res) {
   }
 
   // ════════════════════════════════════════════════════════════════════
+  //  [진단] XERP ↔ 로컬 제품코드 매칭 확인
+  //  GET /api/debug/xerp-match?code=1107RE
+  //  - 로컬 products 에서 해당 코드 조회
+  //  - XERP mmInventory / mmInoutItem 원시 쿼리 (단일 코드)
+  //  - LIKE 매칭으로 유사 코드도 함께 검색 (prefix/pad 차이 찾기)
+  // ════════════════════════════════════════════════════════════════════
+  if (pathname === '/api/debug/xerp-match' && method === 'GET') {
+    const code = (parsed.searchParams.get('code') || '').trim();
+    if (!code) { fail(res, 400, 'code 파라미터 필요'); return; }
+    const cleanCode = code.replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
+
+    const out = { input: code, cleaned: cleanCode };
+    try {
+      // 1) 로컬 products
+      const localRows = await db.prepare("SELECT product_code, product_name, origin, status FROM products WHERE product_code = ? OR product_code LIKE ?").all(cleanCode, '%' + cleanCode + '%');
+      out.local_products = localRows.map(r => ({
+        product_code: r.product_code,
+        code_chars: Array.from(r.product_code || '').map(ch => ch.charCodeAt(0)).join(','),
+        product_name: r.product_name,
+        origin: r.origin,
+        status: r.status
+      }));
+    } catch(e) { out.local_error = e.message; }
+
+    try {
+      await ensureXerpPool();
+      if (!xerpPool) { out.xerp_error = 'XERP 풀 미연결'; }
+      else {
+        // 2) XERP mmInventory - 정확 매칭
+        const exact = await xerpPool.request().query(`
+          SELECT TOP 5 RTRIM(ItemCode) AS item_code, SiteCode, OhQty,
+                 LEN(ItemCode) AS len_ic, DATALENGTH(ItemCode) AS bytes_ic
+          FROM mmInventory WITH (NOLOCK)
+          WHERE RTRIM(ItemCode) = '${cleanCode.replace(/'/g, "''")}'
+        `);
+        out.xerp_inventory_exact = exact.recordset;
+
+        // 3) XERP mmInventory - LIKE 매칭 (prefix/suffix 차이 확인)
+        const like = await xerpPool.request().query(`
+          SELECT TOP 10 RTRIM(ItemCode) AS item_code, SiteCode, OhQty,
+                 LEN(ItemCode) AS len_ic
+          FROM mmInventory WITH (NOLOCK)
+          WHERE ItemCode LIKE '%${cleanCode.replace(/'/g, "''")}%'
+            AND RTRIM(ItemCode) <> '${cleanCode.replace(/'/g, "''")}'
+        `);
+        out.xerp_inventory_like = like.recordset;
+
+        // 4) XERP mmInoutItem - 최근 3개월 출고 (정확 매칭)
+        const today = new Date();
+        const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
+        const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+        const ship = await xerpPool.request()
+          .input('s', sql.NChar(16), fmt(start3m))
+          .input('t', sql.NChar(16), fmt(today))
+          .query(`
+            SELECT TOP 5 RTRIM(ItemCode) AS item_code, InoutDate, InoutQty, InoutGubun
+            FROM mmInoutItem WITH (NOLOCK)
+            WHERE RTRIM(ItemCode) = '${cleanCode.replace(/'/g, "''")}'
+              AND InoutDate >= @s AND InoutDate < @t
+              AND InoutGubun = 'SO'
+            ORDER BY InoutDate DESC
+          `);
+        out.xerp_shipment_exact = ship.recordset;
+      }
+    } catch(e) { out.xerp_error = e.message; }
+
+    ok(res, out);
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
   //  XERP 입고이력 품목코드 API (발주이력 판별용)
   // ════════════════════════════════════════════════════════════════════
 
