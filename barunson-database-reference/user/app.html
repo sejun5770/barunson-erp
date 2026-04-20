@@ -2789,8 +2789,8 @@ function closeMegaMenu() { /* no-op */ }
     <div style="padding:10px 20px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--border)">
       <button class="btn btn-sm" onclick="poTargetCheckAll(true)">전체선택</button>
       <button class="btn btn-sm" onclick="poTargetCheckAll(false)">선택취소</button>
-      <button class="btn btn-sm" onclick="poTargetAutoFillQty()">부족수량 자동입력</button>
-      <span style="font-size:11px;color:#64748b;margin-left:4px">※ 발주수량은 <b style="color:#2563eb">연(R)</b> 단위 입력 · 낱개수는 자동 환산</span>
+      <button class="btn btn-sm" onclick="poTargetAutoFillQty()">발주필요수량 자동입력</button>
+      <span style="font-size:11px;color:#64748b;margin-left:4px">※ 발주수량은 <b style="color:#2563eb">연(R)</b> 단위 · 낱개수 자동 환산</span>
       <div style="flex:1"></div>
       <span id="poTargetSummary" style="font-size:12px;color:#1e40af;font-weight:600">선택 0건</span>
       <button class="btn btn-sm btn-primary" onclick="poTargetAddToOrder()" style="font-weight:600">선택품목 발주서에 추가</button>
@@ -2800,12 +2800,15 @@ function closeMegaMenu() { /* no-op */ }
         <thead style="position:sticky;top:0;background:#f8fafc;z-index:1">
           <tr>
             <th style="width:32px;text-align:center"><input type="checkbox" id="poTargetCheckAllBox" onchange="poTargetCheckAll(this.checked)"></th>
-            <th>상태</th>
-            <th>제품코드 / 품목명</th>
-            <th style="text-align:right">재고 · 월출고</th>
-            <th style="text-align:right">부족(R)</th>
-            <th style="text-align:right;width:150px">발주수량(R) → 낱개</th>
-            <th>거래처</th>
+            <th>제품코드</th>
+            <th>품목명</th>
+            <th>용지명</th>
+            <th style="text-align:right">가용재고</th>
+            <th style="text-align:right">월출고</th>
+            <th style="text-align:right">일평균</th>
+            <th style="text-align:right">가용일수</th>
+            <th style="text-align:right">미입고</th>
+            <th style="text-align:right;width:170px">발주필요수량 (R → 낱개)</th>
           </tr>
         </thead>
         <tbody id="poTargetBody"></tbody>
@@ -8512,73 +8515,73 @@ function renderPOTargets() {
   items.forEach(p => {
     const code = p['제품코드'] || p['품목코드'] || '';
     const name = p['품목명'] || p['제품명'] || '';
-    const brand = p['브랜드'] || '';
-    const stock = Number(p['현재고'] || 0);
     const avail = Number(p['가용재고'] || p['현재고'] || 0);
     const monthly = Number(p['월출고'] || p['월사용량'] || 0);
-    const shortage = Number(p['부족수량'] || 0);
+    const daily = monthly > 0 ? Math.round(monthly / 30) : 0;
+    // 가용일수: 가용재고 / 일평균. 일평균이 0이면 ∞ (표시:-)
+    const daysRemain = daily > 0 ? Math.floor(avail / daily) : null;
+    // 미입고(진행중 PO 잔량)
+    const pending = Number(p._pendingQty || p.pending_qty || 0);
+
+    // 위험도 (행 배경색)
     const isUrgent = avail <= 0 || (monthly > 0 && avail < monthly * 0.5);
     const isDanger = !isUrgent && monthly > 0 && avail < monthly * 1.5;
-    const statusBadge = isUrgent ? '<span style="background:#dc2626;color:#fff;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700">긴급</span>'
-      : isDanger ? '<span style="background:#f59e0b;color:#fff;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700">위험</span>'
-      : '<span style="background:#22c55e;color:#fff;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700">안전</span>';
 
     const info = productInfo[code] || {};
-    const vendor = info['제지사'] || info['거래처'] || '';
+    const paperName = info['원재료용지명'] || info['용지명'] || '-';
     const checked = _poTargetChecked[code] ? 'checked' : '';
-    // _poTargetQty 는 낱개(매) 단위로 저장됨 (저장 데이터 호환)
+
+    // _poTargetQty 는 낱개(매) 단위로 저장
     const qtyPieces = _poTargetQty[code] || 0;
-    // 낱개 → 연(R) 로 역환산해서 input에 표시
     const jeol = parseJeol(info['절']);
     const jopan = parseJeol(info['조판']);
     const canConvert = jeol > 0 && jopan > 0;
     const reamVal = (canConvert && qtyPieces > 0) ? (qtyPieces / 500 / jeol / jopan) : 0;
     const reamStr = reamVal > 0 ? (reamVal % 1 === 0 ? String(reamVal) : reamVal.toFixed(1)) : '';
 
-    // 부족수량(낱개) → R 환산
-    const shortagePieces = shortage > 0 ? shortage : (monthly > 0 ? Math.max(0, Math.ceil(monthly * 2 - avail)) : 0);
-    const shortageR = (canConvert && shortagePieces > 0) ? (shortagePieces / 500 / jeol / jopan) : 0;
-    const shortageRStr = shortageR > 0 ? (shortageR % 1 === 0 ? String(shortageR) : shortageR.toFixed(1)) + 'R' : '-';
-
-    // 재고·월출고 합쳐서 표시
-    const stockWarnColor = avail <= 0 ? '#dc2626' : avail < monthly ? '#f59e0b' : '#475569';
-    const stockCell = `
-      <div style="font-size:11px;line-height:1.3;text-align:right">
-        <span style="color:${stockWarnColor};font-weight:600">${avail.toLocaleString()}</span>
-        <span style="color:#94a3b8">/ 월 ${monthly.toLocaleString()}</span>
-      </div>`;
+    // 발주필요수량(낱개) — 기본 추천값 (2개월치 - 가용 - 미입고)
+    const shortage = Number(p['부족수량'] || 0);
+    const needPiecesRaw = shortage > 0
+      ? shortage
+      : (monthly > 0 ? Math.max(0, Math.ceil(monthly * 2 - avail - pending)) : 0);
+    const needR = (canConvert && needPiecesRaw > 0) ? (needPiecesRaw / 500 / jeol / jopan) : 0;
+    const needRStr = needR > 0 ? (needR % 1 === 0 ? String(needR) : needR.toFixed(1)) + 'R' : '-';
 
     // 낱개 preview (R 입력값 → 낱개)
     const piecesPreviewId = 'piecesPreview_' + code.replace(/[^a-zA-Z0-9]/g,'_');
     const piecesPreviewInitial = qtyPieces > 0 ? qtyPieces.toLocaleString() + '매' : (canConvert ? '—' : '연환산불가');
     const piecesColor = canConvert ? '#0369a1' : '#94a3b8';
 
-    // 제품코드+품목명 묶기
-    const codeName = `
-      <div style="line-height:1.3">
-        <div style="font-family:monospace;font-size:11px;font-weight:700;color:#0f172a">${esc(code)}</div>
-        <div style="font-size:12px;color:#475569;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(name)}</div>
-        ${brand ? `<div style="font-size:10px;color:#94a3b8">${esc(brand)}</div>` : ''}
-      </div>`;
+    // 색상
+    const availColor = avail <= 0 ? '#dc2626' : (monthly > 0 && avail < monthly) ? '#f59e0b' : '#0f172a';
+    const daysColor = daysRemain === null ? '#94a3b8'
+                    : daysRemain <= 15 ? '#dc2626'
+                    : daysRemain <= 30 ? '#f59e0b'
+                    : '#0f172a';
 
     html += `<tr style="${isUrgent?'background:#fef2f2':isDanger?'background:#fffbeb':''}">
       <td style="text-align:center"><input type="checkbox" ${checked} onchange="poTargetToggle('${code}',this.checked)"></td>
-      <td>${statusBadge}</td>
-      <td>${codeName}</td>
-      <td>${stockCell}</td>
-      <td style="text-align:right;color:#dc2626;font-weight:600;font-size:11px">${shortageRStr}</td>
+      <td style="font-family:monospace;font-size:11px;font-weight:700">${esc(code)}</td>
+      <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(name)}</td>
+      <td style="font-size:11px;color:#475569;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(paperName)}">${esc(paperName)}</td>
+      <td style="text-align:right;font-weight:600;color:${availColor}">${avail.toLocaleString()}</td>
+      <td style="text-align:right">${monthly.toLocaleString()}</td>
+      <td style="text-align:right;color:#64748b">${daily > 0 ? daily.toLocaleString() : '-'}</td>
+      <td style="text-align:right;font-weight:600;color:${daysColor}">${daysRemain === null ? '-' : (daysRemain + '일')}</td>
+      <td style="text-align:right;color:${pending > 0 ? '#2563eb' : '#94a3b8'}">${pending > 0 ? pending.toLocaleString() : '-'}</td>
       <td style="text-align:right">
         <div style="display:inline-flex;align-items:center;gap:4px;justify-content:flex-end">
           <input type="number" min="0" step="0.5" value="${reamStr}"
+                 placeholder="${canConvert ? '' : '낱개'}"
                  style="width:64px;text-align:right;padding:2px 4px;border:1px solid var(--border);border-radius:4px;font-size:12px"
                  onchange="poTargetSetQtyR('${code}',this.value)"
-                 title="${canConvert ? '연(R) 단위 입력 (0.5 가능)' : '절/조판 정보 없음 — 낱개 단위 입력'}">
+                 title="${canConvert ? `연(R) 단위 입력 (0.5 가능) · 추천: ${needRStr}` : '절/조판 정보 없음 — 낱개 단위 입력'}">
           <span style="font-size:11px;font-weight:600;color:#2563eb">R</span>
           <span style="font-size:10px;color:#94a3b8">→</span>
           <span id="${piecesPreviewId}" style="font-size:11px;color:${piecesColor};font-weight:600;min-width:60px;text-align:left">${piecesPreviewInitial}</span>
         </div>
+        ${needRStr !== '-' && !reamStr ? `<div style="font-size:10px;color:#94a3b8;margin-top:2px">추천 ${needRStr}</div>` : ''}
       </td>
-      <td style="font-size:11px;color:var(--text-muted)">${esc(vendor)}</td>
     </tr>`;
   });
   tbody.innerHTML = html;
