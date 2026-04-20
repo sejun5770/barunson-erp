@@ -5093,11 +5093,12 @@ async function handleRequest(req, res) {
   //              추가: 7분 이상 'running' 상태면 고스트로 판단하여 자동 정리 후 새로 시작.
   if (pathname === '/api/sync/xerp-inventory' && method === 'POST') {
     // 1) 오래된 running 자동 정리 (7분 이상)
+    // PG에서 started_at은 TEXT 컬럼(NOW()::text 저장)이라 ::timestamptz 캐스트 필요
     try {
-      const stale = await db.prepare("SELECT id, started_at FROM sync_log WHERE sync_type='xerp_inventory' AND status='running' AND started_at < datetime('now','localtime','-7 minutes')").all();
+      const stale = await db.prepare("SELECT id, started_at FROM sync_log WHERE sync_type='xerp_inventory' AND status='running' AND started_at::timestamptz < datetime('now','localtime','-7 minutes')").all();
       if (stale && stale.length) {
-        await db.prepare("UPDATE sync_log SET status='failed', error_msg=?, finished_at=datetime('now','localtime') WHERE sync_type='xerp_inventory' AND status='running' AND started_at < datetime('now','localtime','-7 minutes')").run('자동 정리 — 7분 초과 고스트 running');
-        console.warn('[sync] 고스트 running', stale.length, '건 자동 정리');
+        await db.prepare("UPDATE sync_log SET status='failed', error_msg=?, finished_at=datetime('now','localtime') WHERE sync_type='xerp_inventory' AND status='running' AND started_at::timestamptz < datetime('now','localtime','-7 minutes')").run('자동 정리 — 7분 초과 고스트 running');
+        console.warn('[sync] 고스트 running', stale.length, '건 자동 정리 — ids:', stale.map(s=>s.id).join(','));
       }
     } catch(e) { console.warn('[sync] stale cleanup 실패:', e.message); }
 
