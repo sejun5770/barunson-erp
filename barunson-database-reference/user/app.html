@@ -1838,6 +1838,7 @@ function closeMegaMenu() { /* no-op */ }
       </div>
     </div>
     <span id="erpSyncBadge" style="display:none;font-size:12px;padding:3px 10px;border-radius:12px;font-weight:500;white-space:nowrap"></span>
+    <span id="syncStatusBadge" style="font-size:11px;padding:3px 8px;border-radius:10px;background:#f1f5f9;color:#64748b">동기화 확인 중...</span>
     <button class="btn btn-primary btn-sm" onclick="syncAllDB()" id="refreshBtn">DB 동기화</button>
   </div>
 </div>
@@ -20204,33 +20205,128 @@ async function syncProductInfo() {
   }
 }
 
-// ===== 통합 DB 동기화 (DD 상품 마스터 + XERP 재고/출고) =====
+// ===== 통합 DB 동기화 (DD 상품 마스터 + XERP snapshot 갱신) =====
+// 2026-04 재도입: 매번 XERP live 쿼리 금지. snapshot 테이블에 저장 후 재사용.
 async function syncAllDB() {
   const btn = document.getElementById('refreshBtn');
-  if (btn) { btn.disabled = true; btn.textContent = '동기화 중...'; }
+  const setBtn = (txt, dis) => { if (btn) { btn.disabled = !!dis; btn.textContent = txt; } };
+  setBtn('동기화 중...', true);
+
   try {
-    // 1. 디얼디어 모드면 DD 상품 마스터 동기화 먼저 시도 (실패해도 무시)
+    // 1. DD 모드면 DD 상품 마스터 sync 시도
     if (typeof _currentCompany !== 'undefined' && _currentCompany === 'dd') {
       try {
         const resp = await fetch('/api/dd/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         const j = await resp.json();
-        if (j && j.ok && j.data) {
-          console.log(`[DB 동기화] DD 상품 마스터: 신규 ${j.data.inserted}, 업데이트 ${j.data.updated}`);
-        } else {
-          console.warn('[DB 동기화] DD 상품 마스터 동기화 실패 (무시):', j && j.error);
-        }
-      } catch (e) {
-        console.warn('[DB 동기화] DD 상품 마스터 동기화 오류 (무시):', e.message);
-      }
+        if (j?.ok && j.data) console.log(`[DB 동기화] DD 마스터: 신규 ${j.data.inserted}, 업데이트 ${j.data.updated}`);
+      } catch (e) { console.warn('[DB 동기화] DD 마스터 오류 (무시):', e.message); }
     }
-    // 2. XERP 재고/출고 동기화 (핵심)
-    await loadXerpInventory(true);
+
+    // 2. XERP snapshot 갱신 — 서버가 202로 즉시 응답 + 백그라운드 작업
+    let startResp;
+    try {
+      startResp = await fetch('/api/sync/xerp-inventory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ triggered_by: 'manual' })
+      });
+    } catch (e) { alert('XERP 동기화 시작 네트워크 오류: ' + e.message); return; }
+
+    const ct = startResp.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      const txt = await startResp.text().catch(() => '');
+      alert('XERP 동기화 시작 실패 (HTTP ' + startResp.status + '): ' + txt.slice(0, 200));
+      return;
+    }
+    const startJson = await startResp.json();
+    if (!startJson.ok && startResp.status !== 409) {
+      alert('XERP 동기화 시작 실패: ' + (startJson.error || '알 수 없음') + '\n(관리자 확인 필요 - sync_log/inventory_snapshot 테이블 권한?)');
+      return;
+    }
+
+    // 3. 상태 폴링 (2초 간격, 최대 7분)
+    const startedAt = Date.now();
+    const MAX_MS = 7 * 60 * 1000;
+    while (true) {
+      if (Date.now() - startedAt > MAX_MS) {
+        if (confirm('XERP 동기화 폴링 타임아웃 (7분)\n강제 리셋?')) {
+          try {
+            const rr = await fetch('/api/sync/xerp-inventory/reset', { method: 'POST' });
+            const rj = await rr.json();
+            alert('리셋 완료: ' + (rj.data?.reset_count || 0) + '건');
+          } catch (e) { alert('리셋 실패: ' + e.message); }
+        }
+        return;
+      }
+      await new Promise(r => setTimeout(r, 2000));
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      setBtn(`동기화 중... (${elapsed}s)`, true);
+
+      try {
+        const stResp = await fetch('/api/sync/status');
+        const stJson = await stResp.json();
+        if (!stJson.ok) continue;
+        const d = stJson.data;
+        if (d.is_running) continue;
+
+        // 종료 감지 — last_success_at 또는 last_failed_at 이 startedAt 이후
+        const parseTs = s => s ? new Date(String(s).replace(' ', 'T')).getTime() : 0;
+        const okTs = parseTs(d.last_success_at);
+        const failTs = parseTs(d.last_failed_at);
+        if (okTs >= startedAt - 5000 && okTs >= failTs) {
+          console.log(`[DB 동기화] snapshot 완료: ${d.last_success_count}개`);
+          // 4. snapshot 기반으로 화면 재로드
+          await loadXerpInventory(false);
+          await updateSyncStatus();
+          return;
+        }
+        if (failTs >= startedAt - 5000) {
+          alert('XERP 동기화 실패: ' + (d.last_failed_error || '알 수 없음') + '\n기존 데이터는 유지됩니다.');
+          await updateSyncStatus();
+          return;
+        }
+        // 30초 넘어도 종료 감지 안 되면 탈출 (서버 제때 업데이트 못한 경우)
+        if (elapsed > 30) {
+          console.warn('[DB 동기화] 상태 불명확 — UI만 갱신');
+          await loadXerpInventory(false);
+          await updateSyncStatus();
+          return;
+        }
+      } catch (e) { console.warn('[DB 동기화] status 폴링 오류:', e.message); }
+    }
   } catch (e) {
     alert('DB 동기화 오류: ' + e.message);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'DB 동기화'; }
+    setBtn('DB 동기화', false);
   }
 }
+
+// 동기화 상태 배지 (마지막 시각 표시)
+async function updateSyncStatus() {
+  try {
+    const resp = await fetch('/api/sync/status');
+    const j = await resp.json();
+    if (!j.ok) return;
+    const d = j.data;
+    const badge = document.getElementById('syncStatusBadge');
+    if (!badge) return;
+    if (d.is_running) {
+      badge.textContent = '⏳ 동기화 중...';
+      badge.style.cssText = 'font-size:11px;padding:3px 8px;border-radius:10px;background:#dbeafe;color:#1e40af';
+    } else if (d.last_success_at) {
+      const dt = new Date(String(d.last_success_at).replace(' ', 'T'));
+      const mm = dt.getMonth() + 1, dd = dt.getDate();
+      const hh = String(dt.getHours()).padStart(2,'0'), mn = String(dt.getMinutes()).padStart(2,'0');
+      badge.textContent = `✅ 마지막 동기화: ${mm}/${dd} ${hh}:${mn} (${d.last_success_count}개)`;
+      badge.style.cssText = 'font-size:11px;padding:3px 8px;border-radius:10px;background:#dcfce7;color:#166534';
+    } else {
+      badge.textContent = '⚠️ 동기화 필요';
+      badge.style.cssText = 'font-size:11px;padding:3px 8px;border-radius:10px;background:#fef3c7;color:#92400e';
+    }
+  } catch (_) {}
+}
+// 페이지 로드 시 1회
+document.addEventListener('DOMContentLoaded', () => setTimeout(updateSyncStatus, 2000));
 
 async function syncDDProducts() {
   try {
