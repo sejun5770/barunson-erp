@@ -732,12 +732,17 @@ async function logPOActivity(poId, action, opts = {}) {
 
 // 이메일 발송: SMTP 우선, Apps Script 폴백
 // 2026-04: 거래처 포털 링크 제거. PDF 첨부 + 이메일 회신/전화 안내로 변경.
+// 2026-04: DD 법인 발주는 '바른디자인' 명의로 발송 (바른컴퍼니 아님)
 async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, emailCc) {
 
   const pInfo = getProductInfo();
 
+  // 법인별 발송 명의 분기
+  const isDD = (po.legal_entity === 'dd');
+  const SENDER_COMPANY = isDD ? '바른디자인' : '바른컴퍼니';
+
   const typeLabel = isPostProcess ? '후공정' : '원재료';
-  const subject = `[바른컴퍼니] ${typeLabel} 발주서 - ${po.po_number} (${vendorName})`;
+  const subject = `[${SENDER_COMPANY}] ${typeLabel} 발주서 - ${po.po_number} (${vendorName})`;
 
   // 품목별 product_info 매핑 + 연(R) 계산: 발주수량 / 500 / 절 / 조판
   // parseJeolServer: 'T3K'→3, '3TK'→3 등 문자열에서 절 숫자 추출
@@ -815,7 +820,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
   const html = `
     <div style="font-family:'맑은 고딕',sans-serif;max-width:700px;margin:0 auto">
       <div style="background:#f97316;color:#fff;padding:20px;border-radius:8px 8px 0 0">
-        <h2 style="margin:0">바른컴퍼니 ${typeLabel} 발주서</h2>
+        <h2 style="margin:0">${SENDER_COMPANY} ${typeLabel} 발주서</h2>
       </div>
       <div style="padding:24px;border:1px solid #e5e7eb;border-top:none">
         <table style="width:100%;margin-bottom:20px;font-size:14px">
@@ -840,7 +845,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           </div>
         </div>
         <p style="margin-top:14px;color:#888;font-size:11px;text-align:center">
-          ※ 본 메일은 바른컴퍼니 ERP에서 자동 발송되었습니다.<br>
+          ※ 본 메일은 ${SENDER_COMPANY} ERP에서 자동 발송되었습니다.<br>
           문의: barun@baruncompany.com · Tel 02-6959-0750
         </p>
       </div>
@@ -894,8 +899,8 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
 
     <div class="header">
       <div class="header-left">
-        <h1>BARUN COMPANY</h1>
-        <div class="sub">바른컴퍼니 | Premium Invitation & Stationery</div>
+        <h1>${isDD ? 'BARUN DESIGN' : 'BARUN COMPANY'}</h1>
+        <div class="sub">${SENDER_COMPANY} | Premium Invitation & Stationery</div>
       </div>
       <div class="header-right">
         Tel: 02-6959-0750<br>
@@ -999,7 +1004,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     <div class="sign-area">
       <div class="sign-box">
         <div class="label">발주처 ${isChinaVendor ? '/ 采购方' : ''}</div>
-        <div class="name">바른컴퍼니</div>
+        <div class="name">${SENDER_COMPANY}</div>
       </div>
       <div class="sign-box">
         <div class="label">공급처 ${isChinaVendor ? '/ 供应方' : ''}</div>
@@ -1007,7 +1012,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       </div>
     </div>
 
-    <div class="footer">바른컴퍼니 발주시스템 | Generated ${new Date().toISOString().slice(0, 10)} | ${po.po_number}</div>
+    <div class="footer">${SENDER_COMPANY} 발주시스템 | Generated ${new Date().toISOString().slice(0, 10)} | ${po.po_number}</div>
   </body></html>`;
 
   const toEmail = vendorEmail; // 실제 거래처 이메일로 발송
@@ -1050,7 +1055,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
   if (smtpTransporter) {
     try {
       const mailOptions = {
-        from: `"바른컴퍼니 발주시스템" <${SMTP_FROM}>`,
+        from: `"${SENDER_COMPANY} 발주시스템" <${SMTP_FROM}>`,
         to: toEmail,
         subject,
         html,
