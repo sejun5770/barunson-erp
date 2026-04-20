@@ -565,16 +565,15 @@ function verifyVendorToken(email, token) {
   return false;
 }
 
-// vendor-portal 공통 인증 헬퍼
-// 보안 방침(2026-04): 외부 거래처 access 토큰은 더 이상 허용하지 않음.
-// 이 함수는 "내부 관리자가 거래처화면 미리보기 할 때" 거래처 정보를 파라미터로 받아 반환만 한다.
-// 상위 라우터에서 이미 관리자 JWT 검증이 완료됐다고 가정 (serve_inv2.js 4139행 미들웨어).
+// vendor-portal 공통 인증 헬퍼 (access 토큰 또는 레거시 email+token)
 function extractVendorAuth(params) {
-  // params: { email, vendor_name } — 관리자가 명시적으로 지정
-  const email = params.email || '';
-  const vendorName = params.vendor_name || '';
-  if (!email) return null;
-  return { email, vendorName, token: '' };
+  // params: { access, email, token, vendor_name } (body 또는 querystring에서 추출)
+  const accessToken = params.access || params.token || '';
+  const decoded = decodeVendorToken(accessToken);
+  const email = decoded ? decoded.email : (params.email || '');
+  const vendorName = decoded ? (decoded.name || '') : (params.vendor_name || '');
+  if (!email || !verifyVendorToken(email, accessToken)) return null;
+  return { email, vendorName, token: accessToken };
 }
 
 // product_info 데이터 (원자재코드, 원재료명, 절, 후공정업체 조회용)
@@ -731,10 +730,11 @@ async function logPOActivity(poId, action, opts = {}) {
 }
 
 // 이메일 발송: SMTP 우선, Apps Script 폴백
-// 보안 방침(2026-04): 거래처 포털 링크는 제거. PDF 첨부 + 이메일 회신 안내로 변경.
 async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, emailCc) {
 
   const pInfo = getProductInfo();
+  const token = generateVendorToken(vendorEmail, vendorName);
+  const portalUrl = `${BASE_URL}/?access=${token}`;
 
   const typeLabel = isPostProcess ? '후공정' : '원재료';
   const subject = `[바른컴퍼니] ${typeLabel} 발주서 - ${po.po_number} (${vendorName})`;
@@ -831,17 +831,13 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <thead>${tableHeader}</thead>
           <tbody>${tableRows}</tbody>
         </table>
-        <div style="margin-top:24px;padding:16px 20px;background:#fff7ed;border:1px solid #fdba74;border-radius:8px;color:#7c2d12">
-          <div style="font-weight:700;font-size:14px;margin-bottom:8px">📋 발주 확인 및 진행 안내</div>
-          <div style="font-size:13px;line-height:1.7">
-            ① 첨부된 <b>PDF 발주서</b>를 확인해주세요.<br>
-            ② <b>발주 확인 / 출고 예정일</b>을 이 메일에 회신해주시거나 담당자에게 전화 부탁드립니다.<br>
-            ③ <b>출고 완료 시점</b>에도 회신 부탁드립니다. 접수 후 후공정 업체로 전달됩니다.
-          </div>
+        <div style="margin-top:30px;text-align:center">
+          <a href="${portalUrl}" style="display:inline-block;background:#f97316;color:#fff;padding:14px 40px;border-radius:8px;text-decoration:none;font-weight:600;font-size:16px">
+            발주 확인하기
+          </a>
         </div>
-        <p style="margin-top:14px;color:#888;font-size:11px;text-align:center">
-          ※ 본 메일은 바른컴퍼니 ERP에서 자동 발송되었습니다.<br>
-          문의: barun@baruncompany.com · Tel 02-6959-0750
+        <p style="margin-top:20px;color:#888;font-size:12px;text-align:center">
+          위 버튼을 클릭하면 발주현황 페이지로 이동합니다.
         </p>
       </div>
     </div>`;
@@ -1421,17 +1417,6 @@ for (const tbl of _entityTables) {
     await db.prepare(`UPDATE ${tbl} SET legal_entity='barunson' WHERE legal_entity IS NULL OR legal_entity=''`).run();
   } catch(e) { /* 컬럼 없으면 무시 */ }
 }
-// product_code 공백/제어문자 정제 (XERP nchar(40) padding + 엑셀 복사 시 유입된 보이지 않는 문자)
-// 1회 실행으로 끝나면 이후엔 변경 0건이라 no-op
-try {
-  const trimUpd = await db.prepare("UPDATE products SET product_code = TRIM(product_code) WHERE product_code != TRIM(product_code)").run();
-  if (trimUpd.changes > 0) console.log(`[code-clean] products.product_code 공백 제거: ${trimUpd.changes}건`);
-} catch(e) { console.warn('[code-clean] products trim 실패:', e.message); }
-try {
-  const trimUpdPi = await db.prepare("UPDATE po_items SET product_code = TRIM(product_code) WHERE product_code != TRIM(product_code)").run();
-  if (trimUpdPi.changes > 0) console.log(`[code-clean] po_items.product_code 공백 제거: ${trimUpdPi.changes}건`);
-} catch(e) { /* 테이블/컬럼 없으면 무시 */ }
-
 // DD 제품 마킹: product_code가 DD로 시작하는 품목 → legal_entity='dd'
 try {
   const ddUpdated = await db.prepare("UPDATE products SET legal_entity='dd' WHERE product_code LIKE 'DD%' AND (legal_entity IS NULL OR legal_entity='barunson')").run();
@@ -2534,38 +2519,6 @@ await db.exec(`CREATE TABLE IF NOT EXISTS warehouse_transfers (
 await db.exec("CREATE INDEX IF NOT EXISTS idx_wt_from ON warehouse_transfers(from_warehouse)");
 await db.exec("CREATE INDEX IF NOT EXISTS idx_wt_to ON warehouse_transfers(to_warehouse)");
 await db.exec("CREATE INDEX IF NOT EXISTS idx_wt_created ON warehouse_transfers(created_at)");
-
-// ── XERP 재고 스냅샷 테이블 (하루 1회 동기화 → 즉시 조회) ──
-try {
-  await db.exec(`CREATE TABLE IF NOT EXISTS inventory_snapshot (
-    product_code   TEXT PRIMARY KEY,
-    legal_entity   TEXT DEFAULT 'barunson',
-    site_code      TEXT DEFAULT 'BK10',
-    current_stock  INTEGER DEFAULT 0,
-    monthly_out    INTEGER DEFAULT 0,
-    daily_out      INTEGER DEFAULT 0,
-    total_3m       INTEGER DEFAULT 0,
-    item_name      TEXT DEFAULT '',
-    synced_at      TEXT DEFAULT (datetime('now','localtime'))
-  )`);
-  await db.exec("CREATE INDEX IF NOT EXISTS idx_invsnap_entity ON inventory_snapshot(legal_entity)");
-  await db.exec("CREATE INDEX IF NOT EXISTS idx_invsnap_synced ON inventory_snapshot(synced_at)");
-} catch(e) { console.warn('[init] inventory_snapshot 생성 실패:', e.message); }
-
-try {
-  await db.exec(`CREATE TABLE IF NOT EXISTS sync_log (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    sync_type     TEXT NOT NULL,
-    started_at    TEXT DEFAULT (datetime('now','localtime')),
-    finished_at   TEXT DEFAULT '',
-    success_count INTEGER DEFAULT 0,
-    fail_count    INTEGER DEFAULT 0,
-    status        TEXT DEFAULT 'running',
-    error_msg     TEXT DEFAULT '',
-    triggered_by  TEXT DEFAULT 'manual'
-  )`);
-  await db.exec("CREATE INDEX IF NOT EXISTS idx_synclog_type_time ON sync_log(sync_type, started_at)");
-} catch(e) { console.warn('[init] sync_log 생성 실패:', e.message); }
 
 await db.exec(`CREATE TABLE IF NOT EXISTS warehouse_adjustments (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4140,30 +4093,17 @@ async function handleRequest(req, res) {
   //  인증 미들웨어 — 여기서부터 모든 API는 토큰 필요
   // ════════════════════════════════════════════════════════════════════
   let currentUser = null;
-  if (pathname.startsWith('/api/')) {
+  if (pathname.startsWith('/api/') && !pathname.startsWith('/api/vendor-portal')) {
     const token = extractToken(req);
     const decoded = token ? verifyToken(token) : null;
     if (decoded) {
       currentUser = decoded;
     }
-
-    // ── 보안: vendor-portal API는 외부 거래처 접근 전면 차단 ──
-    // 기존엔 access JWT 토큰(이메일 해시)로 외부 거래처가 직접 호출 가능했으나,
-    // 해킹 위험으로 이 경로 자체를 "내부 관리자 전용 미리보기"로만 제한.
-    // currentUser(= ERP 관리자 JWT)가 없으면 전부 403.
-    if (pathname.startsWith('/api/vendor-portal')) {
-      if (!currentUser) {
-        fail(res, 403, '거래처 포털은 더 이상 외부 접근을 지원하지 않습니다. 발주서는 이메일(PDF)로 발송됩니다.');
-        return;
-      }
-      // 관리자면 통과 → 내부 "거래처화면 미리보기"용으로만 사용
-    } else {
-      // 일반 API: 인증 강제 모드(AUTH_REQUIRED=true)에서만 차단
-      const authRequired = (envVars.AUTH_REQUIRED || process.env.AUTH_REQUIRED || 'false') === 'true';
-      if (authRequired && !decoded) {
-        fail(res, 401, '인증이 필요합니다. 로그인하세요.');
-        return;
-      }
+    // 인증 강제 모드: AUTH_REQUIRED=true 일 때만 차단 (기본: 선택적)
+    const authRequired = (envVars.AUTH_REQUIRED || process.env.AUTH_REQUIRED || 'false') === 'true';
+    if (authRequired && !decoded) {
+      fail(res, 401, '인증이 필요합니다. 로그인하세요.');
+      return;
     }
   }
 
@@ -4504,9 +4444,6 @@ async function handleRequest(req, res) {
 
   if (pathname === '/api/products' && method === 'POST') {
     const b = await readJSON(req);
-    // product_code 정제: trim + 보이지 않는 유니코드 제거 (엑셀 복사/XERP nchar 패딩 유입 차단)
-    b.product_code = (b.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
-    if (b.temp_code) b.temp_code = (b.temp_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
     if (!b.product_code) { fail(res, 400, 'product_code required'); return; }
     const entity = (b.legal_entity === 'dd') ? 'dd' : 'barunson';
     // 생산지 정규화 (DD의 "예지가/코리아/마커엘엔피" 변형값 → "한국")
@@ -4642,7 +4579,7 @@ async function handleRequest(req, res) {
     // mode: 'upsert'(기본, 전부반영) | 'insert_only'(신규만 등록, 기존은 skip)
     const mode = body.mode === 'insert_only' ? 'insert_only' : 'upsert';
     if (!items.length) { fail(res, 400, 'items required'); return; }
-    // 서버측 방어: 생산지 변형값 정규화 + product_code 공백/유니코드 제거
+    // 서버측 방어: 생산지 변형값 정규화
     const _normOriginBulk = (v) => {
       const s = String(v||'').trim();
       if (!s) return '한국';
@@ -4651,12 +4588,7 @@ async function handleRequest(req, res) {
           s.indexOf('코리아') === 0 || s.indexOf('예지가') === 0 || s.indexOf('마커') === 0) return '한국';
       return s;
     };
-    const _cleanCode = (v) => (v || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
-    for (const it of items) {
-      if (!it) continue;
-      it.origin = _normOriginBulk(it.origin);
-      it.product_code = _cleanCode(it.product_code);
-    }
+    for (const it of items) { if (it) it.origin = _normOriginBulk(it.origin); }
 
     const upsert = _hasEntity.products
       ? db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, memo, op_category, legal_entity)
@@ -4807,13 +4739,32 @@ async function handleRequest(req, res) {
   }
 
   // ════════════════════════════════════════════════════════════════════
-  //  XERP 재고 — snapshot 기반 (하루 1회 동기화 + 즉시 조회)
-  //  원천 차단: 페이지 진입 시 XERP 직접 쿼리 안 함 → 오류 안 뜸
+  //  XERP 실시간 재고 API (mmInventory + 월출고 통합)
   // ════════════════════════════════════════════════════════════════════
 
-  // ── 내부 헬퍼: 특정 법인의 재고/출고를 XERP에서 조회 (동기화 시에만 호출) ──
-  // legalEntity: 'barunson' | 'dd'
-  async function fetchCompanyInventoryFromXerp(legalEntity) {
+  if (pathname === '/api/xerp-inventory' && method === 'GET') {
+    // XERP 풀이 없어도 폴백 경로(products 테이블만)로 응답
+    await ensureXerpPool().catch(()=>null);
+
+    // 법인 파라미터 (all/barunson/dd)
+    const company = parsed.searchParams.get('company') || 'all';
+    // barunson → XERP DB, SiteCode=BK10 (바른손 창고)
+    // dd       → BHC  DB, SiteCode=BHC2 (디얼디어 창고)
+    // all      → 둘 다 조회 후 병합
+
+    // 10분 캐시 — 법인별 분리
+    const now = Date.now();
+    const forceRefresh = parsed.searchParams.get('refresh') === '1';
+    if (!xerpInventoryCaches) xerpInventoryCaches = {};
+    const cacheEntry = xerpInventoryCaches[company];
+    if (!forceRefresh && cacheEntry && now - cacheEntry.time < 600000) {
+      ok(res, cacheEntry.data);
+      return;
+    }
+
+    // ── 내부 헬퍼: 특정 법인의 재고/출고를 해당 DB+SiteCode에서 조회 ──
+    // legalEntity: 'barunson' | 'dd'
+    async function fetchCompanyInventory(legalEntity) {
       const isDd = legalEntity === 'dd';
       // 품목 리스트 필터
       const originFilter = isDd
@@ -4826,20 +4777,12 @@ async function handleRequest(req, res) {
         `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products WHERE ${statusFilter} AND ${originFilter}`
       ).all();
       if (!registeredProducts.length) return [];
-      // product_code 정제: trim + 보이지 않는 유니코드 공백 제거 (XERP nchar(40) padding 대응)
-      for (const p of registeredProducts) {
-        p.product_code = (p.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
-      }
-      const productCodes = registeredProducts.map(p => p.product_code).filter(Boolean);
+      const productCodes = registeredProducts.map(p => p.product_code);
       // IN절용 (SQL Injection 방지: 영숫자_만 허용)
-      const safeCodes = productCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
-      if (!safeCodes.length) return [];
-      // readonly 계정 10초 쿼리 타임아웃 대응: 50개씩 배치 + req.timeout=7초 (3초 여유)
-      const CHUNK_SIZE = 50;
-      const codeChunks = [];
-      for (let i = 0; i < safeCodes.length; i += CHUNK_SIZE) {
-        codeChunks.push(safeCodes.slice(i, i + CHUNK_SIZE));
-      }
+      const safeCodeList = productCodes
+        .filter(c => /^[A-Za-z0-9_\-]+$/.test(c))
+        .map(c => `'${c}'`).join(',');
+      if (!safeCodeList) return [];
 
       // DB 풀 + SiteCode 분기
       const dbName = isDd ? 'BHC' : 'XERP';
@@ -4857,88 +4800,54 @@ async function handleRequest(req, res) {
 
       try {
         if (!workPool) throw new Error('XERP pool not connected');
-        // ★ readonly 계정 10초 타임아웃 대응: 순차 실행 + chunk 실패해도 계속 진행
         // 1. 현재고
+        const invResult = await workPool.request().query(`
+          SELECT RTRIM(ItemCode) AS item_code, SUM(OhQty) AS oh_qty
+          FROM mmInventory WITH (NOLOCK)
+          WHERE SiteCode = '${siteCode}' AND RTRIM(ItemCode) IN (${safeCodeList})
+          GROUP BY RTRIM(ItemCode)
+        `);
         const invMap = {};
-        let invSuccess = 0, invFail = 0;
-        for (let i = 0; i < codeChunks.length; i++) {
-          const chunk = codeChunks[i];
-          const inClause = chunk.map(c => `'${c}'`).join(',');
-          try {
-            const req = workPool.request();
-            req.timeout = 7000;
-            const r = await req.query(`
-              SELECT RTRIM(ItemCode) AS item_code, SUM(OhQty) AS oh_qty
-              FROM mmInventory WITH (NOLOCK)
-              WHERE SiteCode = '${siteCode}' AND RTRIM(ItemCode) IN (${inClause})
-              GROUP BY RTRIM(ItemCode)
-            `);
-            for (const row of r.recordset) {
-              invMap[(row.item_code || '').trim().toUpperCase()] = Math.round(row.oh_qty || 0);
-            }
-            invSuccess++;
-          } catch (e) {
-            invFail++;
-            console.warn(`[xerp-inventory] 현재고 chunk ${i+1}/${codeChunks.length} 실패: ${e.message}`);
-          }
+        for (const r of invResult.recordset) {
+          invMap[(r.item_code || '').trim().toUpperCase()] = Math.round(r.oh_qty || 0);
         }
-        console.log(`[xerp-inventory] ${legalEntity} 현재고: ${invSuccess}/${codeChunks.length} chunk 성공 (실패 ${invFail})`);
 
-        // 2. 최근 3개월 출고 — 순차
+        // 2. 최근 3개월 출고
         const today = new Date();
         const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
         const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+        const shipResult = await workPool.request()
+          .input('start3m', sql.NChar(16), fmt(start3m))
+          .input('today', sql.NChar(16), fmt(today))
+          .query(`
+            SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty
+            FROM mmInoutItem WITH (NOLOCK)
+            WHERE SiteCode = '${siteCode}' AND InoutGubun = 'SO'
+              AND InoutDate >= @start3m AND InoutDate < @today
+              AND RTRIM(ItemCode) IN (${safeCodeList})
+            GROUP BY RTRIM(ItemCode)
+          `);
         const shipMap = {};
-        let shipSuccess = 0, shipFail = 0;
-        for (let i = 0; i < codeChunks.length; i++) {
-          const chunk = codeChunks[i];
-          const inClause = chunk.map(c => `'${c}'`).join(',');
-          try {
-            const req = workPool.request()
-              .input('start3m', sql.NChar(16), fmt(start3m))
-              .input('today', sql.NChar(16), fmt(today));
-            req.timeout = 7000;
-            const r = await req.query(`
-              SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty
-              FROM mmInoutItem WITH (NOLOCK)
-              WHERE SiteCode = '${siteCode}' AND InoutGubun = 'SO'
-                AND InoutDate >= @start3m AND InoutDate < @today
-                AND RTRIM(ItemCode) IN (${inClause})
-              GROUP BY RTRIM(ItemCode)
-            `);
-            for (const row of r.recordset) {
-              const code = (row.item_code || '').trim().toUpperCase();
-              if (code) {
-                const total = Math.round(row.total_qty || 0);
-                shipMap[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
-              }
-            }
-            shipSuccess++;
-          } catch (e) {
-            shipFail++;
-            console.warn(`[xerp-inventory] 출고 chunk ${i+1}/${codeChunks.length} 실패: ${e.message}`);
+        for (const r of shipResult.recordset) {
+          const code = (r.item_code || '').trim().toUpperCase();
+          if (code) {
+            const total = Math.round(r.total_qty || 0);
+            shipMap[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
           }
         }
-        console.log(`[xerp-inventory] ${legalEntity} 출고: ${shipSuccess}/${codeChunks.length} chunk 성공 (실패 ${shipFail})`);
 
-        // 3. 품목명 (S2_Card) — 순차, 실패해도 무시 (품목명 없어도 동작은 함)
+        // 3. 품목명 (S2_Card) — 한 번만 조회해도 됨, 바른손 모드에서만 의미있음
         let itemNames = {};
         if (!isDd) {
           try {
             const bar1Pool = new sql.ConnectionPool({ ...xerpConfig, database: 'bar_shop1' });
             await bar1Pool.connect();
-            for (let i = 0; i < codeChunks.length; i++) {
-              const chunk = codeChunks[i];
-              const inClause = chunk.map(c => `'${c}'`).join(',');
-              try {
-                const req = bar1Pool.request();
-                req.timeout = 7000;
-                const r = await req.query(`SELECT Card_Code, Card_Name FROM S2_Card WHERE RTRIM(Card_Code) IN (${inClause})`);
-                r.recordset.forEach(row => {
-                  itemNames[(row.Card_Code || '').trim().toUpperCase()] = (row.Card_Name || '').trim();
-                });
-              } catch (e) { /* 품목명 chunk 실패는 조용히 무시 */ }
-            }
+            const nameResult = await bar1Pool.request().query(
+              `SELECT Card_Code, Card_Name FROM S2_Card WHERE RTRIM(Card_Code) IN (${safeCodeList})`
+            );
+            nameResult.recordset.forEach(r => {
+              itemNames[(r.Card_Code || '').trim().toUpperCase()] = (r.Card_Name || '').trim();
+            });
             await bar1Pool.close();
           } catch (e) { console.warn('품목명 로드 실패:', e.message); }
         }
@@ -5003,250 +4912,45 @@ async function handleRequest(req, res) {
           try { await workPool.close(); } catch(_){}
         }
       }
-    } // ─ end fetchCompanyInventoryFromXerp 헬퍼 ─
-
-  // ── GET /api/xerp-inventory : snapshot 읽기 (XERP 직접 쿼리 없음) ──
-  if (pathname === '/api/xerp-inventory' && method === 'GET') {
-    const company = parsed.searchParams.get('company') || 'all';
-    try {
-      // products 기본 정보 (품목명/원자재/절/조판 등)
-      const originFilterBs = "(product_code NOT LIKE 'DD%' AND origin != 'DD')";
-      const originFilterDd = "(product_code LIKE 'DD%' OR origin = 'DD')";
-      let productFilter = '';
-      if (company === 'barunson') productFilter = `WHERE status = 'active' AND ${originFilterBs}`;
-      else if (company === 'dd') productFilter = `WHERE (status = 'active' OR status = 'inactive') AND ${originFilterDd}`;
-      else productFilter = "WHERE (status = 'active' OR status = 'inactive')";
-
-      const products = await db.prepare(
-        `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products ${productFilter}`
-      ).all();
-
-      // snapshot 조회 — 한 번에 다 읽고 Map으로
-      const snapRows = await db.prepare("SELECT product_code, legal_entity, site_code, current_stock, monthly_out, daily_out, total_3m, item_name FROM inventory_snapshot").all();
-      const snapMap = {};
-      for (const r of snapRows) {
-        snapMap[(r.product_code || '').trim().toUpperCase()] = r;
-      }
-
-      // 마지막 동기화 시각
-      let lastSync = '';
-      try {
-        const last = await db.prepare("SELECT finished_at FROM sync_log WHERE sync_type='xerp_inventory' AND status='success' ORDER BY id DESC LIMIT 1").get();
-        lastSync = last?.finished_at || '';
-      } catch(_) {}
-
-      // 병합
-      const out = [];
-      for (const p of products) {
-        const code = (p.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
-        if (!code) continue;
-        const codeUpper = code.toUpperCase();
-        const snap = snapMap[codeUpper];
-        const isDd = (snap?.legal_entity === 'dd') || code.startsWith('DD') || p.origin === 'DD';
-        out.push({
-          '제품코드': code,
-          '품목명': p.product_name || snap?.item_name || '',
-          '브랜드': p.brand || '',
-          '생산지': p.origin || '',
-          '현재고': snap?.current_stock || 0,
-          '가용재고': snap?.current_stock || 0,
-          '요청량': 0,
-          '_xerpMonthly': snap?.monthly_out || 0,
-          '_xerpDaily': snap?.daily_out || 0,
-          '_xerpTotal3m': snap?.total_3m || 0,
-          '_원자재코드': p.material_code || '',
-          '_원재료용지명': p.material_name || '',
-          '_절': p.cut_spec || '',
-          '_조판': p.jopan || '',
-          '_원지사': p.paper_maker || '',
-          '_후공정업체': p.post_vendor || '',
-          'legal_entity': snap?.legal_entity || (isDd ? 'dd' : 'barunson'),
-          '_invSource': snap ? 'snapshot' : 'no-sync',
-          '_siteCode': snap?.site_code || (isDd ? 'BHC2' : 'BK10')
-        });
-      }
-
-      ok(res, { products: out, updated: lastSync, count: out.length, synced_at: lastSync });
-    } catch (e) {
-      console.error('[xerp-inventory snapshot 조회] 실패:', e.message);
-      fail(res, 500, '재고 조회 실패: ' + e.message);
     }
-    return;
-  }
 
-  // ── POST /api/sync/xerp-inventory/reset : 고스트 running 강제 해제 ──
-  // 서버 크래시/컨테이너 재시작으로 sync_log가 'running'에 묶였을 때 수동 복구용.
-  if (pathname === '/api/sync/xerp-inventory/reset' && method === 'POST') {
     try {
-      const info = await db.prepare("UPDATE sync_log SET status='failed', error_msg=?, finished_at=datetime('now','localtime') WHERE sync_type='xerp_inventory' AND status='running'").run('수동 리셋 — 고스트 running 해제');
-      console.log('[sync reset] running 고스트 해제:', info?.changes || 0, '건');
-      ok(res, { reset_count: info?.changes || 0 });
-    } catch (e) {
-      fail(res, 500, '리셋 실패: ' + e.message);
-    }
-    return;
-  }
-
-  // ── POST /api/sync/xerp-inventory : XERP 전체 동기화 (snapshot 갱신) ──
-  // 2026-04 변경: nginx proxy_read_timeout(기본 60s) 초과로 HTML 504 응답되던 문제 해결.
-  //              202 Accepted로 즉시 반환하고 백그라운드에서 실행, 프론트는 /api/sync/status 폴링.
-  //              추가: 7분 이상 'running' 상태면 고스트로 판단하여 자동 정리 후 새로 시작.
-  if (pathname === '/api/sync/xerp-inventory' && method === 'POST') {
-    // 1) 오래된 running 자동 정리 (7분 이상)
-    // PG에서 started_at은 TEXT 컬럼(NOW()::text 저장)이라 ::timestamptz 캐스트 필요
-    try {
-      const stale = await db.prepare("SELECT id, started_at FROM sync_log WHERE sync_type='xerp_inventory' AND status='running' AND started_at::timestamptz < datetime('now','localtime','-7 minutes')").all();
-      if (stale && stale.length) {
-        await db.prepare("UPDATE sync_log SET status='failed', error_msg=?, finished_at=datetime('now','localtime') WHERE sync_type='xerp_inventory' AND status='running' AND started_at::timestamptz < datetime('now','localtime','-7 minutes')").run('자동 정리 — 7분 초과 고스트 running');
-        console.warn('[sync] 고스트 running', stale.length, '건 자동 정리 — ids:', stale.map(s=>s.id).join(','));
+      let products = [];
+      if (company === 'barunson') {
+        products = await fetchCompanyInventory('barunson');
+      } else if (company === 'dd') {
+        products = await fetchCompanyInventory('dd');
+      } else {
+        // all: 둘 다 조회 후 병합
+        const [bs, dd] = await Promise.all([
+          fetchCompanyInventory('barunson').catch(e => { console.error('barunson 조회 실패:', e.message); return []; }),
+          fetchCompanyInventory('dd').catch(e => { console.error('dd 조회 실패:', e.message); return []; })
+        ]);
+        products = [...bs, ...dd];
       }
-    } catch(e) { console.warn('[sync] stale cleanup 실패:', e.message); }
 
-    // 2) 중복 실행 방지 — 아직 진행 중이면 409
-    try {
-      const running = await db.prepare("SELECT id, started_at FROM sync_log WHERE sync_type='xerp_inventory' AND status='running'").get();
-      if (running) {
-        console.log('[sync] 이미 진행 중 (sync_log_id=' + running.id + ', started_at=' + running.started_at + ')');
-        fail(res, 409, '이미 동기화가 진행 중입니다 (시작: ' + running.started_at + ')');
+      if (!products.length) {
+        ok(res, { products: [], updated: new Date().toISOString(), count: 0, message: '품목관리에 등록된 제품이 없습니다. 먼저 품목을 등록해주세요.' });
         return;
       }
-    } catch(_) {}
 
-    // 3) sync_log 시작 기록
-    let syncLogId = null;
-    let triggeredBy = 'manual';
-    try {
-      const body = await readJSON(req).catch(() => ({}));
-      triggeredBy = body?.triggered_by || 'manual';
-      const info = await db.prepare("INSERT INTO sync_log (sync_type, status, triggered_by) VALUES (?,?,?)").run('xerp_inventory', 'running', triggeredBy);
-      syncLogId = info.lastInsertRowid;
-      console.log('[sync] 시작 — sync_log_id=' + syncLogId + ', trigger=' + triggeredBy);
-    } catch(e) { console.warn('[sync] 시작 기록 실패:', e.message); }
-
-    // 4) 즉시 202 응답 (클라이언트는 /api/sync/status 폴링)
-    try {
-      res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ ok: true, data: { sync_log_id: syncLogId, status: 'started', triggered_by: triggeredBy } }));
-    } catch(_) {}
-
-    // 5) 백그라운드 실행 (fire-and-forget) — 단계별 로깅으로 멈춘 지점 식별 가능
-    (async () => {
-      const t0 = Date.now();
-      const mark = (stage) => console.log(`[sync bg][${((Date.now()-t0)/1000).toFixed(1)}s] ${stage}`);
-      try {
-        mark('ensureXerpPool 시작');
-        await ensureXerpPool().catch((e) => { console.error('[sync bg] xerp pool 실패:', e.message); });
-        mark('ensureXerpPool 완료');
-
-        // 바른손 + DD 각각 순차 (동시 쿼리 부하 회피)
-        let bs = [], dd = [];
-        mark('barunson fetch 시작');
-        try { bs = await fetchCompanyInventoryFromXerp('barunson'); mark('barunson fetch 완료 ' + bs.length + '건'); } catch(e) { console.error('[sync bg] barunson 실패:', e.message); mark('barunson fetch 예외'); }
-        mark('dd fetch 시작');
-        try { dd = await fetchCompanyInventoryFromXerp('dd'); mark('dd fetch 완료 ' + dd.length + '건'); } catch(e) { console.error('[sync bg] dd 실패:', e.message); mark('dd fetch 예외'); }
-        const all = [...bs, ...dd];
-
-        // fallback:products로 모두 찍혔거나 all이 비었으면 기존 snapshot 보존하고 실패 표기
-        const allFallback = all.length > 0 && all.every(p => p['_invSource'] === 'fallback:products');
-        if (allFallback || all.length === 0) {
-          console.warn('[sync bg] 모든 데이터가 fallback/empty — snapshot 갱신 스킵하고 기존 유지');
-          if (syncLogId) {
-            try { await db.prepare("UPDATE sync_log SET status='failed', error_msg=?, finished_at=datetime('now','localtime') WHERE id=?").run('XERP 전체 실패 — 기존 snapshot 유지', syncLogId); } catch(_){}
-          }
-          return;
-        }
-
-        // snapshot에 UPSERT
-        mark('snapshot upsert 시작 (' + all.length + '건)');
-        let successCount = 0;
-        if (all.length) {
-          const upsert = db.prepare(`INSERT INTO inventory_snapshot
-            (product_code, legal_entity, site_code, current_stock, monthly_out, daily_out, total_3m, item_name, synced_at)
-            VALUES (?,?,?,?,?,?,?,?,datetime('now','localtime'))
-            ON CONFLICT(product_code) DO UPDATE SET
-              legal_entity=excluded.legal_entity,
-              site_code=excluded.site_code,
-              current_stock=excluded.current_stock,
-              monthly_out=excluded.monthly_out,
-              daily_out=excluded.daily_out,
-              total_3m=excluded.total_3m,
-              item_name=CASE WHEN excluded.item_name='' THEN inventory_snapshot.item_name ELSE excluded.item_name END,
-              synced_at=excluded.synced_at`);
-          // 개별 UPSERT (pg-adapter의 db.transaction(async) 이 동기 함수만 지원할 수 있으므로 트랜잭션 없이 순차)
-          for (const p of all) {
-            try {
-              await upsert.run(
-                p['제품코드'], p['legal_entity'], p['_siteCode'],
-                p['현재고'] || 0, p['_xerpMonthly'] || 0, p['_xerpDaily'] || 0, p['_xerpTotal3m'] || 0,
-                p['품목명'] || ''
-              );
-              successCount++;
-            } catch(_) {}
-          }
-        }
-        mark('snapshot upsert 완료 ' + successCount + '/' + all.length);
-
-        // sync_log 완료 기록
-        if (syncLogId) {
-          try {
-            await db.prepare("UPDATE sync_log SET status='success', success_count=?, finished_at=datetime('now','localtime') WHERE id=?").run(successCount, syncLogId);
-            mark('sync_log=success 기록');
-          } catch(e) { console.error('[sync bg] sync_log 성공 기록 실패:', e.message); }
-        }
-        console.log(`[sync bg] XERP 재고 동기화 완료: ${successCount}/${all.length}개 snapshot 저장 (bs ${bs.length}, dd ${dd.length}) 총 ${((Date.now()-t0)/1000).toFixed(1)}s`);
-      } catch (e) {
-        console.error('[sync bg] 동기화 실패(outer catch):', e.message, e.stack);
-        if (syncLogId) {
-          try {
-            await db.prepare("UPDATE sync_log SET status='failed', error_msg=?, finished_at=datetime('now','localtime') WHERE id=?").run(e.message.slice(0, 500), syncLogId);
-          } catch(ue) { console.error('[sync bg] sync_log 실패 기록도 실패:', ue.message); }
-        }
-      }
-    })().catch(e => console.error('[sync bg] IIFE reject:', e?.message || e));
-    return;
-  }
-
-  // ── GET /api/sync/status/:id : 특정 sync_log 한 건의 상태 조회 ──
-  // 프론트가 본인이 시작한 sync의 종료를 타임스탬프 비교 없이 확실히 감지하기 위한 엔드포인트
-  {
-    const matchId = pathname.match(/^\/api\/sync\/status\/(\d+)$/);
-    if (matchId && method === 'GET') {
-      try {
-        const id = parseInt(matchId[1], 10);
-        const row = await db.prepare("SELECT id, sync_type, status, started_at, finished_at, success_count, error_msg, triggered_by FROM sync_log WHERE id=?").get(id);
-        if (!row) { fail(res, 404, 'sync_log 없음'); return; }
-        ok(res, row);
-      } catch (e) {
-        fail(res, 500, '조회 실패: ' + e.message);
-      }
-      return;
-    }
-  }
-
-  // ── GET /api/sync/status : 마지막 동기화 시각 / 진행 상태 ──
-  // 각 쿼리를 독립 try/catch로 감싸서 한 부분 실패가 전체 500으로 번지지 않게 함
-  if (pathname === '/api/sync/status' && method === 'GET') {
-    let lastSuccess = null, running = null, lastFailed = null, count = null;
-    const errs = [];
-    try { lastSuccess = await db.prepare("SELECT started_at, finished_at, success_count, triggered_by FROM sync_log WHERE sync_type='xerp_inventory' AND status='success' ORDER BY id DESC LIMIT 1").get(); } catch(e){ errs.push('lastSuccess:'+e.message); console.error('[sync status] lastSuccess:', e.message); }
-    try { running = await db.prepare("SELECT started_at, triggered_by FROM sync_log WHERE sync_type='xerp_inventory' AND status='running' ORDER BY id DESC LIMIT 1").get(); } catch(e){ errs.push('running:'+e.message); console.error('[sync status] running:', e.message); }
-    try { lastFailed = await db.prepare("SELECT started_at, finished_at, error_msg, triggered_by FROM sync_log WHERE sync_type='xerp_inventory' AND status='failed' ORDER BY id DESC LIMIT 1").get(); } catch(e){ errs.push('lastFailed:'+e.message); console.error('[sync status] lastFailed:', e.message); }
-    try { count = await db.prepare("SELECT COUNT(*) AS cnt FROM inventory_snapshot").get(); } catch(e){ errs.push('count:'+e.message); console.error('[sync status] count:', e.message); }
-    try {
-      ok(res, {
-        is_running: !!running,
-        running_since: running?.started_at || null,
-        last_success_at: lastSuccess?.finished_at || null,
-        last_success_count: lastSuccess?.success_count || 0,
-        last_success_by: lastSuccess?.triggered_by || null,
-        last_failed_at: lastFailed?.finished_at || null,
-        last_failed_error: lastFailed?.error_msg || null,
-        snapshot_count: count?.cnt || 0,
-        _errors: errs.length ? errs : undefined
-      });
+      const cacheData = { products, updated: new Date().toISOString(), count: products.length };
+      xerpInventoryCaches[company] = { data: cacheData, time: now };
+      // 기존 캐시 호환 (다른 모듈에서 참조)
+      if (company === 'barunson') { xerpInventoryCache = cacheData; xerpInventoryCacheTime = now; }
+      console.log(`재고 API 완료 (company=${company}): ${products.length}개 품목`);
+      ok(res, cacheData);
     } catch (e) {
-      console.error('[sync status] response write 실패:', e.message);
-      fail(res, 500, '상태 조회 실패: ' + e.message + (errs.length ? ' | 쿼리오류: ' + errs.join('; ') : ''));
+      console.error('재고 조회 오류:', e.message, '(company=' + company + ')');
+      // v1.0.8: 타임아웃/연결 끊김 자동 재연결은 XERP(바른손) 경로에서만 수행.
+      //         BHC(dd) 경로의 에러가 XERP 메인 풀을 내리지 않도록 company 분기.
+      //         all 모드는 Promise.all 내부에서 catch로 흡수되므로 이쪽까지 안 옴.
+      const isXerpRelated = (company === 'barunson' || company === 'all');
+      if (isXerpRelated && (e.message.includes('imeout') || e.message.includes('closed') || e.message.includes('ECONN'))) {
+        try { await xerpPool.close(); } catch(_){}
+        try { xerpPool = await sql.connect(xerpConfig); console.log('XERP 재연결 완료'); } catch(re) { console.error('XERP 재연결 실패:', re.message); }
+      }
+      fail(res, 500, '재고 조회 오류: ' + e.message);
     }
     return;
   }
@@ -5372,51 +5076,31 @@ async function handleRequest(req, res) {
       const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
       const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
 
-      // 등록 제품만 조회 (속도 최적화) + product_code 공백/제어문자 정제
-      const registeredProductsRaw = await db.prepare("SELECT product_code FROM products WHERE status = 'active'").all();
-      const cleanCode = s => (s || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
-      const cleanedCodes = registeredProductsRaw.map(r => cleanCode(r.product_code)).filter(Boolean);
-      const registeredCodes = new Set(cleanedCodes);
-      const safeCodes = cleanedCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
-      if (!safeCodes.length) { ok(res, {}); return; }
+      // 등록 제품만 조회 (속도 최적화)
+      const registeredProducts = await db.prepare("SELECT product_code FROM products WHERE status = 'active'").all();
+      const registeredCodes = new Set(registeredProducts.map(r => r.product_code));
+      const safeCodeList = registeredProducts.map(p => p.product_code).filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).map(c => `'${c}'`).join(',');
+      if (!safeCodeList) { ok(res, {}); return; }
 
-      // ★ readonly 10초 타임아웃 대응: 순차 실행 + chunk 실패 내성
-      const CHUNK_SIZE = 50;
-      const codeChunks = [];
-      for (let i = 0; i < safeCodes.length; i += CHUNK_SIZE) {
-        codeChunks.push(safeCodes.slice(i, i + CHUNK_SIZE));
-      }
+      const result = await xerpPool.request()
+        .input('start3m', sql.NChar(16), fmt(start3m))
+        .input('today', sql.NChar(16), fmt(today))
+        .query(`
+          SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty, COUNT(DISTINCT RTRIM(InoutDate)) AS ship_days
+          FROM mmInoutItem WITH (NOLOCK)
+          WHERE SiteCode = 'BK10' AND InoutGubun = 'SO'
+            AND InoutDate >= @start3m AND InoutDate < @today
+            AND RTRIM(ItemCode) IN (${safeCodeList})
+          GROUP BY RTRIM(ItemCode)
+        `);
+
       const usage = {};
-      let successCnt = 0, failCnt = 0;
-      for (let i = 0; i < codeChunks.length; i++) {
-        const chunk = codeChunks[i];
-        const inClause = chunk.map(c => `'${c}'`).join(',');
-        try {
-          const req = xerpPool.request()
-            .input('start3m', sql.NChar(16), fmt(start3m))
-            .input('today', sql.NChar(16), fmt(today));
-          req.timeout = 7000;
-          const r = await req.query(`
-            SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty, COUNT(DISTINCT RTRIM(InoutDate)) AS ship_days
-            FROM mmInoutItem WITH (NOLOCK)
-            WHERE SiteCode = 'BK10' AND InoutGubun = 'SO'
-              AND InoutDate >= @start3m AND InoutDate < @today
-              AND RTRIM(ItemCode) IN (${inClause})
-            GROUP BY RTRIM(ItemCode)
-          `);
-          for (const row of r.recordset) {
-            const code = (row.item_code || '').trim();
-            if (!code || !registeredCodes.has(code)) continue;
-            const total = Math.round(row.total_qty || 0);
-            usage[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
-          }
-          successCnt++;
-        } catch (e) {
-          failCnt++;
-          console.warn(`[xerp-monthly-usage] chunk ${i+1}/${codeChunks.length} 실패: ${e.message}`);
-        }
+      for (const row of result.recordset) {
+        const code = (row.item_code || '').trim();
+        if (!code || !registeredCodes.has(code)) continue;
+        const total = Math.round(row.total_qty || 0);
+        usage[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
       }
-      console.log(`[xerp-monthly-usage] ${successCnt}/${codeChunks.length} chunk 성공 (실패 ${failCnt})`);
 
       xerpUsageCache = usage;
       xerpUsageCacheTime = now;
@@ -6593,184 +6277,6 @@ async function handleRequest(req, res) {
     ok(res, { po_id: poId, po_number: poNum }); return;
   }
 
-  // ════════════════════════════════════════════════════════════════════
-  //  한국 발주 마법사 관련 API (3단계: 품목 → 원재료업체 → 후가공업체)
-  // ════════════════════════════════════════════════════════════════════
-
-  // GET /api/po/latest-by-product?codes=A,B,C — 품목별 최근 PO 설정 (마법사 기본값)
-  if (pathname === '/api/po/latest-by-product' && method === 'GET') {
-    try {
-      const codesParam = parsed.searchParams.get('product_codes') || parsed.searchParams.get('codes') || '';
-      const codes = codesParam.split(',').map(s => s.trim()).filter(Boolean);
-      if (!codes.length) { ok(res, {}); return; }
-      // 품목별 가장 최근 PO (한국 origin, 취소/draft 제외)
-      // PG/SQLite 호환: 파라미터 바인딩으로 전체 조회 후 JS에서 first-only
-      const placeholders = codes.map(() => '?').join(',');
-      const rows = await db.prepare(`
-        SELECT poi.product_code, poh.po_id, poh.po_date,
-               poh.material_vendor_name, poh.process_vendor_name,
-               poh.process_chain, poh.po_type
-        FROM po_items poi
-        JOIN po_header poh ON poh.po_id = poi.po_id
-        WHERE poi.product_code IN (${placeholders})
-          AND poh.origin = '한국'
-          AND poh.status NOT IN ('cancelled','draft')
-        ORDER BY poi.product_code, poh.po_date DESC, poh.po_id DESC
-      `).all(...codes);
-      // 품목당 첫 행만 채택
-      const result = {};
-      for (const r of rows) {
-        if (result[r.product_code]) continue;
-        let chain = [];
-        try { if (r.process_chain) chain = JSON.parse(r.process_chain); } catch(_) {}
-        result[r.product_code] = {
-          material_vendor: r.material_vendor_name || '',
-          process_vendor: r.process_vendor_name || '',
-          process_chain: Array.isArray(chain) ? chain : [],
-          po_date: r.po_date || ''
-        };
-      }
-      ok(res, result);
-    } catch (e) {
-      console.error('[latest-by-product] 실패:', e.message);
-      fail(res, 500, '최근 PO 조회 실패: ' + e.message);
-    }
-    return;
-  }
-
-  // POST /api/po/korea-wizard — 마법사 확정 (원재료 PO N장 + 후가공 PO M장 생성)
-  if (pathname === '/api/po/korea-wizard' && method === 'POST') {
-    const body = await readJSON(req);
-    const items = Array.isArray(body.items) ? body.items : [];
-    if (!items.length) { fail(res, 400, 'items required'); return; }
-    // 각 품목은 {product_code, ordered_qty, material_vendor, material_code, material_name, process_chain:[{step,process,vendor}], spec}
-    // 검증
-    for (const it of items) {
-      if (!it.product_code) { fail(res, 400, `product_code 누락: ${JSON.stringify(it)}`); return; }
-      if (!it.material_vendor) { fail(res, 400, `${it.product_code}: material_vendor 미지정`); return; }
-      if (!Array.isArray(it.process_chain) || !it.process_chain.length) {
-        fail(res, 400, `${it.product_code}: process_chain 미지정 (최소 1개 공정 필요)`); return;
-      }
-      for (const s of it.process_chain) {
-        if (!s.vendor || !s.process) {
-          fail(res, 400, `${it.product_code}: process_chain에 process와 vendor 모두 필요`); return;
-        }
-      }
-    }
-
-    const expectedDate = body.expected_date || '';
-    const notes = body.notes || '';
-    const tolerancePct = body.tolerance_pct != null ? Number(body.tolerance_pct) : 5.0;
-    const actorName = body.actor || (currentUser ? currentUser.username : 'system');
-
-    // product_code 정제
-    for (const it of items) {
-      it.product_code = (it.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
-    }
-
-    // ─ 1) 원재료 업체별 그룹 ─
-    const materialGroups = {}; // { 업체명: [item, ...] }
-    for (const it of items) {
-      const key = it.material_vendor;
-      if (!materialGroups[key]) materialGroups[key] = [];
-      materialGroups[key].push(it);
-    }
-
-    // ─ 2) 후가공: 1단계 업체별로 그룹 ─
-    //    동일 1단계 업체라도 기본은 품목 묶음이 원재료 PO와 동일하게 흘러가도록
-    //    원재료 PO 당 1개의 1단계 후가공 PO를 생성 (parent_po_id 연결)
-    //    2+ step이 있는 품목은 process_chain JSON에만 저장, 실제 체인 트리거는 기존 vendor-portal 로직이 처리
-    const materialPos = [];
-    const processPos = [];
-
-    try {
-      for (const [matVendor, matItems] of Object.entries(materialGroups)) {
-        const matPoNumber = await generatePoNumber();
-        const matTotalQty = matItems.reduce((s, i) => s + (Number(i.ordered_qty) || 0), 0);
-        const matNotes = notes || `원재료 발주 (${matVendor})`;
-        // 전체 공정 체인을 JSON으로 저장 (첫 품목 기준 대표값 — UI 참고용; 실제 품목별 체인은 po_items.notes에도 기록)
-        const repChain = matItems[0].process_chain || [];
-        const matInfo = await db.prepare(`INSERT INTO po_header
-          (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
-           due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step)
-          VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?)`)
-          .run(matPoNumber, '원재료', matVendor, matVendor, '', 'sent',
-               expectedDate, matTotalQty, matNotes, '한국', tolerancePct,
-               JSON.stringify(repChain), 0);
-        const matPoId = matInfo.lastInsertRowid;
-
-        const insItem = db.prepare(`INSERT INTO po_items
-          (po_id, product_code, brand, process_type, ordered_qty, spec, notes)
-          VALUES (?,?,?,?,?,?,?)`);
-        for (const it of matItems) {
-          await insItem.run(matPoId, it.product_code, it.brand || '', '원재료',
-            Number(it.ordered_qty) || 0, it.spec || '',
-            `용지:${it.material_name || ''} / 공정체인:${JSON.stringify(it.process_chain)}`);
-        }
-
-        await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)")
-          .run(matPoId, 'created', actorName, `마법사 생성: 원재료 PO (${matVendor}, ${matItems.length}품목)`);
-
-        materialPos.push({ po_id: matPoId, po_number: matPoNumber, vendor: matVendor, items: matItems.length, total_qty: matTotalQty });
-
-        // ─ 동일 원재료 그룹의 1단계 후가공 업체 수집 → 업체별로 후가공 PO 생성 ─
-        const postStep1ByVendor = {};
-        for (const it of matItems) {
-          const step1 = it.process_chain[0];
-          if (!step1) continue;
-          const key = step1.vendor;
-          if (!postStep1ByVendor[key]) postStep1ByVendor[key] = { process: step1.process, items: [] };
-          postStep1ByVendor[key].items.push(it);
-        }
-        for (const [postVendor, info] of Object.entries(postStep1ByVendor)) {
-          const postPoNumber = await generatePoNumber();
-          const postTotalQty = info.items.reduce((s, i) => s + (Number(i.ordered_qty) || 0), 0);
-          const postInfo = await db.prepare(`INSERT INTO po_header
-            (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
-             due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?,?)`)
-            .run(postPoNumber, '후공정', postVendor, matVendor, postVendor, 'draft',
-                 expectedDate, postTotalQty, `후가공(${info.process}) 대기 - 원재료 입고 후 발송`, '한국', tolerancePct,
-                 JSON.stringify(info.items[0].process_chain || []), 1, matPoId);
-          const postPoId = postInfo.lastInsertRowid;
-          for (const it of info.items) {
-            await insItem.run(postPoId, it.product_code, it.brand || '', info.process,
-              Number(it.ordered_qty) || 0, it.spec || '',
-              `원재료:${it.material_name || ''} / 전체체인:${JSON.stringify(it.process_chain)}`);
-          }
-          await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)")
-            .run(postPoId, 'created', actorName, `마법사 생성: 후가공 PO (${postVendor}, ${info.process}, 원재료 PO: ${matPoNumber})`);
-          processPos.push({ po_id: postPoId, po_number: postPoNumber, vendor: postVendor, process: info.process, items: info.items.length, total_qty: postTotalQty, parent_po_id: matPoId });
-        }
-      }
-
-      // ─ 이메일 발송 (비동기, 실패해도 응답은 성공) ─
-      (async () => {
-        for (const m of materialPos) {
-          try {
-            const vendorRow = await db.prepare("SELECT email, email_cc FROM vendors WHERE name=?").get(m.vendor);
-            if (vendorRow?.email) {
-              const matPo = await db.prepare("SELECT * FROM po_header WHERE po_id=?").get(m.po_id);
-              const matItems = await db.prepare("SELECT * FROM po_items WHERE po_id=?").all(m.po_id);
-              await sendPOEmail(matPo, matItems, vendorRow.email, m.vendor, false, vendorRow.email_cc);
-            }
-          } catch (e) { console.warn(`[korea-wizard] 원재료 이메일 실패 (${m.vendor}):`, e.message); }
-        }
-        // 후가공은 원재료 입고 후 자동 발송되므로 여기서 즉시 발송하지 않음 (draft 상태 유지)
-        // 사용자가 원재료 입고 확정 시 기존 vendor-portal PATCH 로직이 자동으로 후가공 PO를 sent로 전환하며 이메일 발송
-      })().catch(e => console.error('[korea-wizard] 비동기 이메일 오류:', e.message));
-
-      if (currentUser) auditLog(currentUser.userId, currentUser.username, 'po_create_wizard', 'po_header', null,
-        `한국 마법사 발주: 원재료 ${materialPos.length}장 + 후가공 ${processPos.length}장`, clientIP);
-
-      ok(res, { material_pos: materialPos, process_pos: processPos });
-    } catch (e) {
-      console.error('[korea-wizard] 실패:', e.message, e.stack);
-      fail(res, 500, '마법사 발주 생성 실패: ' + e.message);
-    }
-    return;
-  }
-
   // POST /api/procurement/assembly/:id/ship — 더기프트 출고 등록
   const asmShipMatch = pathname.match(/^\/api\/procurement\/assembly\/(\d+)\/ship$/);
   if (asmShipMatch && method === 'POST') {
@@ -7505,31 +7011,17 @@ async function handleRequest(req, res) {
         try {
           if (await ensureXerpPool()) {
             const codes = new Set();
-            for (const po of rows) { for (const it of (po.items||[])) { if (it.product_code) codes.add((it.product_code||'').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g,'').trim()); } }
+            for (const po of rows) { for (const it of (po.items||[])) { if (it.product_code) codes.add(it.product_code); } }
             if (codes.size > 0) {
-              const safeArr = [...codes].filter(c => c && /^[A-Za-z0-9_\-]+$/.test(c));
-              if (safeArr.length) {
-                // readonly 10초 타임아웃 대응: 100개씩 배치 병렬
-                const CHUNK = 50;
-                const chunks = [];
-                for (let i = 0; i < safeArr.length; i += CHUNK) chunks.push(safeArr.slice(i, i + CHUNK));
-                const invResults = await Promise.all(chunks.map(ch => {
-                  const inClause = ch.map(c => `'${c}'`).join(',');
-                  return xerpPool.request().query(`SELECT RTRIM(ItemCode) AS code, SUM(OhQty) AS qty FROM mmInventory WITH(NOLOCK) WHERE SiteCode='BK10' AND RTRIM(ItemCode) IN (${inClause}) GROUP BY RTRIM(ItemCode)`);
-                }));
-                for (const invR of invResults) {
-                  for (const r of (invR.recordset||[])) { invMap[r.code.trim()] = { stock: Math.round(r.qty||0), monthly: 0 }; }
-                }
+              const safeList = [...codes].filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).map(c => `'${c}'`).join(',');
+              if (safeList) {
+                const invR = await xerpPool.request().query(`SELECT RTRIM(ItemCode) AS code, SUM(OhQty) AS qty FROM mmInventory WITH(NOLOCK) WHERE SiteCode='BK10' AND RTRIM(ItemCode) IN (${safeList}) GROUP BY RTRIM(ItemCode)`);
+                for (const r of (invR.recordset||[])) { invMap[r.code.trim()] = { stock: Math.round(r.qty||0), monthly: 0 }; }
                 // 월출고
                 const today = new Date(); const s3m = new Date(today); s3m.setMonth(s3m.getMonth()-3);
                 const fmt = d => d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
-                const shipResults = await Promise.all(chunks.map(ch => {
-                  const inClause = ch.map(c => `'${c}'`).join(',');
-                  return xerpPool.request().input('s3',sql.NChar(16),fmt(s3m)).input('t',sql.NChar(16),fmt(today)).query(`SELECT RTRIM(ItemCode) AS code, SUM(InoutQty) AS qty FROM mmInoutItem WITH(NOLOCK) WHERE SiteCode='BK10' AND InoutGubun='SO' AND InoutDate>=@s3 AND InoutDate<@t AND RTRIM(ItemCode) IN (${inClause}) GROUP BY RTRIM(ItemCode)`);
-                }));
-                for (const shipR of shipResults) {
-                  for (const r of (shipR.recordset||[])) { const c=r.code.trim(); if(invMap[c]) invMap[c].monthly = Math.round((r.qty||0)/3); }
-                }
+                const shipR = await xerpPool.request().input('s3',sql.NChar(16),fmt(s3m)).input('t',sql.NChar(16),fmt(today)).query(`SELECT RTRIM(ItemCode) AS code, SUM(InoutQty) AS qty FROM mmInoutItem WITH(NOLOCK) WHERE SiteCode='BK10' AND InoutGubun='SO' AND InoutDate>=@s3 AND InoutDate<@t AND RTRIM(ItemCode) IN (${safeList}) GROUP BY RTRIM(ItemCode)`);
+                for (const r of (shipR.recordset||[])) { const c=r.code.trim(); if(invMap[c]) invMap[c].monthly = Math.round((r.qty||0)/3); }
               }
             }
           }
@@ -8701,113 +8193,6 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // GET /api/po/:id/timeline — PO 전체 공정체인 타임라인 (원재료 + 후공정 N단계)
-  const timelineMatch = pathname.match(/^\/api\/po\/(\d+)\/timeline$/);
-  if (timelineMatch && method === 'GET') {
-    try {
-      const poId = parseInt(timelineMatch[1]);
-      // 본인 PO
-      const po = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(poId);
-      if (!po) { fail(res, 404, 'PO not found'); return; }
-
-      // root 찾기 — parent_po_id가 있으면 부모(원재료) PO로 이동, 없으면 본인이 root
-      let rootPo = po;
-      if (po.parent_po_id) {
-        const parent = await db.prepare('SELECT * FROM po_header WHERE po_id=?').get(po.parent_po_id);
-        if (parent) rootPo = parent;
-      }
-
-      // root의 모든 자식(후공정 체인) 수집
-      const chainRows = await db.prepare('SELECT * FROM po_header WHERE parent_po_id=? ORDER BY process_step ASC, po_id ASC').all(rootPo.po_id);
-
-      // 모든 관련 PO의 activity_log 일괄 조회
-      const allPoIds = [rootPo.po_id, ...chainRows.map(r => r.po_id)];
-      const placeholders = allPoIds.map(() => '?').join(',');
-      const logs = await db.prepare(`SELECT * FROM po_activity_log WHERE po_id IN (${placeholders}) ORDER BY created_at ASC, id ASC`).all(...allPoIds);
-      const logsByPo = {};
-      for (const lg of logs) {
-        if (!logsByPo[lg.po_id]) logsByPo[lg.po_id] = [];
-        logsByPo[lg.po_id].push(lg);
-      }
-
-      // action → 라벨/아이콘 매핑
-      const ACTION_META = {
-        created:           { label: '발주 생성',        icon: '📝' },
-        vendor_confirm:    { label: '거래처 확인',      icon: '✅' },
-        vendor_ship:       { label: '출고 완료',        icon: '🚚' },
-        material_shipped:  { label: '원재료 출고',      icon: '🚚' },
-        auto_chain_create: { label: '다음 공정 자동 생성', icon: '🔗' },
-        auto_sent:         { label: '자동 발송',        icon: '📧' },
-        received:          { label: '바른손 입고',      icon: '📦' },
-        os_registered:     { label: 'OS 등록',          icon: '🏷️' },
-        force_complete:    { label: '강제 완료',        icon: '⚠️' },
-        reset_ship:        { label: '출고 취소/수정',   icon: '↩️' },
-        cancelled:         { label: '발주 취소',        icon: '❌' },
-        delivery_date_confirmed: { label: '입고일 확정', icon: '📅' },
-        sent:              { label: '거래처 발송',      icon: '📤' },
-        ship:              { label: '출고 완료',        icon: '🚚' }
-      };
-      function mapLog(lg) {
-        const meta = ACTION_META[lg.action] || { label: lg.action || '이벤트', icon: '•' };
-        return {
-          action: lg.action,
-          at: lg.created_at || '',
-          actor: lg.actor || lg.actor_type || '',
-          label: meta.label,
-          icon: meta.icon,
-          details: lg.details || ''
-        };
-      }
-
-      const materialPo = {
-        po_id: rootPo.po_id,
-        po_number: rootPo.po_number,
-        po_type: rootPo.po_type,
-        vendor_name: rootPo.material_vendor_name || rootPo.vendor_name,
-        po_date: rootPo.po_date,
-        status: rootPo.status,
-        shipped_at: rootPo.shipped_at,
-        events: (logsByPo[rootPo.po_id] || []).map(mapLog)
-      };
-
-      const processChain = chainRows.map(r => ({
-        step: r.process_step || 0,
-        process: (() => {
-          try {
-            const chain = r.process_chain ? JSON.parse(r.process_chain) : [];
-            return (Array.isArray(chain) && chain[0]?.process) || r.po_type || '';
-          } catch(_) { return r.po_type || ''; }
-        })(),
-        po_id: r.po_id,
-        po_number: r.po_number,
-        vendor_name: r.process_vendor_name || r.vendor_name,
-        status: r.status,
-        parent_po_id: r.parent_po_id,
-        shipped_at: r.shipped_at,
-        events: (logsByPo[r.po_id] || []).map(mapLog)
-      }));
-
-      // 마감 정보 — 마지막 단계(마지막 chainRow) 또는 root에 OS가 있으면 반영
-      const lastNode = chainRows.length ? chainRows[chainRows.length - 1] : rootPo;
-      const closing = {
-        os_number: lastNode.os_number || rootPo.os_number || '',
-        os_registered_at: (logsByPo[lastNode.po_id] || []).filter(l => l.action === 'os_registered').map(l => l.created_at)[0] || '',
-        final_status: lastNode.status
-      };
-
-      ok(res, {
-        material_po: materialPo,
-        process_chain: processChain,
-        closing,
-        requested_po_id: poId
-      });
-    } catch (e) {
-      console.error('[timeline] 조회 실패:', e.message);
-      fail(res, 500, '타임라인 조회 실패: ' + e.message);
-    }
-    return;
-  }
-
   // GET /api/activity-log — 전체 활동 로그 (최근 100건)
   if (pathname === '/api/activity-log' && method === 'GET') {
     const limit = parseInt(parsed.searchParams.get('limit') || '100');
@@ -9251,37 +8636,10 @@ async function handleRequest(req, res) {
       row.status = PO_STATUS_EN_TO_KO[row.status] || row.status;
     }
     // include=items 시 품목 정보 포함
-    const includeParam = parsed.searchParams.get('include') || '';
-    if (includeParam === 'items' || includeParam.includes('items')) {
+    if (parsed.searchParams.get('include') === 'items') {
       const itemStmt = db.prepare('SELECT * FROM po_items WHERE po_id = ?');
       for (const row of rows) {
         row.items = await itemStmt.all(row.po_id);
-      }
-    }
-    // include=progress 시 후공정 체인(자식 PO) 요약 포함 — 목록 미니바용
-    if (includeParam === 'progress' || includeParam.includes('progress')) {
-      // 모든 자식 PO를 한 번에 조회 (N+1 방지)
-      const rootIds = rows.filter(r => !r.parent_po_id).map(r => r.po_id);
-      let childrenByParent = {};
-      if (rootIds.length) {
-        const placeholders = rootIds.map(() => '?').join(',');
-        const children = await db.prepare(
-          `SELECT po_id, parent_po_id, process_step, status, po_type, vendor_name, process_vendor_name, shipped_at FROM po_header WHERE parent_po_id IN (${placeholders}) ORDER BY process_step ASC, po_id ASC`
-        ).all(...rootIds);
-        for (const c of children) {
-          if (!childrenByParent[c.parent_po_id]) childrenByParent[c.parent_po_id] = [];
-          childrenByParent[c.parent_po_id].push({
-            po_id: c.po_id,
-            step: c.process_step || 0,
-            status: PO_STATUS_EN_TO_KO[c.status] || c.status,
-            raw_status: c.status,
-            vendor: c.process_vendor_name || c.vendor_name || '',
-            shipped_at: c.shipped_at || ''
-          });
-        }
-      }
-      for (const row of rows) {
-        row._children = childrenByParent[row.po_id] || [];
       }
     }
     ok(res, rows);
@@ -9304,10 +8662,6 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const items = body.items || [];
     if (!items.length) { fail(res, 400, '항목이 없습니다'); return; }
-    // 품목코드 정제
-    for (const it of items) {
-      if (it && it.product_code) it.product_code = String(it.product_code).replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
-    }
 
     // vendor_name별 그룹핑
     const vendorGroups = {};
@@ -9390,10 +8744,6 @@ async function handleRequest(req, res) {
   if (pathname === '/api/po' && method === 'POST') {
     const body = await readJSON(req);
     const items = body.items || [];
-    // 품목코드 정제: 공백/보이지 않는 유니코드 문자 제거 (XERP 재고 매칭 보호)
-    for (const it of items) {
-      if (it && it.product_code) it.product_code = String(it.product_code).replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
-    }
     const totalQty = items.reduce((s, it) => s + (it.ordered_qty || 0), 0);
 
     // vendor_id로 vendor_name 자동 조회
@@ -18712,179 +18062,8 @@ async function runDeadlineAlertCheck() {
   }
 }
 
-// XERP snapshot 자동 동기화 (서버 내부 호출)
-async function runXerpSnapshotSync(triggeredBy = 'scheduler') {
-  console.log(`[XERP 동기화 스케줄러] 시작 (${triggeredBy})`);
-  let syncLogId = null;
-  try {
-    // 중복 실행 방지
-    const running = await db.prepare("SELECT id FROM sync_log WHERE sync_type='xerp_inventory' AND status='running'").get();
-    if (running) { console.log('[XERP 동기화] 이미 진행 중 — 스킵'); return; }
-    const info = await db.prepare("INSERT INTO sync_log (sync_type, status, triggered_by) VALUES (?,?,?)").run('xerp_inventory', 'running', triggeredBy);
-    syncLogId = info.lastInsertRowid;
-  } catch(e) { console.warn('[XERP 동기화] 로그 시작 실패:', e.message); }
-
-  try {
-    await ensureXerpPool().catch(()=>null);
-    // 바른손 → DD 순차 (동시 쿼리 부하 회피)
-    let bs = [], dd = [];
-    try { bs = await fetchXerpInventoryForSync('barunson'); } catch(e) { console.error('[XERP 동기화] barunson 실패:', e.message); }
-    try { dd = await fetchXerpInventoryForSync('dd'); } catch(e) { console.error('[XERP 동기화] dd 실패:', e.message); }
-    const all = [...bs, ...dd];
-    // 전원 재고 0 && 전원 출고 0이면 전체 실패로 간주 → snapshot 갱신 스킵
-    const allZero = all.length > 0 && all.every(p => (p.current_stock || 0) === 0 && (p.total_3m || 0) === 0);
-    if (allZero) {
-      console.warn('[XERP 동기화] 전체 재고/출고 0 — XERP 실패 의심, snapshot 갱신 스킵하고 기존 유지');
-      if (syncLogId) {
-        try { await db.prepare("UPDATE sync_log SET status='failed', error_msg=?, finished_at=datetime('now','localtime') WHERE id=?").run('XERP 전체 실패 — 기존 snapshot 유지', syncLogId); } catch(_){}
-      }
-      return;
-    }
-    let successCount = 0;
-    if (all.length) {
-      const upsert = db.prepare(`INSERT INTO inventory_snapshot
-        (product_code, legal_entity, site_code, current_stock, monthly_out, daily_out, total_3m, item_name, synced_at)
-        VALUES (?,?,?,?,?,?,?,?,datetime('now','localtime'))
-        ON CONFLICT(product_code) DO UPDATE SET
-          legal_entity=excluded.legal_entity,
-          site_code=excluded.site_code,
-          current_stock=excluded.current_stock,
-          monthly_out=excluded.monthly_out,
-          daily_out=excluded.daily_out,
-          total_3m=excluded.total_3m,
-          item_name=CASE WHEN excluded.item_name='' THEN inventory_snapshot.item_name ELSE excluded.item_name END,
-          synced_at=excluded.synced_at`);
-      const tx = db.transaction(async () => {
-        for (const p of all) {
-          try {
-            await upsert.run(p.product_code, p.legal_entity, p.site_code, p.current_stock, p.monthly_out, p.daily_out, p.total_3m, p.item_name || '');
-            successCount++;
-          } catch(_) {}
-        }
-      });
-      await tx();
-    }
-    if (syncLogId) {
-      await db.prepare("UPDATE sync_log SET status='success', success_count=?, finished_at=datetime('now','localtime') WHERE id=?").run(successCount, syncLogId);
-    }
-    console.log(`[XERP 동기화 스케줄러] 완료: ${successCount}/${all.length}개 snapshot 저장`);
-  } catch (e) {
-    console.error('[XERP 동기화 스케줄러] 실패:', e.message);
-    if (syncLogId) {
-      try { await db.prepare("UPDATE sync_log SET status='failed', error_msg=?, finished_at=datetime('now','localtime') WHERE id=?").run(e.message.slice(0,500), syncLogId); } catch(_){}
-    }
-    try { sendSlack(`🔴 *XERP 재고 동기화 실패*\n\`\`\`${e.message.slice(0,500)}\`\`\``); } catch(_){}
-  }
-}
-
-// XERP 조회 헬퍼 (스케줄러 내부용, API의 fetchCompanyInventoryFromXerp와 동일 동작이지만 응답 포맷만 snapshot 컬럼 기준)
-// 실제로는 핸들러 내부의 fetchCompanyInventoryFromXerp를 쓸 수 없어 간단한 래핑만 복제
-async function fetchXerpInventoryForSync(legalEntity) {
-  const isDd = legalEntity === 'dd';
-  const originFilter = isDd
-    ? "(product_code LIKE 'DD%' OR origin = 'DD')"
-    : "(product_code NOT LIKE 'DD%' AND origin != 'DD')";
-  const statusFilter = isDd
-    ? "(status = 'active' OR status = 'inactive')"
-    : "status = 'active'";
-  const registered = await db.prepare(
-    `SELECT product_code, product_name FROM products WHERE ${statusFilter} AND ${originFilter}`
-  ).all();
-  if (!registered.length) return [];
-  for (const p of registered) {
-    p.product_code = (p.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
-  }
-  const codes = registered.map(p => p.product_code).filter(c => c && /^[A-Za-z0-9_\-]+$/.test(c));
-  if (!codes.length) return [];
-  const CHUNK = 50;
-  const chunks = [];
-  for (let i = 0; i < codes.length; i += CHUNK) chunks.push(codes.slice(i, i + CHUNK));
-
-  const dbName = isDd ? 'BHC' : 'XERP';
-  const siteCode = isDd ? 'BHC2' : 'BK10';
-  let workPool = null;
-  let createdLocal = false;
-  if (isDd) {
-    workPool = new sql.ConnectionPool({ ...xerpConfig, database: 'BHC' });
-    await workPool.connect();
-    createdLocal = true;
-  } else {
-    workPool = xerpPool;
-  }
-
-  try {
-    if (!workPool) throw new Error('XERP pool not connected');
-    // ★ readonly 계정 10초 타임아웃 대응: 순차 실행 + 실패한 chunk는 스킵하고 계속 진행
-    const invMap = {};
-    let invSuccess = 0, invFail = 0;
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const inClause = chunk.map(c => `'${c}'`).join(',');
-      try {
-        const req = workPool.request();
-        req.timeout = 7000; // 7초 (10초 한도에 3초 여유)
-        const r = await req.query(`SELECT RTRIM(ItemCode) AS item_code, SUM(OhQty) AS oh_qty FROM mmInventory WITH(NOLOCK) WHERE SiteCode='${siteCode}' AND RTRIM(ItemCode) IN (${inClause}) GROUP BY RTRIM(ItemCode)`);
-        for (const row of r.recordset) invMap[(row.item_code || '').trim().toUpperCase()] = Math.round(row.oh_qty || 0);
-        invSuccess++;
-      } catch (e) {
-        invFail++;
-        console.warn(`[XERP 동기화] 현재고 chunk ${i+1}/${chunks.length} 실패: ${e.message}`);
-      }
-    }
-    console.log(`[XERP 동기화] ${legalEntity} 현재고: ${invSuccess}/${chunks.length} chunk 성공 (실패 ${invFail})`);
-
-    const today = new Date();
-    const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
-    const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
-    const shipMap = {};
-    let shipSuccess = 0, shipFail = 0;
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const inClause = chunk.map(c => `'${c}'`).join(',');
-      try {
-        const req = workPool.request()
-          .input('start3m', sql.NChar(16), fmt(start3m))
-          .input('today', sql.NChar(16), fmt(today));
-        req.timeout = 7000;
-        const r = await req.query(`SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty FROM mmInoutItem WITH(NOLOCK) WHERE SiteCode='${siteCode}' AND InoutGubun='SO' AND InoutDate>=@start3m AND InoutDate<@today AND RTRIM(ItemCode) IN (${inClause}) GROUP BY RTRIM(ItemCode)`);
-        for (const row of r.recordset) {
-          const code = (row.item_code || '').trim().toUpperCase();
-          if (code) shipMap[code] = Math.round(row.total_qty || 0);
-        }
-        shipSuccess++;
-      } catch (e) {
-        shipFail++;
-        console.warn(`[XERP 동기화] 출고 chunk ${i+1}/${chunks.length} 실패: ${e.message}`);
-      }
-    }
-    console.log(`[XERP 동기화] ${legalEntity} 3개월출고: ${shipSuccess}/${chunks.length} chunk 성공 (실패 ${shipFail})`);
-
-    const out = [];
-    for (const p of registered) {
-      const codeUpper = p.product_code.toUpperCase();
-      const stock = invMap[codeUpper] || 0;
-      const total3m = shipMap[codeUpper] || 0;
-      out.push({
-        product_code: p.product_code,
-        legal_entity: isDd ? 'dd' : 'barunson',
-        site_code: siteCode,
-        current_stock: stock,
-        monthly_out: Math.round(total3m / 3),
-        daily_out: Math.round(total3m / 90),
-        total_3m: total3m,
-        item_name: p.product_name || ''
-      });
-    }
-    return out;
-  } finally {
-    if (createdLocal && workPool) { try { await workPool.close(); } catch(_){} }
-  }
-}
-
 // 자동발주 스케줄러: 매일 9시 실행
 async function _safeRunAutoOrder() {
-  // 자동발주 전에 XERP 최신 재고 snapshot 갱신
-  try { await runXerpSnapshotSync('scheduler'); } catch(e) { logger.error('[XERP 동기화] 실패:', e.message); }
   try {
     await runAutoOrderScheduler();
   } catch (e) {
@@ -18972,40 +18151,36 @@ async function runDailyPOSummary() {
   console.log('[일일 발주 요약] Slack 전송 완료');
 }
 
-// XERP 데이터 자동 동기화: 매일 오전 9:00 실행 (snapshot 갱신)
+// XERP 데이터 자동 동기화: 매일 9:30 실행
 function scheduleXerpSync() {
   const now = new Date();
-  const next900 = new Date(now);
-  next900.setHours(9, 0, 0, 0);
-  if (now >= next900) next900.setDate(next900.getDate() + 1);
+  const next930 = new Date(now);
+  next930.setHours(9, 30, 0, 0);
+  if (now >= next930) next930.setDate(next930.getDate() + 1);
 
-  const msUntil = next900 - now;
-  console.log(`[XERP snapshot 동기화] 다음 실행: ${next900.toLocaleString('ko-KR')} (${Math.round(msUntil / 60000)}분 후)`);
+  const msUntil = next930 - now;
+  console.log(`[XERP 동기화] 다음 실행: ${next930.toLocaleString('ko-KR')} (${Math.round(msUntil / 60000)}분 후)`);
 
   setTimeout(async () => {
-    try { await runXerpSnapshotSync('scheduler-daily'); } catch(e) { console.error('[XERP snapshot 동기화 실패]', e.message); }
-    // 이후 24시간마다 반복
+    await refreshXerpCache();
     setInterval(async () => {
-      try { await runXerpSnapshotSync('scheduler-daily'); } catch(e) { console.error('[XERP snapshot 동기화 실패]', e.message); }
+      await refreshXerpCache();
     }, 24 * 60 * 60 * 1000);
   }, msUntil);
-
-  // 서버 시작 후 30초 뒤 초기 동기화 1회 (snapshot 비어있으면 즉시 채우기)
-  setTimeout(async () => {
-    try {
-      const cnt = await db.prepare("SELECT COUNT(*) AS c FROM inventory_snapshot").get();
-      if (!cnt || (cnt.c || 0) === 0) {
-        console.log('[XERP snapshot 동기화] 초기 동기화 (snapshot 비어있음)');
-        await runXerpSnapshotSync('scheduler-initial');
-      }
-    } catch(e) { console.warn('[XERP snapshot 초기 동기화 판단 실패]', e.message); }
-  }, 30000);
 }
 
-// ─ legacy: 이전 버전 호환용 (더 이상 사용 안 함) ─
 async function refreshXerpCache() {
-  console.log('[refreshXerpCache] deprecated — runXerpSnapshotSync 사용');
-  try { await runXerpSnapshotSync('legacy'); } catch(e) { console.warn('[XERP 동기화] 오류:', e.message); }
+  console.log(`[XERP 동기화] ${new Date().toLocaleString('ko-KR')} 자동 동기화 시작`);
+  try {
+    xerpInventoryCacheTime = 0; // 캐시 무효화
+    const http = require('http');
+    const req = http.get(`http://localhost:${PORT}/api/xerp-inventory?refresh=1`, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => console.log('[XERP 동기화] 완료'));
+    });
+    req.on('error', e => console.warn('[XERP 동기화] 실패:', e.message));
+  } catch(e) { console.warn('[XERP 동기화] 오류:', e.message); }
 }
 
 } // end startServer()

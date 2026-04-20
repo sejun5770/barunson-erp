@@ -50,21 +50,6 @@ function convertPlaceholders(sql) {
 // SQLite 함수를 PostgreSQL로 변환
 function convertSqliteFunctions(sql) {
   let s = sql;
-  // datetime('now','localtime','-7 minutes') → (NOW() - INTERVAL '7 minutes')
-  // datetime('now','localtime','+1 days')    → (NOW() + INTERVAL '1 days')
-  // (3-arg modifier 우선 처리 — 기본 datetime(now) 매칭 전에)
-  s = s.replace(/datetime\(\s*'now'\s*,\s*'localtime'\s*,\s*'([+-]?\d+)\s+(\w+)'\s*\)/gi,
-    (_m, n, unit) => {
-      const num = parseInt(n, 10);
-      const sign = num < 0 ? '-' : '+';
-      return `(NOW() ${sign} INTERVAL '${Math.abs(num)} ${unit}')`;
-    });
-  s = s.replace(/datetime\(\s*'now'\s*,\s*'([+-]?\d+)\s+(\w+)'\s*\)/gi,
-    (_m, n, unit) => {
-      const num = parseInt(n, 10);
-      const sign = num < 0 ? '-' : '+';
-      return `(NOW() ${sign} INTERVAL '${Math.abs(num)} ${unit}')`;
-    });
   // datetime('now','localtime') → NOW()
   s = s.replace(/datetime\(\s*'now'\s*,\s*'localtime'\s*\)/gi, 'NOW()');
   s = s.replace(/datetime\(\s*'now'\s*\)/gi, 'NOW()');
