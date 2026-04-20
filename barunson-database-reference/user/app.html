@@ -9177,6 +9177,26 @@ async function loadOrderTodo() {
     }
   }
 
+  // products-only 상태 감지 (재고/출고가 모두 0이면 실제 XERP 동기화 아직 안 된 상태)
+  // 이 경우 긴급/주의 계산해봤자 모두 비어 나옴 → 사용자에게 명확한 안내 표시
+  const allZero = RAW.length > 0 && RAW.every(p => (Number(p['가용재고']||0) === 0) && (Number(p['월출고']||p._xerpMonthly||p._monthly||0) === 0));
+  if (allZero) {
+    const msg = `<div style="grid-column:1/-1;text-align:center;padding:40px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px">
+      <div style="font-size:16px;font-weight:700;color:#1e40af;margin-bottom:8px">🔄 XERP 동기화가 필요합니다</div>
+      <div style="font-size:13px;color:#475569;margin-bottom:16px">재고/출고 데이터가 없어 발주 판단을 할 수 없습니다.</div>
+      <button onclick="syncAllDB()" style="background:#2563eb;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer">DB 동기화 시작</button>
+    </div>`;
+    document.getElementById('otUrgentGrid').innerHTML = msg;
+    document.getElementById('otSoonList').innerHTML = '';
+    document.getElementById('otPendingList').innerHTML = '';
+    document.getElementById('otTodayList').innerHTML = '';
+    ['otCntUrgent','otCntSoon','otCntPending','otCntToday'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.textContent = '-';
+    });
+    const sb = document.getElementById('qmOrderTodo'); if (sb) sb.textContent = '0';
+    return;
+  }
+
   // ===== 분류 =====
   // 긴급: 가용일수 ≤ 15일 (또는 음수) + 월출고 있음
   // 주의: 16~30일
