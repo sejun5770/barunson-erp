@@ -4495,6 +4495,16 @@ async function handleRequest(req, res) {
       if (!r.legal_entity) r.legal_entity = _deriveEntity(r.product_code);
       return r;
     });
+    // product_code 중복 제거 (첫 등장 유지) — DB UNIQUE 제약 누락 대비
+    {
+      const _seen = new Set();
+      rows = rows.filter(r => {
+        const c = (r.product_code || '').trim();
+        if (!c || _seen.has(c)) return false;
+        _seen.add(c);
+        return true;
+      });
+    }
     // 컬럼이 없어서 DB 필터를 못 건 경우, 메모리에서 한번 더 필터
     if (entity && entity !== 'all' && !_hasEntity.products) {
       rows = rows.filter(r => r.legal_entity === entity);
@@ -5104,18 +5114,33 @@ async function handleRequest(req, res) {
       const statusFilter = isDd
         ? "(status = 'active' OR status = 'inactive')"  // DD: inactive 포함
         : "status = 'active'";
-      const registeredProducts = await db.prepare(
+      const rawRegistered = await db.prepare(
         `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products WHERE ${statusFilter} AND ${originFilter}`
       ).all();
-      if (!registeredProducts.length) return [];
+      if (!rawRegistered.length) return [];
 
       // ★ 핵심 매칭 보정: product_code 공백 + 보이지 않는 유니코드 문자 제거
       // XERP ItemCode 는 nchar(40) 패딩이라 SQL RTRIM 으로 받아오지만,
       // 로컬 products.product_code 에 ZWSP/NBSP 등이 섞여 있으면 IN절 필터에서 탈락해서
       // 조용히 매칭 실패 (재고 0). 양쪽 다 cleanProductCode 처리.
-      for (const p of registeredProducts) {
+      for (const p of rawRegistered) {
         p.product_code = (p.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
       }
+
+      // ★ products 테이블 중복 제거 (product_code 기준, 첫 등장 유지)
+      // 증상: BAG_ACC06/BAG_ACC07/BAG_ACC08 등이 화면에 2행씩 뜸 — UNIQUE 제약이 과거에 제대로 적용 안
+      //      됐거나 import 시 duplicate 가 쌓인 케이스. SELECT 단계에서 JS 로 dedupe.
+      const _seenCodes = new Set();
+      const registeredProducts = [];
+      let _dupSkipped = 0;
+      for (const p of rawRegistered) {
+        const c = p.product_code;
+        if (!c) continue;
+        if (_seenCodes.has(c)) { _dupSkipped++; continue; }
+        _seenCodes.add(c);
+        registeredProducts.push(p);
+      }
+      if (_dupSkipped > 0) console.warn(`[xerp-inv ${legalEntity}] products 테이블 중복 ${_dupSkipped}건 skip (첫 row 유지)`);
 
       const productCodes = registeredProducts.map(p => p.product_code);
       // IN절 안전 코드 (SQL Injection 방지: 영숫자/_/- 만 허용)
