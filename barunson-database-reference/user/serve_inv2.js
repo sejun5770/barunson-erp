@@ -6288,6 +6288,184 @@ async function handleRequest(req, res) {
     ok(res, { po_id: poId, po_number: poNum }); return;
   }
 
+  // ════════════════════════════════════════════════════════════════════
+  //  한국 발주 마법사 관련 API (3단계: 품목 → 원재료업체 → 후가공업체)
+  // ════════════════════════════════════════════════════════════════════
+
+  // GET /api/po/latest-by-product?codes=A,B,C — 품목별 최근 PO 설정 (마법사 기본값)
+  if (pathname === '/api/po/latest-by-product' && method === 'GET') {
+    try {
+      const codesParam = parsed.searchParams.get('product_codes') || parsed.searchParams.get('codes') || '';
+      const codes = codesParam.split(',').map(s => s.trim()).filter(Boolean);
+      if (!codes.length) { ok(res, {}); return; }
+      // 품목별 가장 최근 PO (한국 origin, 취소/draft 제외)
+      // PG/SQLite 호환: 파라미터 바인딩으로 전체 조회 후 JS에서 first-only
+      const placeholders = codes.map(() => '?').join(',');
+      const rows = await db.prepare(`
+        SELECT poi.product_code, poh.po_id, poh.po_date,
+               poh.material_vendor_name, poh.process_vendor_name,
+               poh.process_chain, poh.po_type
+        FROM po_items poi
+        JOIN po_header poh ON poh.po_id = poi.po_id
+        WHERE poi.product_code IN (${placeholders})
+          AND poh.origin = '한국'
+          AND poh.status NOT IN ('cancelled','draft')
+        ORDER BY poi.product_code, poh.po_date DESC, poh.po_id DESC
+      `).all(...codes);
+      // 품목당 첫 행만 채택
+      const result = {};
+      for (const r of rows) {
+        if (result[r.product_code]) continue;
+        let chain = [];
+        try { if (r.process_chain) chain = JSON.parse(r.process_chain); } catch(_) {}
+        result[r.product_code] = {
+          material_vendor: r.material_vendor_name || '',
+          process_vendor: r.process_vendor_name || '',
+          process_chain: Array.isArray(chain) ? chain : [],
+          po_date: r.po_date || ''
+        };
+      }
+      ok(res, result);
+    } catch (e) {
+      console.error('[latest-by-product] 실패:', e.message);
+      fail(res, 500, '최근 PO 조회 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // POST /api/po/korea-wizard — 마법사 확정 (원재료 PO N장 + 후가공 PO M장 생성)
+  if (pathname === '/api/po/korea-wizard' && method === 'POST') {
+    const body = await readJSON(req);
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) { fail(res, 400, 'items required'); return; }
+    // 각 품목은 {product_code, ordered_qty, material_vendor, material_code, material_name, process_chain:[{step,process,vendor}], spec}
+    // 검증
+    for (const it of items) {
+      if (!it.product_code) { fail(res, 400, `product_code 누락: ${JSON.stringify(it)}`); return; }
+      if (!it.material_vendor) { fail(res, 400, `${it.product_code}: material_vendor 미지정`); return; }
+      if (!Array.isArray(it.process_chain) || !it.process_chain.length) {
+        fail(res, 400, `${it.product_code}: process_chain 미지정 (최소 1개 공정 필요)`); return;
+      }
+      for (const s of it.process_chain) {
+        if (!s.vendor || !s.process) {
+          fail(res, 400, `${it.product_code}: process_chain에 process와 vendor 모두 필요`); return;
+        }
+      }
+    }
+
+    const expectedDate = body.expected_date || '';
+    const notes = body.notes || '';
+    const tolerancePct = body.tolerance_pct != null ? Number(body.tolerance_pct) : 5.0;
+    const actorName = body.actor || (currentUser ? currentUser.username : 'system');
+
+    // product_code 정제
+    for (const it of items) {
+      it.product_code = (it.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
+    }
+
+    // ─ 1) 원재료 업체별 그룹 ─
+    const materialGroups = {}; // { 업체명: [item, ...] }
+    for (const it of items) {
+      const key = it.material_vendor;
+      if (!materialGroups[key]) materialGroups[key] = [];
+      materialGroups[key].push(it);
+    }
+
+    // ─ 2) 후가공: 1단계 업체별로 그룹 ─
+    //    동일 1단계 업체라도 기본은 품목 묶음이 원재료 PO와 동일하게 흘러가도록
+    //    원재료 PO 당 1개의 1단계 후가공 PO를 생성 (parent_po_id 연결)
+    //    2+ step이 있는 품목은 process_chain JSON에만 저장, 실제 체인 트리거는 기존 vendor-portal 로직이 처리
+    const materialPos = [];
+    const processPos = [];
+
+    try {
+      for (const [matVendor, matItems] of Object.entries(materialGroups)) {
+        const matPoNumber = await generatePoNumber();
+        const matTotalQty = matItems.reduce((s, i) => s + (Number(i.ordered_qty) || 0), 0);
+        const matNotes = notes || `원재료 발주 (${matVendor})`;
+        // 전체 공정 체인을 JSON으로 저장 (첫 품목 기준 대표값 — UI 참고용; 실제 품목별 체인은 po_items.notes에도 기록)
+        const repChain = matItems[0].process_chain || [];
+        const matInfo = await db.prepare(`INSERT INTO po_header
+          (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+           due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step)
+          VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?)`)
+          .run(matPoNumber, '원재료', matVendor, matVendor, '', 'sent',
+               expectedDate, matTotalQty, matNotes, '한국', tolerancePct,
+               JSON.stringify(repChain), 0);
+        const matPoId = matInfo.lastInsertRowid;
+
+        const insItem = db.prepare(`INSERT INTO po_items
+          (po_id, product_code, brand, process_type, ordered_qty, spec, notes)
+          VALUES (?,?,?,?,?,?,?)`);
+        for (const it of matItems) {
+          await insItem.run(matPoId, it.product_code, it.brand || '', '원재료',
+            Number(it.ordered_qty) || 0, it.spec || '',
+            `용지:${it.material_name || ''} / 공정체인:${JSON.stringify(it.process_chain)}`);
+        }
+
+        await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)")
+          .run(matPoId, 'created', actorName, `마법사 생성: 원재료 PO (${matVendor}, ${matItems.length}품목)`);
+
+        materialPos.push({ po_id: matPoId, po_number: matPoNumber, vendor: matVendor, items: matItems.length, total_qty: matTotalQty });
+
+        // ─ 동일 원재료 그룹의 1단계 후가공 업체 수집 → 업체별로 후가공 PO 생성 ─
+        const postStep1ByVendor = {};
+        for (const it of matItems) {
+          const step1 = it.process_chain[0];
+          if (!step1) continue;
+          const key = step1.vendor;
+          if (!postStep1ByVendor[key]) postStep1ByVendor[key] = { process: step1.process, items: [] };
+          postStep1ByVendor[key].items.push(it);
+        }
+        for (const [postVendor, info] of Object.entries(postStep1ByVendor)) {
+          const postPoNumber = await generatePoNumber();
+          const postTotalQty = info.items.reduce((s, i) => s + (Number(i.ordered_qty) || 0), 0);
+          const postInfo = await db.prepare(`INSERT INTO po_header
+            (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+             due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?,?)`)
+            .run(postPoNumber, '후공정', postVendor, matVendor, postVendor, 'draft',
+                 expectedDate, postTotalQty, `후가공(${info.process}) 대기 - 원재료 입고 후 발송`, '한국', tolerancePct,
+                 JSON.stringify(info.items[0].process_chain || []), 1, matPoId);
+          const postPoId = postInfo.lastInsertRowid;
+          for (const it of info.items) {
+            await insItem.run(postPoId, it.product_code, it.brand || '', info.process,
+              Number(it.ordered_qty) || 0, it.spec || '',
+              `원재료:${it.material_name || ''} / 전체체인:${JSON.stringify(it.process_chain)}`);
+          }
+          await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)")
+            .run(postPoId, 'created', actorName, `마법사 생성: 후가공 PO (${postVendor}, ${info.process}, 원재료 PO: ${matPoNumber})`);
+          processPos.push({ po_id: postPoId, po_number: postPoNumber, vendor: postVendor, process: info.process, items: info.items.length, total_qty: postTotalQty, parent_po_id: matPoId });
+        }
+      }
+
+      // ─ 이메일 발송 (비동기, 실패해도 응답은 성공) ─
+      (async () => {
+        for (const m of materialPos) {
+          try {
+            const vendorRow = await db.prepare("SELECT email, email_cc FROM vendors WHERE name=?").get(m.vendor);
+            if (vendorRow?.email) {
+              const matPo = await db.prepare("SELECT * FROM po_header WHERE po_id=?").get(m.po_id);
+              const matItems = await db.prepare("SELECT * FROM po_items WHERE po_id=?").all(m.po_id);
+              await sendPOEmail(matPo, matItems, vendorRow.email, m.vendor, false, vendorRow.email_cc);
+            }
+          } catch (e) { console.warn(`[korea-wizard] 원재료 이메일 실패 (${m.vendor}):`, e.message); }
+        }
+        // 후가공은 원재료 입고 후 자동 발송되므로 여기서 즉시 발송하지 않음 (draft 상태 유지)
+        // 사용자가 원재료 입고 확정 시 기존 vendor-portal PATCH 로직이 자동으로 후가공 PO를 sent로 전환하며 이메일 발송
+      })().catch(e => console.error('[korea-wizard] 비동기 이메일 오류:', e.message));
+
+      if (currentUser) auditLog(currentUser.userId, currentUser.username, 'po_create_wizard', 'po_header', null,
+        `한국 마법사 발주: 원재료 ${materialPos.length}장 + 후가공 ${processPos.length}장`, clientIP);
+
+      ok(res, { material_pos: materialPos, process_pos: processPos });
+    } catch (e) {
+      console.error('[korea-wizard] 실패:', e.message, e.stack);
+      fail(res, 500, '마법사 발주 생성 실패: ' + e.message);
+    }
+    return;
+  }
+
   // POST /api/procurement/assembly/:id/ship — 더기프트 출고 등록
   const asmShipMatch = pathname.match(/^\/api\/procurement\/assembly\/(\d+)\/ship$/);
   if (asmShipMatch && method === 'POST') {
@@ -8646,11 +8824,37 @@ async function handleRequest(req, res) {
     for (const row of rows) {
       row.status = PO_STATUS_EN_TO_KO[row.status] || row.status;
     }
-    // include=items 시 품목 정보 포함
-    if (parsed.searchParams.get('include') === 'items') {
+    // include=items / include=progress 지원 (comma-separated 허용)
+    const includeParam = parsed.searchParams.get('include') || '';
+    if (includeParam === 'items' || includeParam.includes('items')) {
       const itemStmt = db.prepare('SELECT * FROM po_items WHERE po_id = ?');
       for (const row of rows) {
         row.items = await itemStmt.all(row.po_id);
+      }
+    }
+    // include=progress 시 후공정 체인(자식 PO) 요약 포함 — 발주현황 목록 미니바용 (N+1 방지)
+    if (includeParam === 'progress' || includeParam.includes('progress')) {
+      const rootIds = rows.filter(r => !r.parent_po_id).map(r => r.po_id);
+      const childrenByParent = {};
+      if (rootIds.length) {
+        const placeholders = rootIds.map(() => '?').join(',');
+        const children = await db.prepare(
+          `SELECT po_id, parent_po_id, process_step, status, po_type, vendor_name, process_vendor_name, shipped_at FROM po_header WHERE parent_po_id IN (${placeholders}) ORDER BY process_step ASC, po_id ASC`
+        ).all(...rootIds);
+        for (const c of children) {
+          if (!childrenByParent[c.parent_po_id]) childrenByParent[c.parent_po_id] = [];
+          childrenByParent[c.parent_po_id].push({
+            po_id: c.po_id,
+            step: c.process_step || 0,
+            status: PO_STATUS_EN_TO_KO[c.status] || c.status,
+            raw_status: c.status,
+            vendor: c.process_vendor_name || c.vendor_name || '',
+            shipped_at: c.shipped_at || ''
+          });
+        }
+      }
+      for (const row of rows) {
+        row._children = childrenByParent[row.po_id] || [];
       }
     }
     ok(res, rows);
