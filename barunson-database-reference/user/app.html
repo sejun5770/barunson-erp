@@ -7728,16 +7728,19 @@ async function processData(products){
   });
 
   // 발주이력 없는 품목을 nohistory로 분리
-  ['urgent','danger','safe'].forEach(status => {
-    const withHistory = [];
-    classified[status].forEach(p => {
-      const code = p['제품코드'] || p['품목코드'] || '';
-      const hasPO = allPOItems && allPOItems.has(code);
-      if (hasPO) withHistory.push(p);
-      else classified.nohistory.push(p);
+  // 단, allPOItems 가 비어있으면 API 실패로 보고 분리 skip (전체가 nohistory로 쏠리는 버그 방지)
+  if (allPOItems && allPOItems.size > 0) {
+    ['urgent','danger','safe'].forEach(status => {
+      const withHistory = [];
+      classified[status].forEach(p => {
+        const code = p['제품코드'] || p['품목코드'] || '';
+        const hasPO = allPOItems.has(code);
+        if (hasPO) withHistory.push(p);
+        else classified.nohistory.push(p);
+      });
+      classified[status] = withHistory;
     });
-    classified[status] = withHistory;
-  });
+  }
 
   updateOriginCounts();
   updateStatusCounts();
@@ -7783,7 +7786,7 @@ function updateStatusCounts(){
     const note = productNotes[code]?.note_type || '';
     if(note === '디지털인쇄용') counts.printwarehouse++;
     else if(note === '기타') counts.etc++;
-    else if((p._status === 'urgent' || p._status === 'danger' || p._status === 'safe') && allPOItems && !allPOItems.has(code)) counts.nohistory++;
+    else if((p._status === 'urgent' || p._status === 'danger' || p._status === 'safe') && allPOItems && allPOItems.size > 0 && !allPOItems.has(code)) counts.nohistory++;
     else counts[p._status]++;
   });
   // cUrgent/cDanger/cSafe/cNosale KPI 카드는 제거됨 (2026-04). 누락 참조 방어.
@@ -7883,7 +7886,8 @@ function renderCell(c, p){
     let key;
     if (note === '디지털인쇄용') key = 'printwarehouse';
     else if (note === '기타') key = 'etc';
-    else if ((p._status === 'urgent' || p._status === 'danger' || p._status === 'safe') && allPOItems && !allPOItems.has(code)) key = 'nohistory';
+    // 이력없음: allPOItems 가 실제로 데이터를 갖고 있을 때만 판정. 빈 Set 이면 API 실패로 보고 skip.
+    else if ((p._status === 'urgent' || p._status === 'danger' || p._status === 'safe') && allPOItems && allPOItems.size > 0 && !allPOItems.has(code)) key = 'nohistory';
     else key = p._status; // urgent / danger / safe / nosale
     const sMap = {
       urgent:         { label:'긴급',     fg:'#fff',    bg:'#dc2626' },
