@@ -15042,7 +15042,8 @@ async function refreshVendorCards(){
           const mapKey=code+'_'+s.process;
           const opts=postVendorNames.map(v=>`<option value="${esc(v)}"${v===s.vendor?' selected':''}>${esc(v)}</option>`).join('');
           const isSkip = s.vendor === '__SKIP__';
-          const isOther = s.vendor === '__OTHER__' || (s.vendor && !postVendorNames.includes(s.vendor) && s.vendor !== '__SKIP__' && s.vendor !== '');
+          // postVendorNames 리스트가 빈 배열이면 isOther 판정 skip — API 실패 시 기존 vendor가 '기타'로 잘못 표기되는 것 방지
+          const isOther = s.vendor === '__OTHER__' || (s.vendor && postVendorNames.length > 0 && !postVendorNames.includes(s.vendor) && s.vendor !== '__SKIP__' && s.vendor !== '');
           const icon = s.isFromDB ? '🔄' : (s.vendor ? '📋' : '');
           const uid = code.replace(/[^a-zA-Z0-9]/g,'_')+'_'+s.process.replace(/[^a-zA-Z0-9가-힣]/g,'_');
           html+=`<div class="post-step-row" data-process="${esc(s.process)}" style="display:flex;align-items:center;gap:8px;padding:6px 0;${idx>0?'border-top:1px dashed var(--border)':''};${isSkip?'opacity:0.4':''}">
