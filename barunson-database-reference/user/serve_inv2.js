@@ -565,15 +565,16 @@ function verifyVendorToken(email, token) {
   return false;
 }
 
-// vendor-portal 공통 인증 헬퍼 (access 토큰 또는 레거시 email+token)
+// vendor-portal 공통 인증 헬퍼
+// 보안 방침(2026-04): 외부 거래처 access 토큰은 더 이상 허용하지 않음.
+// 이 함수는 "내부 관리자가 거래처화면 미리보기 할 때" 거래처 정보를 파라미터로 받아 반환만 한다.
+// 상위 라우터에서 이미 관리자 JWT 검증이 완료됐다고 가정 (serve_inv2.js 4139행 미들웨어).
 function extractVendorAuth(params) {
-  // params: { access, email, token, vendor_name } (body 또는 querystring에서 추출)
-  const accessToken = params.access || params.token || '';
-  const decoded = decodeVendorToken(accessToken);
-  const email = decoded ? decoded.email : (params.email || '');
-  const vendorName = decoded ? (decoded.name || '') : (params.vendor_name || '');
-  if (!email || !verifyVendorToken(email, accessToken)) return null;
-  return { email, vendorName, token: accessToken };
+  // params: { email, vendor_name } — 관리자가 명시적으로 지정
+  const email = params.email || '';
+  const vendorName = params.vendor_name || '';
+  if (!email) return null;
+  return { email, vendorName, token: '' };
 }
 
 // product_info 데이터 (원자재코드, 원재료명, 절, 후공정업체 조회용)
@@ -730,11 +731,10 @@ async function logPOActivity(poId, action, opts = {}) {
 }
 
 // 이메일 발송: SMTP 우선, Apps Script 폴백
+// 보안 방침(2026-04): 거래처 포털 링크는 제거. PDF 첨부 + 이메일 회신 안내로 변경.
 async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, emailCc) {
 
   const pInfo = getProductInfo();
-  const token = generateVendorToken(vendorEmail, vendorName);
-  const portalUrl = `${BASE_URL}/?access=${token}`;
 
   const typeLabel = isPostProcess ? '후공정' : '원재료';
   const subject = `[바른컴퍼니] ${typeLabel} 발주서 - ${po.po_number} (${vendorName})`;
@@ -831,13 +831,17 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <thead>${tableHeader}</thead>
           <tbody>${tableRows}</tbody>
         </table>
-        <div style="margin-top:30px;text-align:center">
-          <a href="${portalUrl}" style="display:inline-block;background:#f97316;color:#fff;padding:14px 40px;border-radius:8px;text-decoration:none;font-weight:600;font-size:16px">
-            발주 확인하기
-          </a>
+        <div style="margin-top:24px;padding:16px 20px;background:#fff7ed;border:1px solid #fdba74;border-radius:8px;color:#7c2d12">
+          <div style="font-weight:700;font-size:14px;margin-bottom:8px">📋 발주 확인 및 진행 안내</div>
+          <div style="font-size:13px;line-height:1.7">
+            ① 첨부된 <b>PDF 발주서</b>를 확인해주세요.<br>
+            ② <b>발주 확인 / 출고 예정일</b>을 이 메일에 회신해주시거나 담당자에게 전화 부탁드립니다.<br>
+            ③ <b>출고 완료 시점</b>에도 회신 부탁드립니다. 접수 후 후공정 업체로 전달됩니다.
+          </div>
         </div>
-        <p style="margin-top:20px;color:#888;font-size:12px;text-align:center">
-          위 버튼을 클릭하면 발주현황 페이지로 이동합니다.
+        <p style="margin-top:14px;color:#888;font-size:11px;text-align:center">
+          ※ 본 메일은 바른컴퍼니 ERP에서 자동 발송되었습니다.<br>
+          문의: barun@baruncompany.com · Tel 02-6959-0750
         </p>
       </div>
     </div>`;
@@ -4136,17 +4140,30 @@ async function handleRequest(req, res) {
   //  인증 미들웨어 — 여기서부터 모든 API는 토큰 필요
   // ════════════════════════════════════════════════════════════════════
   let currentUser = null;
-  if (pathname.startsWith('/api/') && !pathname.startsWith('/api/vendor-portal')) {
+  if (pathname.startsWith('/api/')) {
     const token = extractToken(req);
     const decoded = token ? verifyToken(token) : null;
     if (decoded) {
       currentUser = decoded;
     }
-    // 인증 강제 모드: AUTH_REQUIRED=true 일 때만 차단 (기본: 선택적)
-    const authRequired = (envVars.AUTH_REQUIRED || process.env.AUTH_REQUIRED || 'false') === 'true';
-    if (authRequired && !decoded) {
-      fail(res, 401, '인증이 필요합니다. 로그인하세요.');
-      return;
+
+    // ── 보안: vendor-portal API는 외부 거래처 접근 전면 차단 ──
+    // 기존엔 access JWT 토큰(이메일 해시)로 외부 거래처가 직접 호출 가능했으나,
+    // 해킹 위험으로 이 경로 자체를 "내부 관리자 전용 미리보기"로만 제한.
+    // currentUser(= ERP 관리자 JWT)가 없으면 전부 403.
+    if (pathname.startsWith('/api/vendor-portal')) {
+      if (!currentUser) {
+        fail(res, 403, '거래처 포털은 더 이상 외부 접근을 지원하지 않습니다. 발주서는 이메일(PDF)로 발송됩니다.');
+        return;
+      }
+      // 관리자면 통과 → 내부 "거래처화면 미리보기"용으로만 사용
+    } else {
+      // 일반 API: 인증 강제 모드(AUTH_REQUIRED=true)에서만 차단
+      const authRequired = (envVars.AUTH_REQUIRED || process.env.AUTH_REQUIRED || 'false') === 'true';
+      if (authRequired && !decoded) {
+        fail(res, 401, '인증이 필요합니다. 로그인하세요.');
+        return;
+      }
     }
   }
 

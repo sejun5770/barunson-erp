@@ -21287,17 +21287,20 @@ function _unusedGantt_REMOVED(){ return;
 }
 
 // ── 관리자가 거래처 포탈 화면을 새 탭으로 열기 ──
+// 보안 정책(2026-04): 거래처 포털은 해킹 리스크로 외부 접근을 차단했음.
+// 내부 '거래처화면 미리보기' 기능은 별도 관리자 전용 API로 재구현 예정.
+// 임시로 안내 메시지만 표시.
 async function openVendorPortalView(email, vendorName) {
-  try {
-    const resp = await fetch(`/api/vendor-portal/generate-token?email=${encodeURIComponent(email)}&name=${encodeURIComponent(vendorName)}`).then(r=>r.json());
-    if (resp.data && resp.data.access) {
-      window.open(`/?access=${encodeURIComponent(resp.data.access)}`, '_blank');
-    } else {
-      alert('거래처 토큰 생성 실패');
-    }
-  } catch(e) {
-    alert('거래처 화면 열기 실패: ' + e.message);
-  }
+  alert(
+    '⚠️ 거래처 포털 외부 접근이 차단되었습니다 (보안 강화)\n\n' +
+    '변경 내용:\n' +
+    '• 거래처에게는 이제 PDF 발주서가 이메일로 직접 발송됩니다\n' +
+    '• 발주 확인/출고일은 이메일 회신 또는 전화로 받습니다\n' +
+    '• 관리자 전용 "거래처화면 미리보기" 기능은 차후 업데이트 예정\n\n' +
+    '현재 발주서 확인 방법:\n' +
+    '- "📧 메일보내기" 또는 "📧 재발송" 버튼으로 PDF 첨부 이메일 발송\n' +
+    '- 발주서 상세는 ERP 내 "발주현황 상세"에서 직접 확인'
+  );
 }
 
 // ===== VENDOR PORTAL MODE (업체 포털) =====
