@@ -7420,9 +7420,13 @@ Promise.all([
   });
   for(const code in ppvByCode) ppvByCode[code].sort((a,b)=>(a.step_order||1)-(b.step_order||1));
   // products 기본정보 머지
+  // 제품코드에 섞인 invisible chars (ZWSP/NBSP/BOM 등) 제거 — /api/xerp-inventory 는 cleanup 하는데
+  // /api/products 는 raw 로 내려주므로 originMap 키를 동일하게 cleanup 해야 매칭됨.
+  const _cleanCode = (s) => String(s||'').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
   list.forEach(p=>{
     if(!p.product_code) return;
-    if(p.origin) originMap[p.product_code]=p.origin;
+    const _cc = _cleanCode(p.product_code);
+    if(p.origin) originMap[_cc]=p.origin;
     const existing = productInfo[p.product_code] || {};
     // 레거시 후공정 키 제거 (product_post_vendor가 유일한 소스)
     const postTypes=typeof getPostCols==='function'?getPostCols():['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
@@ -7450,18 +7454,21 @@ Promise.all([
   if (typeof RAW !== 'undefined' && RAW.length > 0) {
     let _reclassified = 0;
     RAW.forEach(p => {
-      const code = p['제품코드'];
-      if (code && originMap[code] && p._origin !== originMap[code]) {
-        p._origin = originMap[code];
-        p['생산지'] = originMap[code];
+      const code = _cleanCode(p['제품코드']);
+      const mapped = originMap[code];
+      if (code && mapped && p._origin !== mapped) {
+        p._origin = mapped;
+        p['생산지'] = mapped;
         _reclassified++;
       }
     });
+    console.log(`[originMap] 로드 완료 — 총 ${Object.keys(originMap).length}건, RAW(${RAW.length}) 재적용 ${_reclassified}건`);
     if (_reclassified > 0) {
-      console.log(`[originMap] ${_reclassified}건 _origin 재적용`);
       if (typeof updateStatusCounts === 'function') updateStatusCounts();
       if (typeof render === 'function') render();
     }
+  } else {
+    console.log(`[originMap] 로드 완료 — 총 ${Object.keys(originMap).length}건 (RAW 아직 비어있음)`);
   }
 }).catch(()=>{});
 fetch('/api/product-notes').then(r=>r.json()).then(d=>{if(d.ok)productNotes=d.data||{};}).catch(()=>{});
@@ -7729,7 +7736,9 @@ async function processData(products){
   RAW = products.slice();
   RAW.forEach(p=>{
     // originMap(제품관리에서 등록한 값) 최우선 — 서버의 '생산지' 가 stale 하거나 비어도 정확히 반영
-    p._origin = originMap[p['제품코드']] || p['생산지'] || '한국';
+    // 제품코드에 invisible chars 가 있을 수 있어 cleanup 후 lookup (originMap 키도 cleanup 된 상태)
+    const _cc = String(p['제품코드']||'').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
+    p._origin = originMap[_cc] || p['생산지'] || '한국';
     // 월출고 필드 정규화: BHC/XERP 재고 API는 _xerpMonthly로 내려줌 → 월출고 필드로도 복사
     if (p._xerpMonthly != null && p['월출고'] == null) p['월출고'] = p._xerpMonthly;
     // legal_entity 보정 (서버에서 빠진 경우 prefix 기반)
