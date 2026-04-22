@@ -5901,16 +5901,44 @@ async function handleRequest(req, res) {
       syncLogId = info.lastInsertRowid;
       console.log('[sync] 시작 sync_log_id=' + syncLogId + ' (trigger=' + triggeredBy + ')');
     } catch (e) {
-      // 이전: "does not exist" 매칭으로 모두 snapshot_disabled 로 오폴백 → 실제 원인(컬럼 missing / 권한 / 기타) 묻힘.
-      // 수정: 에러 원문을 항상 로그하고, 테이블 자체가 없을 때만 snapshot_disabled 로 분기.
-      console.warn('[sync] sync_log INSERT 실패 원문:', e.message);
-      if (/relation\s+"sync_log"\s+does not exist/i.test(e.message)) {
-        console.warn('[sync] sync_log 테이블 자체가 없음 → snapshot 비활성, live 리프레시 모드로 진행');
-        snapshotDisabled = true;
-      } else {
-        // 그 외 에러 (컬럼 missing / 권한 부족 등) → 500 반환해 사용자·관리자에게 명확히 알림
-        console.error('[sync] sync_log INSERT 실패 (snapshot 모드 진입 불가):', e.message);
-        fail(res, 500, 'sync_log 기록 실패: ' + e.message);
+      // ★ 자가복구: sync_log INSERT 실패 시 원인 불문하고 현장에서 테이블/컬럼 재생성 + INSERT 재시도.
+      //   이전에는 startup CREATE TABLE 이 권한 문제로 실패했거나 구 스키마였을 때 영구적으로 snapshot_disabled 로 떨어져
+      //   "live 리프레시 중" 루프가 됐음. 이제는 요청 경로 안에서 스스로 고치므로 한 사이클 안에 정상화.
+      console.warn('[sync] sync_log INSERT 1차 실패 원문:', e.message);
+      console.warn('[sync] 자가복구 시도 — 테이블 재생성 + 누락 컬럼 보강');
+      try {
+        // 1) 테이블 자체가 없으면 생성
+        await db.exec(`CREATE TABLE IF NOT EXISTS sync_log (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          sync_type     TEXT NOT NULL,
+          started_at    TEXT DEFAULT (datetime('now','localtime')),
+          finished_at   TEXT DEFAULT '',
+          success_count INTEGER DEFAULT 0,
+          fail_count    INTEGER DEFAULT 0,
+          status        TEXT DEFAULT 'running',
+          error_msg     TEXT DEFAULT '',
+          triggered_by  TEXT DEFAULT 'manual'
+        )`);
+        // 2) 구 스키마일 경우 누락 컬럼 보강 (IF NOT EXISTS — 각각 개별 try)
+        const _fix = [
+          ['triggered_by',  "TEXT DEFAULT 'manual'"],
+          ['error_msg',     "TEXT DEFAULT ''"],
+          ['fail_count',    "INTEGER DEFAULT 0"],
+          ['success_count', "INTEGER DEFAULT 0"],
+          ['finished_at',   "TEXT DEFAULT ''"],
+          ['status',        "TEXT DEFAULT 'running'"]
+        ];
+        for (const [col, type] of _fix) {
+          try { await db.exec(`ALTER TABLE sync_log ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch(_) {}
+        }
+        // 3) 재시도
+        const info2 = await db.prepare("INSERT INTO sync_log (sync_type, status, triggered_by) VALUES (?,?,?)").run('xerp_inventory', 'running', triggeredBy);
+        syncLogId = info2.lastInsertRowid;
+        console.log('[sync] 자가복구 성공 — sync_log_id=' + syncLogId);
+      } catch (e2) {
+        // 자가복구도 실패 → 진짜 권한 문제. 500 반환해 관리자 개입 필요 명시.
+        console.error('[sync] sync_log 자가복구 실패:', e2.message);
+        fail(res, 500, 'sync_log 기록 실패 (자가복구도 실패): ' + e2.message + ' — PG 관리자에게 CREATE TABLE 권한 요청 필요');
         return;
       }
     }
