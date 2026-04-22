@@ -1654,8 +1654,42 @@ try {
     } catch(e) { /* 테이블 없거나 이미 존재 */ }
   }
   if (_ddlOk) console.log(`[DDL/onely] ${_ddlOk}개 테이블에 legal_entity 컬럼 추가`);
+
+  // ── sync_log / inventory_snapshot 누락 컬럼 보강 (onely 권한으로) ──
+  // 운영 PG 의 이 테이블들이 구 스키마로 만들어져 있으면 INSERT 실패 → snapshot_disabled → "live 리프레시 중" 루프.
+  // sc_erp 계정이 ALTER 권한 없어서 이전 보강 코드(db.exec)가 silent-fail 하던 문제 해결.
+  const _criticalCols = [
+    ['sync_log', 'triggered_by',  "TEXT DEFAULT 'manual'"],
+    ['sync_log', 'error_msg',     "TEXT DEFAULT ''"],
+    ['sync_log', 'fail_count',    "INTEGER DEFAULT 0"],
+    ['sync_log', 'success_count', "INTEGER DEFAULT 0"],
+    ['sync_log', 'finished_at',   "TEXT DEFAULT ''"],
+    ['sync_log', 'status',        "TEXT DEFAULT 'running'"],
+    ['inventory_snapshot', 'legal_entity', "TEXT DEFAULT 'barunson'"],
+    ['inventory_snapshot', 'site_code',    "TEXT DEFAULT 'BK10'"],
+    ['inventory_snapshot', 'monthly_out',  "INTEGER DEFAULT 0"],
+    ['inventory_snapshot', 'daily_out',    "INTEGER DEFAULT 0"],
+    ['inventory_snapshot', 'total_3m',     "INTEGER DEFAULT 0"],
+    ['inventory_snapshot', 'item_name',    "TEXT DEFAULT ''"],
+    ['inventory_snapshot', 'synced_at',    "TEXT DEFAULT ''"]
+  ];
+  let _criticalOk = 0;
+  for (const [tbl, col, type] of _criticalCols) {
+    try {
+      const chk = await _ddlPool.query("SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2", [tbl, col]);
+      if (!chk.rows.length) {
+        await _ddlPool.query(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${type}`);
+        _criticalOk++;
+        console.log(`[DDL/onely] ${tbl}.${col} 컬럼 추가 완료`);
+      }
+    } catch(e) { /* 테이블 자체가 없거나 이미 존재 — 초기 CREATE 단계가 처리 */ }
+  }
+  if (_criticalOk) console.log(`[DDL/onely] sync_log/inventory_snapshot 누락 컬럼 ${_criticalOk}개 보강 완료`);
+
   // GRANT 권한도 부여 (sc_erp 계정이 읽기/쓰기 가능하도록)
   try { await _ddlPool.query("GRANT ALL ON ALL TABLES IN SCHEMA public TO sc_erp"); } catch(e) {}
+  // 시퀀스도 GRANT (AUTOINCREMENT/SERIAL 쓰는 테이블 INSERT 시 nextval 권한 필요)
+  try { await _ddlPool.query("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sc_erp"); } catch(e) {}
   await _ddlPool.end();
 }
 
