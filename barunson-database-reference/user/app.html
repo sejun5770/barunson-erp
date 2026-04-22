@@ -19002,12 +19002,15 @@ function initLegacyListeners() {
 }
 document.addEventListener('DOMContentLoaded', initLegacyListeners);
 
-// Load data from server
+// 레거시 엑셀 시드 로더 — erp_smart_inventory.json 은 "생산지=한국" 필터로 추출된
+// 구 엑셀 덤프(2921건, 모두 한국)라서 processData 로 넣으면 제품관리에서 설정한
+// 중국/더기프트 origin 이 전부 덮어써져 필터가 망가짐. 실제 데이터는 /api/xerp-inventory
+// 가 단독 소스이므로 processData 호출은 제거하고, 업로드존 라벨만 표기 용도로 유지.
 fetch('/data.json').then(r=>r.json()).then(d=>{
   loadTime=new Date().toLocaleString('ko-KR');
   var uz = document.getElementById('uploadZone');
   if(uz){ uz.classList.add('loaded'); uz.innerHTML=`<p class="filename">서버 데이터 - ${d.products.length}개 품목 (${loadTime})</p><p style="font-size:11px;color:var(--text-muted)">새 엑셀을 드래그하여 갱신 가능</p>`; }
-  processData(d.products);
+  // processData(d.products);  // ← 레거시 시드가 RAW 를 덮어써서 origin 필터 파손 — 비활성화
 }).catch(()=>{});
 
 // ===== NOTES (미팅일지) =====
