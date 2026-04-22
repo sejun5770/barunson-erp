@@ -609,7 +609,7 @@ async function reloadProductInfoFromDB() {
       }
     }
     // 후공정 타입 목록 (이 키들은 product_post_vendor에서만 관리)
-    let postProcessTypes = ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착'];
+    let postProcessTypes = ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
     try { const pt = await getPostProcessTypes(); if (pt.length) postProcessTypes = pt; } catch(_) {}
     const postTypeSet = new Set(postProcessTypes);
 
@@ -673,7 +673,7 @@ function scheduleProductInfoReload() {
 function getProductInfo() {
   if (productInfoCache) return productInfoCache;
   // 첫 호출 — 레거시 파일에서 기본정보만 로드 (후공정 키는 즉시 제거)
-  const _defaultPostTypes = ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착'];
+  const _defaultPostTypes = ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(__dir, 'product_info.json'), 'utf8'));
     const cleaned = {};
@@ -1339,13 +1339,15 @@ const _defaultPostTypes = [
   {id:3,name:'박/형압',category:'post',group_name:'',icon:'⚙️',sort_order:3,is_active:1,default_vendor:''},
   {id:4,name:'톰슨',category:'post',group_name:'',icon:'⚙️',sort_order:4,is_active:1,default_vendor:''},
   {id:5,name:'봉투가공',category:'post',group_name:'',icon:'⚙️',sort_order:5,is_active:1,default_vendor:''},
-  {id:6,name:'세아리',category:'post',group_name:'',icon:'⚙️',sort_order:6,is_active:1,default_vendor:''},
-  {id:7,name:'레이져',category:'post',group_name:'',icon:'⚙️',sort_order:7,is_active:1,default_vendor:''},
-  {id:8,name:'실크',category:'post',group_name:'',icon:'⚙️',sort_order:8,is_active:1,default_vendor:''},
-  {id:9,name:'임가공',category:'post',group_name:'',icon:'⚙️',sort_order:9,is_active:1,default_vendor:''},
-  {id:10,name:'우찌누끼',category:'post',group_name:'',icon:'⚙️',sort_order:10,is_active:1,default_vendor:'예지가'},
-  {id:21,name:'접지',category:'post',group_name:'',icon:'⚙️',sort_order:11,is_active:1,default_vendor:''},
-  {id:22,name:'단면접착',category:'post',group_name:'',icon:'⚙️',sort_order:12,is_active:1,default_vendor:''}
+  {id:22,name:'단면접착',category:'post',group_name:'',icon:'⚙️',sort_order:6,is_active:1,default_vendor:''},
+  {id:10,name:'우찌누끼',category:'post',group_name:'',icon:'⚙️',sort_order:7,is_active:1,default_vendor:'예지가'},
+  {id:21,name:'접지',category:'post',group_name:'',icon:'⚙️',sort_order:8,is_active:1,default_vendor:''},
+  {id:23,name:'코팅',category:'post',group_name:'',icon:'⚙️',sort_order:9,is_active:1,default_vendor:''},
+  // 아래 4종은 미사용 — 과거 po_items 참조 호환을 위해 row 유지, is_active=0
+  {id:6,name:'세아리',category:'post',group_name:'',icon:'⚙️',sort_order:90,is_active:0,default_vendor:''},
+  {id:7,name:'레이져',category:'post',group_name:'',icon:'⚙️',sort_order:91,is_active:0,default_vendor:''},
+  {id:8,name:'실크',category:'post',group_name:'',icon:'⚙️',sort_order:92,is_active:0,default_vendor:''},
+  {id:9,name:'임가공',category:'post',group_name:'',icon:'⚙️',sort_order:93,is_active:0,default_vendor:''}
 ];
 const _defaultBomTypes = [
   {id:11,name:'오프셋인쇄',category:'bom',group_name:'인쇄',icon:'🖨️',sort_order:1,is_active:1,default_vendor:''},
@@ -1397,7 +1399,7 @@ async function getPostProcessTypes() {
     _cachedPostCols = _processTypesInMemory.filter(p => p.category === 'post' && p.is_active).sort((a,b) => a.sort_order - b.sort_order).map(p => p.name);
     return _cachedPostCols;
   }
-  return ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착'];
+  return ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
 }
 function invalidatePostColsCache() { _cachedPostCols = null; }
 
@@ -1657,12 +1659,14 @@ await db.exec(`CREATE TABLE IF NOT EXISTS process_types (
   created_at TEXT DEFAULT (datetime('now','localtime')),
   UNIQUE(name, category)
 )`);
-// 시드 데이터: 사용 중인 후공정 타입 6종 (2026-04 트리밍).
-// 과거 시드된 7종(세아리/레이져/실크/임가공/우찌누끼/접지/코팅)은 아래 마이그레이션에서 is_active=0 으로 비활성화.
+// 시드 데이터: 사용 중인 후공정 타입 9종 (2026-04-22 재확장).
+// 과거 시드된 4종(세아리/레이져/실크/임가공)은 아래 마이그레이션에서 is_active=0 으로 비활성화.
+// 우찌누끼/접지/코팅은 이전 트리밍에서 비활성화됐다가 이번에 재활성화.
 try {
   const seedPost = [
     {name:'재단',sort:1},{name:'인쇄',sort:2},{name:'박/형압',sort:3},{name:'톰슨',sort:4},
-    {name:'봉투가공',sort:5},{name:'단면접착',sort:6}
+    {name:'봉투가공',sort:5},{name:'단면접착',sort:6},
+    {name:'우찌누끼',sort:7,vendor:'예지가'},{name:'접지',sort:8},{name:'코팅',sort:9}
   ];
   const seedBom = [
     {name:'오프셋인쇄',group:'인쇄',icon:'🖨️',sort:1},{name:'디지털인쇄',group:'인쇄',icon:'💻',sort:2},
@@ -1675,10 +1679,17 @@ try {
   const ins = db.prepare("INSERT OR IGNORE INTO process_types (name,category,group_name,icon,sort_order,default_vendor) VALUES (?,?,?,?,?,?)");
   for (const s of seedPost) await ins.run(s.name,'post','',s.icon||'⚙️',s.sort,s.vendor||'');
   for (const s of seedBom) await ins.run(s.name,'bom',s.group||'',s.icon||'⚙️',s.sort,'');
-  // 마이그레이션: 더 이상 사용하지 않는 7종 비활성화 (기존 시드된 row 가 있을 때).
+  // 마이그레이션 1: 더 이상 사용하지 않는 4종 비활성화 (기존 시드된 row 가 있을 때).
   // 데이터 삭제는 안 함 — 과거 po_items 의 process_type 으로 참조될 수 있어 hidden 처리만.
   try {
-    await db.prepare("UPDATE process_types SET is_active=0 WHERE category='post' AND name IN ('세아리','레이져','실크','임가공','우찌누끼','접지','코팅')").run();
+    await db.prepare("UPDATE process_types SET is_active=0 WHERE category='post' AND name IN ('세아리','레이져','실크','임가공')").run();
+  } catch(_) {}
+  // 마이그레이션 2: 이전 트리밍에서 비활성화됐던 3종(우찌누끼/접지/코팅) 재활성화 + sort_order 정리.
+  // INSERT OR IGNORE 는 이미 존재하는 row 의 sort_order/is_active 를 덮어쓰지 않으므로 명시적으로 UPDATE.
+  try {
+    await db.prepare("UPDATE process_types SET is_active=1, sort_order=7 WHERE category='post' AND name='우찌누끼'").run();
+    await db.prepare("UPDATE process_types SET is_active=1, sort_order=8 WHERE category='post' AND name='접지'").run();
+    await db.prepare("UPDATE process_types SET is_active=1, sort_order=9 WHERE category='post' AND name='코팅'").run();
   } catch(_) {}
 } catch(e) { console.warn('process_types 시드 데이터 삽입 실패 (무시):', e.message); }
 
@@ -8408,9 +8419,10 @@ async function handleRequest(req, res) {
       { process_type: '박/형압', default_days: 2 },
       { process_type: '톰슨', default_days: 2 },
       { process_type: '봉투가공', default_days: 3 },
-      { process_type: '세아리', default_days: 2 },
-      { process_type: '레이져', default_days: 2 },
-      { process_type: '실크', default_days: 3 },
+      { process_type: '단면접착', default_days: 2 },
+      { process_type: '우찌누끼', default_days: 2 },
+      { process_type: '접지', default_days: 2 },
+      { process_type: '코팅', default_days: 2 },
     ];
 
     const saved = await db.prepare('SELECT * FROM process_lead_time WHERE vendor_name=?').all(vendorName);

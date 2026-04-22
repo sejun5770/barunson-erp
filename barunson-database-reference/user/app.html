@@ -7385,7 +7385,7 @@ async function loadProcessTypes() {
 }
 function getPostCols() {
   if (window._postProcessTypes.length > 0) return window._postProcessTypes.map(p => p.name);
-  return ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착'];
+  return ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
 }
 loadProcessTypes().then(() => { if(typeof buildHistoryTableHeader==='function') buildHistoryTableHeader(); });
 
@@ -7425,7 +7425,7 @@ Promise.all([
     if(p.origin) originMap[p.product_code]=p.origin;
     const existing = productInfo[p.product_code] || {};
     // 레거시 후공정 키 제거 (product_post_vendor가 유일한 소스)
-    const postTypes=typeof getPostCols==='function'?getPostCols():['재단','인쇄','박/형압','톰슨','봉투가공','단면접착'];
+    const postTypes=typeof getPostCols==='function'?getPostCols():['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
     postTypes.forEach(pt=>{delete existing[pt];});
     productInfo[p.product_code] = {
       ...existing,
@@ -14370,9 +14370,9 @@ let _pwCurrentStep = 1;
 let _pwItems = [];          // 선택된 품목 원본 (getOrderItems 결과 복사)
 let _pwMaterialVendors = {}; // { product_code: 'vendor_name' }
 let _pwPostChains = {};      // { product_code: [{step, process, vendor}, ...] }
-// 후가공 공정 타입 — 서버 _defaultPostTypes 와 동일하게 유지 (serve_inv2.js 참조)
-// 놓쳤던 공정: 봉투가공, 우찌누끼, 세아리, 레이져, 실크, 임가공
-const PROCESS_TYPES_POOL = ['재단','인쇄','박/형압','톰슨','봉투가공','우찌누끼','세아리','레이져','실크','임가공','접지','단면접착','코팅','오시','합지','재단/접지'];
+// 후가공 공정 타입 — 서버 _defaultPostTypes 의 is_active=1 9종과 동일하게 유지 (serve_inv2.js 참조)
+// 사용 순서: 재단 → 인쇄 → 박/형압 → 톰슨 → 봉투가공 → 단면접착 → 우찌누끼 → 접지 → 코팅
+const PROCESS_TYPES_POOL = ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
 
 function enterPOWizard(items) {
   _pwItems = items.slice();
@@ -16752,7 +16752,7 @@ function _poItemRenderList(items, isMat) {
 
   const edits = window._poItemEdits;
   // 공정 선택지 (동적 로드된 후공정 타입)
-  const procOptions = typeof getPostCols === 'function' ? getPostCols() : ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착'];
+  const procOptions = typeof getPostCols === 'function' ? getPostCols() : ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
 
   let html = `<table style="width:100%;font-size:12px;border-collapse:collapse">
     <thead><tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">

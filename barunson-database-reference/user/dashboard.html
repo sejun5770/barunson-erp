@@ -720,7 +720,7 @@ function openPostOrder(){
   const items=getOrderItems();
   if(!items.length){alert('발주수량을 입력한 품목이 없습니다.');return;}
   const body=document.getElementById('postOrderBody');
-  const postCols=['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공'];
+  const postCols=['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
 
   // 후공정 업체별 그룹핑
   const vendorItems={};
@@ -754,7 +754,7 @@ function openPostOrder(){
 
 function exportPostCSV(){
   const items=getOrderItems();
-  const postCols=['재단','인쇄','박/형압','톰슨','봉투가공','세아리','레이져','실크','임가공'];
+  const postCols=['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
   let csv='\uFEFF후공정업체,품목코드,브랜드,공정,발주수량,제품사양\n';
   items.forEach(p=>{
     const code=p['품목코드'];const info=productInfo[code]||{};
