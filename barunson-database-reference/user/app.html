@@ -20840,8 +20840,12 @@ async function syncAllDB() {
   }
 }
 
-// 동기화 상태 배지 (마지막 시각 표시)
+// 동기화 상태 배지 (실시간 경과시간 + auto-refresh during running)
+// 이전엔 "⏳ 동기화 중..." 정적 표시라 프리즈처럼 보임 → 사용자가 멈춘 줄 앎.
+// running 상태면 3초마다 자가 재호출해서 경과 초 갱신.
+let _syncStatusTimer = null;
 async function updateSyncStatus() {
+  if (_syncStatusTimer) { clearTimeout(_syncStatusTimer); _syncStatusTimer = null; }
   try {
     const resp = await fetch('/api/sync/status');
     const j = await resp.json();
@@ -20850,8 +20854,19 @@ async function updateSyncStatus() {
     const badge = document.getElementById('syncStatusBadge');
     if (!badge) return;
     if (d.is_running) {
-      badge.textContent = '⏳ 동기화 중...';
+      // running_since 는 KST 'YYYY-MM-DD HH24:MI:SS' 텍스트. 단순 new Date() 는 UTC 파싱될 수 있어
+      // 'T' 추가 후 명시적으로 +09:00 붙여 정확한 경과시간 계산.
+      let elapsed = 0;
+      if (d.running_since) {
+        const startMs = new Date(String(d.running_since).replace(' ', 'T') + '+09:00').getTime();
+        if (!isNaN(startMs)) elapsed = Math.max(0, Math.round((Date.now() - startMs) / 1000));
+      }
+      const mm = Math.floor(elapsed / 60), ss = elapsed % 60;
+      const elapsedTxt = mm > 0 ? `${mm}m ${ss}s` : `${elapsed}s`;
+      badge.textContent = `⏳ 동기화 중... (${elapsedTxt} 경과)`;
       badge.style.cssText = 'font-size:11px;padding:3px 8px;border-radius:10px;background:#dbeafe;color:#1e40af';
+      // 3초 후 자가 갱신 (running 동안만 계속 폴링)
+      _syncStatusTimer = setTimeout(updateSyncStatus, 3000);
     } else if (d.last_success_at) {
       const dt = new Date(String(d.last_success_at).replace(' ', 'T'));
       const mm = dt.getMonth() + 1, dd = dt.getDate();
