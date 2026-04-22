@@ -903,18 +903,6 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       @media print{body{margin:15px 20px;padding:0}.footer{page-break-after:always}}
     </style></head><body>
 
-    <div class="header">
-      <div class="header-left">
-        <h1>${isDD ? 'BARUN DESIGN' : 'BARUN COMPANY'}</h1>
-        <div class="sub">${SENDER_COMPANY} | Premium Invitation & Stationery</div>
-      </div>
-      <div class="header-right">
-        Tel: 02-6959-0750<br>
-        Email: barun@baruncompany.com<br>
-        서울특별시 금천구 가산디지털1로 168
-      </div>
-    </div>
-
     <div class="doc-title">
       ${typeLabel} 발주서 PURCHASE ORDER
       ${isChinaVendor ? '<br><span class="cn">采购订单</span>' : ''}
