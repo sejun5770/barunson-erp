@@ -7444,6 +7444,25 @@ Promise.all([
     if(!productInfo[code]) productInfo[code]={};
     steps.forEach(s=>{ productInfo[code][s.process_type]=s.vendor_name; });
   }
+  // ── 생산지 재적용 (race-condition 대응) ──
+  // /api/products 가 XERP inventory 보다 늦게 끝나는 경우, 이미 RAW 에 들어간 품목들의
+  // _origin 이 '한국' 기본값으로 굳어 있다. 제품관리에서 설정한 중국/더기프트 값을 강제 반영.
+  if (typeof RAW !== 'undefined' && RAW.length > 0) {
+    let _reclassified = 0;
+    RAW.forEach(p => {
+      const code = p['제품코드'];
+      if (code && originMap[code] && p._origin !== originMap[code]) {
+        p._origin = originMap[code];
+        p['생산지'] = originMap[code];
+        _reclassified++;
+      }
+    });
+    if (_reclassified > 0) {
+      console.log(`[originMap] ${_reclassified}건 _origin 재적용`);
+      if (typeof updateStatusCounts === 'function') updateStatusCounts();
+      if (typeof render === 'function') render();
+    }
+  }
 }).catch(()=>{});
 fetch('/api/product-notes').then(r=>r.json()).then(d=>{if(d.ok)productNotes=d.data||{};}).catch(()=>{});
 fetch('/api/order-history?mode=today').then(r=>r.json()).then(d=>{if(d.ok)orderedToday=d.data||{};}).catch(()=>{});
@@ -7709,7 +7728,8 @@ async function processData(products){
   // 각 페이지에서 _currentCompany / _poCurrentEntity 로 필터링한다.
   RAW = products.slice();
   RAW.forEach(p=>{
-    p._origin = p['생산지'] || originMap[p['제품코드']] || '한국';
+    // originMap(제품관리에서 등록한 값) 최우선 — 서버의 '생산지' 가 stale 하거나 비어도 정확히 반영
+    p._origin = originMap[p['제품코드']] || p['생산지'] || '한국';
     // 월출고 필드 정규화: BHC/XERP 재고 API는 _xerpMonthly로 내려줌 → 월출고 필드로도 복사
     if (p._xerpMonthly != null && p['월출고'] == null) p['월출고'] = p._xerpMonthly;
     // legal_entity 보정 (서버에서 빠진 경우 prefix 기반)
