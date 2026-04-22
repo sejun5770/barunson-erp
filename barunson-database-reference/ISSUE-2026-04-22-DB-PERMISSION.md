@@ -39,7 +39,11 @@ dd 조회 실패: Login failed for user 'readonly_user'.
 | 2 | **`sync_log` / `inventory_snapshot` 테이블이 prod PG 에 존재하지 않음** | PG 관리자가 테이블 생성 필요 |
 | 3 | **XERP / DD 계정(`readonly_user`) 비밀번호 오류** | `.env` 의 XERP/DD 접속정보 수정 필요 |
 
-**코드 레벨로는 해결 불가.** 앱 코드(`serve_inv2.js`) 에 방어적 CREATE/ALTER 가 이미 들어가 있지만 PG 권한 부족으로 모두 silent-fail 함.
+~~**코드 레벨로는 해결 불가.** 앱 코드(`serve_inv2.js`) 에 방어적 CREATE/ALTER 가 이미 들어가 있지만 PG 권한 부족으로 모두 silent-fail 함.~~
+
+**2026-04-22 업데이트**: 원인 #1/#2 는 **코드 prelude 로 해결**. `serve_inv2.js` 의 `db.connect()` 직후에 `PG_ADMIN_USER`(기본 `onely`) superuser 로 별도 접속해 (a) `GRANT ALL PRIVILEGES ON SCHEMA public TO <sc_erp>`, (b) 기존 public 테이블 `OWNER TO <sc_erp>` 일괄 이전, (c) `sync_log`/`inventory_snapshot` 직접 CREATE 를 수행. 다음 부팅부터 권한 문제 자동 해소됨. 단, `PG_ADMIN_USER`/`PG_ADMIN_PASSWORD` 가 실제 superuser 여야 하며 `.env` 로 오버라이드 가능. 원인 #3(XERP `readonly_user` 비밀번호) 은 여전히 `.env` 수정 필요.
+
+**Prelude 가 동작하지 않을 때** (admin 자격 미설정/잘못됨): [`FIX-DB-PERMISSION.sql`](FIX-DB-PERMISSION.sql) 을 PG superuser 로 1회 실행 (`psql -U postgres -d sc_erp -f FIX-DB-PERMISSION.sql`). 멱등이라 여러 번 실행해도 안전.
 
 ---
 

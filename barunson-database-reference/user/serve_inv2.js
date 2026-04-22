@@ -1148,6 +1148,95 @@ async function startServer() {
   });
   console.log('✅ PostgreSQL 연결 완료');
 
+  // ── [prelude] onely superuser 로 DDL 권한 선제 해결 ────────────────────
+  // prod 에선 PG_USER=sc_erp 로 접속하는데, sc_erp 가 public 스키마 CREATE 권한도 없고
+  // 기존 테이블의 owner 도 아니어서 후속 CREATE TABLE / ALTER TABLE 전부 silent-fail.
+  // 결과: sync_log 테이블이 없어서 /api/sync/xerp-inventory 가 snapshot 비활성으로 떨어지고
+  //       "live 리프레시 중" 루프 + "⚠️ 동기화 필요" 배지 영구 표시 (ISSUE-2026-04-22-DB-PERMISSION.md).
+  // 해결: 매 부팅마다 onely superuser 로 (a) schema GRANT, (b) 모든 public 테이블 owner 를 sc_erp 로 이전,
+  //       (c) sync_log/inventory_snapshot 을 superuser 권한으로 직접 CREATE — 이후 sc_erp CREATE/ALTER 가 정상화됨.
+  {
+    const _pguser = envVars.PG_USER || process.env.PG_USER || 'onely';
+    const _pgadminUser = envVars.PG_ADMIN_USER || process.env.PG_ADMIN_USER || 'onely';
+    const _pgadminPass = envVars.PG_ADMIN_PASSWORD || process.env.PG_ADMIN_PASSWORD || 'onely';
+    // 이미 superuser 로 접속 중이면 prelude 자체를 skip (중복 연결 불필요)
+    if (_pguser === _pgadminUser) {
+      console.log('[prelude] 접속 계정이 이미 admin(' + _pgadminUser + ') — 권한 prelude 생략');
+    } else {
+      const { Pool: _PgPool } = require('pg');
+      const _adminHost = envVars.PG_HOST || process.env.PG_HOST || 'onely-postgres';
+      const _adminPort = parseInt(envVars.PG_PORT || process.env.PG_PORT || '5432');
+      const _adminDb = envVars.PG_DATABASE || process.env.PG_DATABASE || 'sc_erp';
+      let _adminPool = null;
+      try {
+        _adminPool = new _PgPool({ host: _adminHost, port: _adminPort, user: _pgadminUser, password: _pgadminPass, database: _adminDb, max: 2, connectionTimeoutMillis: 5000 });
+        // 연결 테스트
+        await _adminPool.query('SELECT 1');
+      } catch (e) {
+        console.warn('[prelude] admin 계정(' + _pgadminUser + ') 연결 실패 — 권한 prelude 생략:', e.message);
+        _adminPool = null;
+      }
+      if (_adminPool) {
+        // (a) schema public 에 CREATE/USAGE 권한 부여 → sc_erp 가 CREATE TABLE 할 수 있게
+        try { await _adminPool.query(`GRANT ALL PRIVILEGES ON SCHEMA public TO ${_pguser}`); console.log('[prelude] GRANT schema public → ' + _pguser); } catch(e) { console.warn('[prelude] GRANT schema public 실패:', e.message); }
+        try { await _adminPool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${_pguser}`); } catch(_) {}
+        try { await _adminPool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${_pguser}`); } catch(_) {}
+
+        // (b) 기존 모든 public 테이블의 owner 를 sc_erp 로 이전 → 이후 ALTER TABLE 가능
+        try {
+          const r = await _adminPool.query(`SELECT tablename FROM pg_tables WHERE schemaname='public'`);
+          let _owned = 0;
+          for (const row of r.rows) {
+            try {
+              await _adminPool.query(`ALTER TABLE public."${row.tablename}" OWNER TO ${_pguser}`);
+              _owned++;
+            } catch(_) {}
+          }
+          if (_owned) console.log('[prelude] ' + _owned + '개 테이블 owner → ' + _pguser);
+        } catch(e) { console.warn('[prelude] owner 이전 실패:', e.message); }
+
+        // (c) sync_log / inventory_snapshot 은 superuser 로 직접 CREATE (존재 보장)
+        //     이후 sc_erp 의 CREATE TABLE IF NOT EXISTS 와 ALTER 는 owner 도 sc_erp 라 정상 동작.
+        try {
+          await _adminPool.query(`CREATE TABLE IF NOT EXISTS sync_log (
+            id            SERIAL PRIMARY KEY,
+            sync_type     TEXT NOT NULL,
+            started_at    TEXT DEFAULT TO_CHAR(NOW() AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD HH24:MI:SS'),
+            finished_at   TEXT DEFAULT '',
+            success_count INTEGER DEFAULT 0,
+            fail_count    INTEGER DEFAULT 0,
+            status        TEXT DEFAULT 'running',
+            error_msg     TEXT DEFAULT '',
+            triggered_by  TEXT DEFAULT 'manual'
+          )`);
+          await _adminPool.query(`ALTER TABLE sync_log OWNER TO ${_pguser}`);
+          console.log('[prelude] sync_log 테이블 OK (owner=' + _pguser + ')');
+        } catch(e) { console.warn('[prelude] sync_log CREATE 실패:', e.message); }
+        try {
+          await _adminPool.query(`CREATE TABLE IF NOT EXISTS inventory_snapshot (
+            product_code   TEXT PRIMARY KEY,
+            legal_entity   TEXT DEFAULT 'barunson',
+            site_code      TEXT DEFAULT 'BK10',
+            current_stock  INTEGER DEFAULT 0,
+            monthly_out    INTEGER DEFAULT 0,
+            daily_out      INTEGER DEFAULT 0,
+            total_3m       INTEGER DEFAULT 0,
+            item_name      TEXT DEFAULT '',
+            synced_at      TEXT DEFAULT ''
+          )`);
+          await _adminPool.query(`ALTER TABLE inventory_snapshot OWNER TO ${_pguser}`);
+          console.log('[prelude] inventory_snapshot 테이블 OK (owner=' + _pguser + ')');
+        } catch(e) { console.warn('[prelude] inventory_snapshot CREATE 실패:', e.message); }
+
+        // (d) 기존 객체에 대한 마무리 GRANT
+        try { await _adminPool.query(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ${_pguser}`); } catch(_) {}
+        try { await _adminPool.query(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${_pguser}`); } catch(_) {}
+
+        try { await _adminPool.end(); } catch(_) {}
+      }
+    }
+  }
+
 // ── 핵심 테이블 DDL (ALTER TABLE 보다 선행되어야 함) ───────────────────
 // 이전엔 serve_inv2.js 에 이 테이블들의 CREATE 가 없어 init_db.js(SQLite) 에만 의존.
 // PG 환경에선 fresh DB 부팅 시 ALTER TABLE 이 "relation does not exist" 로 전부 실패 → 누락 컬럼 런타임 쿼리 실패 악순환.
