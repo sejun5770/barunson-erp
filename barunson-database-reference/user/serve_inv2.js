@@ -5619,9 +5619,10 @@ async function handleRequest(req, res) {
   if (pathname === '/api/sync/xerp-inventory' && method === 'POST') {
     // 중복 실행 방지 (7분 이상은 자동 stale 처리)
     try {
-      // started_at 은 'YYYY-MM-DD HH24:MI:SS' 한국시간 TEXT. ::timestamptz 캐스트는 서버 TZ 기준이라 UTC 컨테이너면 9시간 미래로 오판 → stale 해제 영원히 0건.
-      // ::timestamp (naive) 로 캐스트하고 비교 우변도 CURRENT_TIMESTAMP 의 naive 버전(datetime('now','localtime') → NOW() via adapter, ::timestamp 로 통일)으로 맞춤.
-      await db.prepare("UPDATE sync_log SET status='failed', error_msg='stale 자동 해제', finished_at=datetime('now','localtime') WHERE sync_type='xerp_inventory' AND status='running' AND started_at::timestamp < datetime('now','localtime','-7 minutes')::timestamp").run();
+      // started_at 은 'YYYY-MM-DD HH24:MI:SS' KST 텍스트. naive ::timestamp 로 캐스트하면 서버 TZ와 섞여
+      // UTC 컨테이너에서 +9h 미래로 오판돼 stale 해제가 영구 0건이던 문제.
+      // 수정: started_at 을 명시적으로 KST timestamptz 로 변환 → NOW() 와 시점 비교. 서버 TZ 무관하게 정확.
+      await db.prepare("UPDATE sync_log SET status='failed', error_msg='stale 자동 해제', finished_at=datetime('now','localtime') WHERE sync_type='xerp_inventory' AND status='running' AND (started_at::timestamp AT TIME ZONE 'Asia/Seoul') < NOW() - INTERVAL '7 minutes'").run();
     } catch (_) {}
     try {
       const running = await db.prepare("SELECT id, started_at FROM sync_log WHERE sync_type='xerp_inventory' AND status='running' LIMIT 1").get();
