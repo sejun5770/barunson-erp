@@ -210,13 +210,27 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const xerpConfig = {
-  server: envVars.DB_SERVER || process.env.DB_SERVER || '',
-  port: parseInt(envVars.DB_PORT || process.env.DB_PORT || '1433'),
-  user: envVars.DB_USER || process.env.DB_USER || '',
-  password: envVars.DB_PASSWORD || process.env.DB_PASSWORD || '',
+  // XERP_DB_* 우선 (전용 readonly_erp 계정), 없으면 DB_* 로 fallback (레거시 운영환경 호환)
+  server: envVars.XERP_DB_SERVER || process.env.XERP_DB_SERVER || envVars.DB_SERVER || process.env.DB_SERVER || '',
+  port: parseInt(envVars.XERP_DB_PORT || process.env.XERP_DB_PORT || envVars.DB_PORT || process.env.DB_PORT || '1433'),
+  user: envVars.XERP_DB_USER || process.env.XERP_DB_USER || envVars.DB_USER || process.env.DB_USER || '',
+  password: envVars.XERP_DB_PASSWORD || process.env.XERP_DB_PASSWORD || envVars.DB_PASSWORD || process.env.DB_PASSWORD || '',
   database: 'XERP',
   options: { encrypt: true, trustServerCertificate: false, requestTimeout: 120000 },
   pool: { max: 5, min: 1, idleTimeoutMillis: 300000 }
+};
+
+// bar_shop1 전용 config — DB_* (readonly_user) 사용. server 는 XERP 와 동일 인스턴스지만
+// SQL 로그인이 달라서 (readonly_user vs readonly_erp) 별도 관리.
+// 기존엔 `{...xerpConfig, database: 'bar_shop1'}` 로 덮어써서 readonly_erp 가 bar_shop1 접근 권한 없으면 실패.
+const barShopConfig = {
+  server: envVars.DB_SERVER || process.env.DB_SERVER || xerpConfig.server,
+  port: parseInt(envVars.DB_PORT || process.env.DB_PORT) || xerpConfig.port,
+  user: envVars.DB_USER || process.env.DB_USER || xerpConfig.user,
+  password: envVars.DB_PASSWORD || process.env.DB_PASSWORD || xerpConfig.password,
+  database: 'bar_shop1',
+  options: { encrypt: true, trustServerCertificate: false, requestTimeout: 120000 },
+  pool: { max: 3, min: 1, idleTimeoutMillis: 300000 }
 };
 
 let xerpReconnectTimer = null;
@@ -5664,7 +5678,7 @@ async function handleRequest(req, res) {
         let itemNames = {};
         if (!isDd) {
           try {
-            const bar1Pool = new sql.ConnectionPool({ ...xerpConfig, database: 'bar_shop1' });
+            const bar1Pool = new sql.ConnectionPool(barShopConfig);
             await bar1Pool.connect();
             for (let i = 0; i < codeChunks.length; i++) {
               const inClause = codeChunks[i].map(c => `'${c}'`).join(',');
@@ -6378,7 +6392,7 @@ async function handleRequest(req, res) {
       // bar_shop1에서 품목명 매핑 가져오기 (별도 연결)
       let itemNames = {};
       try {
-        const bar1Pool = new sql.ConnectionPool({ ...xerpConfig, database: 'bar_shop1' });
+        const bar1Pool = new sql.ConnectionPool(barShopConfig);
         await bar1Pool.connect();
         const itemCodes = [...new Set(result.recordset.map(r => (r.item_code || '').trim()).filter(Boolean))];
         if (itemCodes.length) {
@@ -14472,7 +14486,7 @@ async function handleRequest(req, res) {
   async function withBarShop1Pool(callback) {
     let pool = null;
     try {
-      pool = new sql.ConnectionPool({ ...xerpConfig, database: 'bar_shop1' });
+      pool = new sql.ConnectionPool(barShopConfig);
       await pool.connect();
       return await callback(pool);
     } finally {
