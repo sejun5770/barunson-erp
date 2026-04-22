@@ -1160,6 +1160,112 @@ async function startServer() {
   });
   console.log('✅ PostgreSQL 연결 완료');
 
+// ── 핵심 테이블 DDL (ALTER TABLE 보다 선행되어야 함) ───────────────────
+// 이전엔 serve_inv2.js 에 이 테이블들의 CREATE 가 없어 init_db.js(SQLite) 에만 의존.
+// PG 환경에선 fresh DB 부팅 시 ALTER TABLE 이 "relation does not exist" 로 전부 실패 → 누락 컬럼 런타임 쿼리 실패 악순환.
+// 여기서 먼저 생성해 후속 ALTER/CREATE INDEX 가 안전히 진행되도록 보장. pg-adapter 가 SQLite 문법 → PG 로 자동 변환.
+await db.exec(`
+  CREATE TABLE IF NOT EXISTS vendors (
+    vendor_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_code TEXT DEFAULT '',
+    name        TEXT NOT NULL,
+    type        TEXT DEFAULT '',
+    contact     TEXT DEFAULT '',
+    phone       TEXT DEFAULT '',
+    email       TEXT DEFAULT '',
+    kakao       TEXT DEFAULT '',
+    memo        TEXT DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now','localtime')),
+    updated_at  TEXT DEFAULT (datetime('now','localtime'))
+  );
+  CREATE TABLE IF NOT EXISTS po_header (
+    po_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    po_number   TEXT UNIQUE NOT NULL,
+    po_type     TEXT NOT NULL DEFAULT 'material',
+    vendor_name TEXT DEFAULT '',
+    po_date     TEXT DEFAULT (date('now','localtime')),
+    status      TEXT DEFAULT 'draft',
+    expected_date TEXT DEFAULT '',
+    due_date    TEXT DEFAULT '',
+    total_qty   INTEGER DEFAULT 0,
+    notes       TEXT DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now','localtime')),
+    updated_at  TEXT DEFAULT (datetime('now','localtime'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_po_status ON po_header(status);
+  CREATE INDEX IF NOT EXISTS idx_po_date ON po_header(po_date);
+  CREATE TABLE IF NOT EXISTS po_items (
+    item_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    po_id        INTEGER NOT NULL,
+    product_code TEXT NOT NULL,
+    brand        TEXT DEFAULT '',
+    process_type TEXT DEFAULT '',
+    ordered_qty  INTEGER DEFAULT 0,
+    received_qty INTEGER DEFAULT 0,
+    spec         TEXT DEFAULT '',
+    notes        TEXT DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_po_items_po ON po_items(po_id);
+  CREATE INDEX IF NOT EXISTS idx_po_items_code ON po_items(product_code);
+  CREATE TABLE IF NOT EXISTS receipts (
+    receipt_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    po_id        INTEGER NOT NULL,
+    receipt_date TEXT DEFAULT (date('now','localtime')),
+    received_by  TEXT DEFAULT '',
+    notes        TEXT DEFAULT '',
+    created_at   TEXT DEFAULT (datetime('now','localtime'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_receipts_po ON receipts(po_id);
+  CREATE TABLE IF NOT EXISTS receipt_items (
+    receipt_item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_id      INTEGER NOT NULL,
+    po_item_id      INTEGER,
+    product_code    TEXT NOT NULL,
+    received_qty    INTEGER DEFAULT 0,
+    defect_qty      INTEGER DEFAULT 0,
+    notes           TEXT DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_receipt_items_receipt ON receipt_items(receipt_id);
+  CREATE TABLE IF NOT EXISTS bom_header (
+    bom_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_code  TEXT NOT NULL UNIQUE,
+    product_name  TEXT DEFAULT '',
+    brand         TEXT DEFAULT '',
+    version       INTEGER DEFAULT 1,
+    notes         TEXT DEFAULT '',
+    created_at    TEXT DEFAULT (datetime('now','localtime')),
+    updated_at    TEXT DEFAULT (datetime('now','localtime'))
+  );
+  CREATE TABLE IF NOT EXISTS bom_items (
+    bom_item_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    bom_id        INTEGER NOT NULL,
+    item_type     TEXT NOT NULL DEFAULT 'material',
+    material_code TEXT DEFAULT '',
+    material_name TEXT DEFAULT '',
+    vendor_name   TEXT DEFAULT '',
+    process_type  TEXT DEFAULT '',
+    qty_per       REAL DEFAULT 1,
+    cut_spec      TEXT DEFAULT '',
+    plate_spec    TEXT DEFAULT '',
+    unit          TEXT DEFAULT 'EA',
+    notes         TEXT DEFAULT '',
+    sort_order    INTEGER DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_bom_items_bom ON bom_items(bom_id);
+  CREATE TABLE IF NOT EXISTS product_post_vendor (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_code TEXT NOT NULL,
+    process_type TEXT NOT NULL DEFAULT '',
+    vendor_name  TEXT NOT NULL DEFAULT '',
+    step_order   INTEGER DEFAULT 1,
+    created_at   TEXT DEFAULT (datetime('now','localtime')),
+    updated_at   TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(product_code, process_type, step_order)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ppv_code ON product_post_vendor(product_code);
+`);
+console.log('[init] 핵심 테이블 7종 OK (vendors/po_header/po_items/receipts/receipt_items/bom_header/bom_items/product_post_vendor)');
+
 // ── Ensure order_history table ──────────────────────────────────────
 await db.exec(`
   CREATE TABLE IF NOT EXISTS order_history (
