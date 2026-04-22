@@ -661,13 +661,19 @@ async function reloadProductInfoFromDB() {
   }
 }
 
+let _lastProductInfoReloadAt = 0;
 function scheduleProductInfoReload() {
   if (_productInfoReloadScheduled) return;
+  // bulk-import 처럼 연속 write 가 들어오면 300ms 디바운스만으로는 과호출.
+  // 1.5s 로 늘려 burst 를 한 번에 흡수. 사용자 체감 딜레이는 여전히 < 2s.
   _productInfoReloadScheduled = true;
-  setTimeout(() => {
+  setTimeout(async () => {
     _productInfoReloadScheduled = false;
-    reloadProductInfoFromDB();
-  }, 300);
+    // 최근 5초 안에 이미 재로드했으면 스킵 — bulk 흐름에서 중복 스캔 방지
+    if (Date.now() - _lastProductInfoReloadAt < 5000) return;
+    await reloadProductInfoFromDB();
+    _lastProductInfoReloadAt = Date.now();
+  }, 1500);
 }
 
 function getProductInfo() {
