@@ -185,10 +185,11 @@ function erpPageUrl(refType, refId) {
 /* ────────────────────────────────────────────
    테이블 초기화
    ──────────────────────────────────────────── */
-function initTables() {
+async function initTables() {
   const { db } = ctx;
   if (!db) return;
-  db.exec(`CREATE TABLE IF NOT EXISTS barcode_registry (
+  // pg-adapter.exec 가 async — await 없으면 CREATE INDEX 가 CREATE TABLE 완료 전 실행돼 "relation does not exist" 에러.
+  await db.exec(`CREATE TABLE IF NOT EXISTS barcode_registry (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     barcode_value TEXT UNIQUE NOT NULL,
     barcode_type TEXT DEFAULT 'CODE128',
@@ -199,7 +200,7 @@ function initTables() {
     created_by TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now','localtime'))
   )`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_bc_ref ON barcode_registry(ref_type, ref_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_bc_ref ON barcode_registry(ref_type, ref_id)`);
 }
 
 /* ────────────────────────────────────────────
