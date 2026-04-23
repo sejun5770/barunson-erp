@@ -6461,38 +6461,30 @@ async function handleRequest(req, res) {
           const needSpec = await db.prepare("SELECT product_code FROM products WHERE (spec IS NULL OR spec = '') AND status IN ('active','inactive')").all();
           const validSpecCodes = (needSpec || []).map(r => (r.product_code || '').replace(/[\s ​‌‍﻿]/g, '').trim()).filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
           if (validSpecCodes.length > 0 && xerpPool) {
-            const SPEC_CHUNK = 50;
-            const SPEC_CONCURRENT = 3;
             const specMap = {};
-            const chunks = [];
-            for (let i = 0; i < validSpecCodes.length; i += SPEC_CHUNK) chunks.push(validSpecCodes.slice(i, i + SPEC_CHUNK));
-            const fetchSpecChunk = async (chunk, idx) => {
-              const inClause = chunk.map(c => `'${c}'`).join(',');
-              try {
-                const reqQ = xerpPool.request();
-                reqQ.timeout = 10000;
-                const r = await reqQ.query(`
-                  SELECT item_code, item_spec FROM (
-                    SELECT RTRIM(ItemCode) AS item_code,
-                           RTRIM(ItemSpec) AS item_spec,
-                           ROW_NUMBER() OVER (PARTITION BY RTRIM(ItemCode) ORDER BY InoutDate DESC, InoutSerNo DESC) AS rn
-                    FROM mmInoutItem WITH (NOLOCK)
-                    WHERE SiteCode = 'BK10' AND RTRIM(ItemCode) IN (${inClause})
-                  ) t
-                  WHERE t.rn = 1 AND t.item_spec <> ''
-                `);
-                for (const row of (r.recordset || [])) {
-                  const c = (row.item_code || '').trim();
-                  const sp = (row.item_spec || '').trim();
-                  if (c && sp) specMap[c] = sp;
-                }
-              } catch (e) {
-                console.warn(`[sync bg] 규격 chunk ${idx+1}/${chunks.length} 실패:`, e.message);
+            // ★ chunk 폐기 → SiteCode 전체 단일 쿼리 (chunk 23회 × 10s → 1회 ~10s)
+            const validSpecSet = new Set(validSpecCodes.map(c => c.toUpperCase()));
+            try {
+              const reqQ = xerpPool.request();
+              reqQ.timeout = 120000;
+              const r = await reqQ.query(`
+                SELECT item_code, item_spec FROM (
+                  SELECT RTRIM(ItemCode) AS item_code,
+                         RTRIM(ItemSpec) AS item_spec,
+                         ROW_NUMBER() OVER (PARTITION BY RTRIM(ItemCode) ORDER BY InoutDate DESC, InoutSerNo DESC) AS rn
+                  FROM mmInoutItem WITH (NOLOCK)
+                  WHERE SiteCode = 'BK10'
+                ) t
+                WHERE t.rn = 1 AND t.item_spec <> ''
+              `);
+              for (const row of (r.recordset || [])) {
+                const c = (row.item_code || '').trim();
+                const sp = (row.item_spec || '').trim();
+                if (c && sp && validSpecSet.has(c.toUpperCase())) specMap[c] = sp;
               }
-            };
-            for (let i = 0; i < chunks.length; i += SPEC_CONCURRENT) {
-              const wave = chunks.slice(i, i + SPEC_CONCURRENT);
-              await Promise.all(wave.map((ch, j) => fetchSpecChunk(ch, i + j)));
+              console.log(`[sync bg] 규격 단일쿼리 성공: ${Object.keys(specMap).length}개 매칭`);
+            } catch (e) {
+              console.warn(`[sync bg] 규격 단일쿼리 실패:`, e.message);
             }
             // UPDATE only where spec is still empty (경합 방지 — 동기화 중 사용자가 수동 입력했을 수도)
             if (Object.keys(specMap).length > 0) {
