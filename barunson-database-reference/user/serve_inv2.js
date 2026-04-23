@@ -6023,6 +6023,118 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── BHC (디얼디어) DB 재고 진단 ──
+  // 현재 DD sync 는 database='BHC' + SiteCode='BHC2' 로 쿼리함. DD 품목이 가용재고 0 으로
+  // 찍히는 문제가 있어서 BHC 쪽에 실제 어떤 SiteCode 들이 있고 품목코드가 어떻게 저장돼
+  // 있는지 덤프해서 확인하기 위한 엔드포인트.
+  if (pathname === '/api/debug/bhc-diag' && method === 'GET') {
+    let bhcPool = null;
+    try {
+      bhcPool = new sql.ConnectionPool({ ...xerpConfig, database: 'BHC' });
+      await bhcPool.connect();
+
+      const out = { bhc_connection: 'ok' };
+
+      // 1) BHC.mmInventory 의 SiteCode 분포
+      const sites = await bhcPool.request().query(`
+        SELECT RTRIM(SiteCode) AS site_code,
+               COUNT(*) AS row_count,
+               COUNT(DISTINCT RTRIM(ItemCode)) AS item_count,
+               SUM(CASE WHEN OhQty > 0 THEN OhQty ELSE 0 END) AS total_qty
+        FROM mmInventory WITH (NOLOCK)
+        GROUP BY RTRIM(SiteCode)
+        ORDER BY row_count DESC
+      `);
+      out.mmInventory_sitecodes = sites.recordset;
+
+      // 2) BHC.mmInventory 의 WhCode 분포 (전체)
+      const whs = await bhcPool.request().query(`
+        SELECT RTRIM(SiteCode) AS site_code,
+               RTRIM(WhCode) AS wh_code,
+               COUNT(*) AS row_count,
+               COUNT(DISTINCT RTRIM(ItemCode)) AS item_count,
+               SUM(CASE WHEN OhQty > 0 THEN OhQty ELSE 0 END) AS total_qty
+        FROM mmInventory WITH (NOLOCK)
+        GROUP BY RTRIM(SiteCode), RTRIM(WhCode)
+        ORDER BY row_count DESC
+      `);
+      out.mmInventory_warehouses = whs.recordset;
+
+      // 3) BHC.mmInventory 에 실제 재고가 있는 상위 10개 품목 (샘플)
+      const topItems = await bhcPool.request().query(`
+        SELECT TOP 10
+               RTRIM(SiteCode) AS site_code,
+               RTRIM(WhCode) AS wh_code,
+               RTRIM(ItemCode) AS item_code,
+               OhQty
+        FROM mmInventory WITH (NOLOCK)
+        WHERE OhQty > 0
+        ORDER BY OhQty DESC
+      `);
+      out.mmInventory_top_items = topItems.recordset;
+
+      // 4) 로컬 products 에서 DD 계열 품목코드 10개 샘플
+      const localDD = await db.prepare(`
+        SELECT product_code FROM products
+        WHERE legal_entity = 'dd' OR product_code LIKE 'DD%'
+        LIMIT 10
+      `).all();
+      out.local_dd_sample = localDD.map(r => r.product_code);
+
+      // 5) 각 DD 품목코드가 BHC.mmInventory 에 있는지 exact + LIKE 매칭
+      const matchCheck = {};
+      for (const r of localDD) {
+        const code = (r.product_code || '').replace(/'/g, "''");
+        if (!code) continue;
+        const exact = await bhcPool.request().query(`
+          SELECT COUNT(*) AS cnt,
+                 SUM(CASE WHEN OhQty > 0 THEN OhQty ELSE 0 END) AS qty,
+                 STRING_AGG(RTRIM(SiteCode), ',') AS sites,
+                 STRING_AGG(RTRIM(WhCode), ',') AS whs
+          FROM mmInventory WITH (NOLOCK)
+          WHERE RTRIM(ItemCode) = '${code}'
+        `);
+        const likeSample = await bhcPool.request().query(`
+          SELECT TOP 3 RTRIM(SiteCode) AS site_code,
+                 RTRIM(WhCode) AS wh_code,
+                 RTRIM(ItemCode) AS item_code,
+                 OhQty
+          FROM mmInventory WITH (NOLOCK)
+          WHERE ItemCode LIKE '%${code}%'
+        `);
+        matchCheck[r.product_code] = {
+          exact_count: exact.recordset[0]?.cnt || 0,
+          exact_qty: exact.recordset[0]?.qty || 0,
+          exact_sites: exact.recordset[0]?.sites || '',
+          exact_whs: exact.recordset[0]?.whs || '',
+          like_sample: likeSample.recordset
+        };
+      }
+      out.dd_match_check = matchCheck;
+
+      // 6) BHC.mmInventory 에 등장하는 ItemCode 의 prefix 분포 (DD 계열 존재 여부 파악)
+      const prefixes = await bhcPool.request().query(`
+        SELECT TOP 20
+               LEFT(RTRIM(ItemCode), 3) AS prefix3,
+               COUNT(DISTINCT RTRIM(ItemCode)) AS code_count
+        FROM mmInventory WITH (NOLOCK)
+        WHERE OhQty > 0
+        GROUP BY LEFT(RTRIM(ItemCode), 3)
+        ORDER BY code_count DESC
+      `);
+      out.mmInventory_itemcode_prefix3 = prefixes.recordset;
+
+      out.hint = '결과 해석: mmInventory_sitecodes 에 "BHC2" 가 없거나 row_count 가 0 이면 SiteCode 가 다른 것. dd_match_check 에서 exact_count=0 인데 like_sample 에 결과가 있으면 품목코드 포맷 불일치(prefix/suffix 차이). prefix3 에 "DDC"/"DD_" 가 없으면 BHC 에 DD 품목이 아예 없는 것.';
+
+      ok(res, out);
+    } catch (e) {
+      fail(res, 500, 'BHC 진단 실패: ' + e.message);
+    } finally {
+      if (bhcPool) { try { await bhcPool.close(); } catch(_){} }
+    }
+    return;
+  }
+
   if (pathname === '/api/debug/xerp-match' && method === 'GET') {
     const code = (parsed.searchParams.get('code') || '').trim();
     if (!code) { fail(res, 400, 'code 파라미터 필요'); return; }
