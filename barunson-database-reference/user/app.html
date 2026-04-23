@@ -7341,6 +7341,14 @@ var pageTitles={
 let RAW=[], classified={urgent:[],nohistory:[],danger:[],safe:[],nosale:[],printwarehouse:[],etc:[]};
 let currentTab='all', sortK='', sortD='asc', orderQty={}, orderChecked={}, loadTime='';
 let manualOrderCodes=new Set(); // 재고현황 탭에서 '+ 발주'로 수동 추가한 품목코드
+
+// 재고현황 캐시 무효화 — 품목관리에서 추가/수정/삭제 후 호출해 다음 재고현황 방문 시 재조회 유발.
+// loadInventoryPage() 는 RAW 가 비어있지 않으면 early return 하므로, 이 helper 로 비워줘야 신제품이 반영됨.
+function invalidateInventoryCache(){
+  RAW = [];
+  classified = {urgent:[],nohistory:[],danger:[],safe:[],nosale:[],printwarehouse:[],etc:[]};
+  loadTime = '';
+}
 let productInfo={}, productNotes={}, orderedToday={}, postVendorMap={}; // postVendorMap: {code_process: vendorName}
 let vendors=JSON.parse(localStorage.getItem('vendors')||'[]');
 let poList=[];
@@ -20966,6 +20974,7 @@ async function syncProductInfo() {
     const syncResp = await fetch('/api/product-info/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     const result = (await syncResp.json()).data || {};
     alert(`동기화 완료!\n- 업데이트: ${result.updated}개\n- 스킵(DB 미등록): ${result.skipped}개`);
+    invalidateInventoryCache();
     loadProductMgmt();
   } catch (e) {
     alert('동기화 오류: ' + e.message);
@@ -21170,6 +21179,7 @@ async function syncDDProducts() {
     const syncResp = await fetch('/api/dd/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     const result = (await syncResp.json()).data || {};
     alert(`DD 동기화 완료!\n- 신규: ${result.inserted}개\n- 업데이트: ${result.updated}개\n- 전체: ${result.total}개`);
+    invalidateInventoryCache();
     loadProductMgmt();
   } catch (e) {
     alert('DD 동기화 오류: ' + e.message);
@@ -21324,6 +21334,7 @@ async function handlePMExcel(file) {
     </div>`;
 
     // 새로고침
+    invalidateInventoryCache();
     await loadProductMgmt();
     // origin 매핑도 갱신
     const prodResp = await fetch('/api/products').then(r => r.json());
@@ -21750,6 +21761,7 @@ async function saveProduct(){
   const resp=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   if(resp.ok){
     document.getElementById('pmModalOverlay').classList.remove('show');
+    invalidateInventoryCache();
     loadProductMgmt();
   } else {
     alert('저장 실패: '+(resp.error||''));
@@ -21759,6 +21771,7 @@ async function saveProduct(){
 async function deleteProduct(id){
   if(!confirm('이 품목을 삭제하시겠습니까?')) return;
   await fetch(`/api/products/${id}`,{method:'DELETE'}).then(r=>r.json());
+  invalidateInventoryCache();
   loadProductMgmt();
 }
 
