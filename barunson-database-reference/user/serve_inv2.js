@@ -219,6 +219,16 @@ const xerpConfig = {
   options: { encrypt: true, trustServerCertificate: false, requestTimeout: 120000 },
   pool: { max: 5, min: 1, idleTimeoutMillis: 300000 }
 };
+// BHC(디얼디어)는 readonly_erp 접근 불가 → DB_USER(readonly_user) 사용
+const bhcConfig = {
+  server: envVars.DB_SERVER || process.env.DB_SERVER || '',
+  port: parseInt(envVars.DB_PORT || process.env.DB_PORT || '1433'),
+  user: envVars.DB_USER || process.env.DB_USER || '',
+  password: envVars.DB_PASSWORD || process.env.DB_PASSWORD || '',
+  database: 'BHC',
+  options: { encrypt: true, trustServerCertificate: false, requestTimeout: 120000 },
+  pool: { max: 3, min: 0, idleTimeoutMillis: 60000 }
+};
 
 // 재고 조회 시 특정 창고만 필터링 — 미설정이면 전체 창고 합산 (legacy 동작).
 // 사용자가 "파주물류센터(제품)" 한 창고만 보고 싶다고 해서 도입. WhCode 정확값은
@@ -249,11 +259,12 @@ const XERP_MAX_RECONNECT_DELAY = 300000; // 최대 5분
 async function connectXERP() {
   if (!xerpConfig.server) { console.warn('XERP: DB_SERVER 미설정 → 출고현황 비활성'); return false; }
   try {
-    // 기존 풀 정리
+    // 기존 풀 + 글로벌 풀 정리 (stale 상태 방지)
     if (xerpPool) { try { await xerpPool.close(); } catch(_){} xerpPool = null; }
+    try { await sql.close(); } catch(_){} // 글로벌 풀도 정리
     xerpPool = await sql.connect(xerpConfig);
     xerpReconnectAttempts = 0;
-    console.log('XERP 데이터베이스 연결 완료');
+    console.log(`XERP 데이터베이스 연결 완료 (user: ${xerpConfig.user})`);
 
     // XERP 품목명 캐시 로딩 (비동기, 백그라운드)
     loadXerpItemNames().catch(e => console.warn('XERP 품목명 캐시 실패:', e.message));
@@ -4070,7 +4081,7 @@ async function handleRequest(req, res) {
   // GET /api/health — 시스템 헬스체크 (최상위 배치 — Docker 배포 안정성)
   if ((pathname === '/api/health' || pathname === '/health') && method === 'GET') {
     const health = { status: 'ok', timestamp: new Date().toISOString(), checks: {} };
-    try { await db.prepare('SELECT 1').get(); health.checks.postgresql = 'ok'; }
+    try { await db.prepare('SELECT 1').get(); health.checks[db.usingSqlite ? 'sqlite' : 'postgresql'] = 'ok'; }
     catch (e) { health.checks.postgresql = 'error: ' + e.message; health.status = 'degraded'; }
     try {
       if (xerpPool && xerpPool.connected) { health.checks.xerp = 'ok'; }
@@ -5614,8 +5625,8 @@ async function handleRequest(req, res) {
       let workPool = null;
       let createdLocal = false;
       if (isDd) {
-        // BHC는 on-demand pool (사용 후 닫음)
-        workPool = new sql.ConnectionPool({ ...xerpConfig, database: 'BHC' });
+        // BHC는 별도 계정(DB_USER) + on-demand pool (readonly_erp는 BHC 접근 불가)
+        workPool = new sql.ConnectionPool(bhcConfig);
         await workPool.connect();
         createdLocal = true;
       } else {

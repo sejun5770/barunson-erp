@@ -135,7 +135,7 @@ function convertSql(sql) {
 class Statement {
   constructor(sql) {
     this._originalSql = sql;
-    this._sql = convertSql(sql);
+    this._sql = _usingSqlite ? sql : convertSql(sql);
   }
 
   async get(...params) {
@@ -149,6 +149,14 @@ class Statement {
   }
 
   async run(...params) {
+    if (_usingSqlite) {
+      const result = await pool.query(this._sql, params);
+      const firstRow = result.rows && result.rows[0];
+      return {
+        changes: result.rowCount,
+        lastInsertRowid: firstRow ? Number(firstRow[Object.keys(firstRow)[0]]) : undefined
+      };
+    }
     // INSERT 문에 RETURNING 자동 추가 (lastInsertRowid 지원)
     let sql = this._sql;
     if (/^\s*INSERT\s/i.test(sql) && !/RETURNING/i.test(sql)) {
@@ -189,6 +197,18 @@ function prepare(sql) {
 
 // exec — DDL 실행
 async function exec(sql) {
+  if (_usingSqlite) {
+    // SQLite 모드: 변환 없이 직접 실행
+    const statements = sql.split(';').map(st => st.trim()).filter(st => st.length > 0);
+    for (const stmt of statements) {
+      try { await pool.query(stmt, []); } catch (e) {
+        if (!e.message.includes('already exists')) {
+          console.warn('[pg-adapter/sqlite exec warn]', e.message.split('\n')[0]);
+        }
+      }
+    }
+    return;
+  }
   let s = convertSqliteFunctions(sql);
   // AUTOINCREMENT 변환
   s = s.replace(/INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY');
@@ -252,20 +272,57 @@ function transaction(fn) {
   };
 }
 
+let _usingSqlite = false;
+
 async function connect(config) {
-  pool = new Pool({
-    host: config.host || process.env.PG_HOST || 'onely-postgres',
-    port: parseInt(config.port || process.env.PG_PORT || '5432'),
-    user: config.user || process.env.PG_USER || 'onely',
-    password: config.password || process.env.PG_PASSWORD || 'onely',
-    database: config.database || process.env.PG_DATABASE || 'sc_erp',
-    max: 10,
-    idleTimeoutMillis: 30000,
-  });
-  // 연결 테스트
-  const client = await pool.connect();
-  client.release();
-  console.log('[pg-adapter] PostgreSQL 연결 완료');
+  try {
+    pool = new Pool({
+      host: config.host || process.env.PG_HOST || 'onely-postgres',
+      port: parseInt(config.port || process.env.PG_PORT || '5432'),
+      user: config.user || process.env.PG_USER || 'onely',
+      password: config.password || process.env.PG_PASSWORD || 'onely',
+      database: config.database || process.env.PG_DATABASE || 'sc_erp',
+      max: 10,
+      idleTimeoutMillis: 30000,
+    });
+    // 연결 테스트
+    const client = await pool.connect();
+    client.release();
+    _usingSqlite = false;
+    console.log('[pg-adapter] PostgreSQL 연결 완료');
+  } catch (e) {
+    // PostgreSQL 연결 실패 → better-sqlite3 폴백
+    console.warn('[pg-adapter] PostgreSQL 연결 실패:', e.message);
+    console.log('[pg-adapter] SQLite 폴백 모드로 전환 (orders.db)');
+    try { if (pool) await pool.end(); } catch(_) {}
+    const path = require('path');
+    const Database = require('better-sqlite3');
+    const dbPath = path.join(__dirname, 'orders.db');
+    const sqliteDb = new Database(dbPath);
+    sqliteDb.pragma('journal_mode = WAL');
+    sqliteDb.pragma('busy_timeout = 5000');
+    // pool을 SQLite 래퍼로 교체 (prepare/exec에서 pool.query 호출하므로)
+    pool = {
+      query: async (sql, params) => {
+        const stmt = sqliteDb.prepare(sql);
+        if (/^\s*(SELECT|PRAGMA|WITH)\b/i.test(sql)) {
+          const rows = params && params.length ? stmt.all(...params) : stmt.all();
+          return { rows, rowCount: rows.length };
+        } else {
+          const info = params && params.length ? stmt.run(...params) : stmt.run();
+          return { rows: info.lastInsertRowid ? [{ id: info.lastInsertRowid }] : [], rowCount: info.changes };
+        }
+      },
+      connect: async () => {
+        return {
+          query: async (sql, params) => pool.query(sql, params),
+          release: () => {}
+        };
+      },
+      end: async () => { sqliteDb.close(); },
+    };
+    _usingSqlite = true;
+  }
 }
 
 async function close() {
@@ -281,4 +338,5 @@ module.exports = {
   transaction,
   // pool 직접 접근 (필요 시)
   get pool() { return pool; },
+  get usingSqlite() { return _usingSqlite; },
 };
