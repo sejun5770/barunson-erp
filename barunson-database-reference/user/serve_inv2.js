@@ -1571,6 +1571,9 @@ try { await db.exec("ALTER TABLE products ADD COLUMN op_category TEXT DEFAULT ''
 try { await db.exec("ALTER TABLE products ADD COLUMN temp_code TEXT DEFAULT ''"); } catch(e) {}
 // 규격 — XERP mmInoutItem.ItemSpec 에서 1회성 동기화됨. 한번 채워지면 수동 수정 전까지 유지.
 try { await db.exec("ALTER TABLE products ADD COLUMN spec TEXT DEFAULT ''"); } catch(e) {}
+// inventory_snapshot 에 창고별 재고 JSON 컬럼 — { "MF01": 100, "MT01": 50, ... }
+// 프론트가 창고 드롭다운으로 즉시 필터링 가능. current_stock 은 전체 합산을 그대로 유지(legacy 호환).
+try { await db.exec("ALTER TABLE inventory_snapshot ADD COLUMN warehouses_json TEXT DEFAULT ''"); } catch(e) {}
 try { await db.exec("ALTER TABLE products ADD COLUMN moq TEXT DEFAULT ''"); } catch(e) {}
 try { await db.exec("ALTER TABLE products ADD COLUMN payment_terms TEXT DEFAULT ''"); } catch(e) {}
 try { await db.exec("ALTER TABLE products ADD COLUMN supplier_id INTEGER DEFAULT 0"); } catch(e) {}
@@ -5447,6 +5450,7 @@ async function handleRequest(req, res) {
               '_원지사': p.paper_maker || '',
               '_후공정업체': p.post_vendor || '',
               '_규격': p.spec || '',
+              '_warehouses': (() => { try { return s.warehouses_json ? JSON.parse(s.warehouses_json) || {} : {}; } catch(_) { return {}; } })(),
               'legal_entity': isDD ? 'dd' : 'barunson',
               '_invSource': s.synced_at ? 'snapshot' : 'no-sync',
               '_siteCode': s.site_code || (isDD ? 'BHC2' : 'BK10'),
@@ -5478,7 +5482,7 @@ async function handleRequest(req, res) {
               '_xerpMonthly': 0, '_xerpDaily': 0, '_xerpTotal3m': 0,
               '_원자재코드': p.material_code || '', '_원재료용지명': p.material_name || '',
               '_절': p.cut_spec || '', '_조판': p.jopan || '', '_원지사': p.paper_maker || '',
-              '_후공정업체': p.post_vendor || '', '_규격': p.spec || '',
+              '_후공정업체': p.post_vendor || '', '_규격': p.spec || '', '_warehouses': {},
               'legal_entity': isDD ? 'dd' : 'barunson',
               '_invSource': 'empty-snapshot', '_siteCode': isDD ? 'BHC2' : 'BK10'
             };
@@ -5628,33 +5632,34 @@ async function handleRequest(req, res) {
         // 로컬 products 와 매칭. 쿼리 1회 → 실패 감지 명확, 타임아웃 1개만 관리.
         const validCodeSet = new Set(productCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).map(c => c.toUpperCase()));
 
-        // 1. 현재고 — SiteCode 전체 단일 쿼리 (양수 OhQty 만 SUM)
-        // ★ 창고 필터: XERP_INV_WAREHOUSE 환경변수 설정 시 해당 WhCode 만 합산 (예: 파주물류센터(제품)).
-        //   미설정이면 SiteCode 전체 합산 (legacy 동작 그대로).
-        const invMap = {};
+        // 1. 현재고 — SiteCode 전체 단일 쿼리, ItemCode + WhCode 별로 GROUP BY.
+        // ★ 창고별 분해 도입: 프론트가 드롭다운으로 특정 창고만 보고 싶을 수 있어서, 합산값(invMap) 외에
+        //   창고별 맵(invByWh: {item_code: {wh_code: qty}}) 도 별도 보관해 snapshot 에 JSON 으로 저장.
+        const invMap = {};                      // 전체 합산 — 기존 사용처 호환
+        const invByWh = {};                     // {item_code: {wh_code: qty}}
         try {
           const req = workPool.request();
           req.timeout = 120000; // 2분
-          let whFilter = '';
-          if (XERP_INV_WH_LIST.length > 0) {
-            // SQL injection 방지 — 영숫자만 허용 후 quote
-            const safeList = XERP_INV_WH_LIST.filter(c => /^[A-Za-z0-9_]+$/.test(c)).map(c => `'${c}'`).join(',');
-            if (safeList) whFilter = ` AND RTRIM(WhCode) IN (${safeList})`;
-          }
           const r = await req.query(`
             SELECT RTRIM(ItemCode) AS item_code,
+                   RTRIM(WhCode)   AS wh_code,
                    SUM(CASE WHEN OhQty > 0 THEN OhQty ELSE 0 END) AS oh_qty
             FROM mmInventory WITH (NOLOCK)
-            WHERE SiteCode = '${siteCode}'${whFilter}
-            GROUP BY RTRIM(ItemCode)
+            WHERE SiteCode = '${siteCode}'
+            GROUP BY RTRIM(ItemCode), RTRIM(WhCode)
           `);
           for (const row of r.recordset) {
             const code = (row.item_code || '').trim().toUpperCase();
-            if (code && validCodeSet.has(code)) {
-              invMap[code] = Math.round(row.oh_qty || 0);
+            const wh   = (row.wh_code   || '').trim();
+            const qty  = Math.round(row.oh_qty || 0);
+            if (!code || !validCodeSet.has(code)) continue;
+            invMap[code] = (invMap[code] || 0) + qty;
+            if (wh && qty > 0) {
+              if (!invByWh[code]) invByWh[code] = {};
+              invByWh[code][wh] = (invByWh[code][wh] || 0) + qty;
             }
           }
-          console.log(`[xerp-inv ${legalEntity}] 현재고 단일쿼리 성공: ${Object.keys(invMap).length}개 매칭 (XERP 전체 ${r.recordset.length}개 중)`);
+          console.log(`[xerp-inv ${legalEntity}] 현재고 단일쿼리 성공: ${Object.keys(invMap).length}개 품목 매칭, 창고-품목 조합 ${r.recordset.length}건`);
         } catch (invErr) {
           console.error(`[xerp-inv ${legalEntity}] 현재고 단일쿼리 실패 — 전체 sync 중단:`, invErr.message);
           throw invErr; // 전체 sync 실패 처리 (기존 snapshot 유지)
@@ -5719,6 +5724,7 @@ async function handleRequest(req, res) {
           const codeUpper = code.toUpperCase();
           const ohQty = invMap[codeUpper] || 0;
           const ship = shipMap[codeUpper] || { total: 0, monthly: 0, daily: 0 };
+          const whMap = invByWh[codeUpper] || {};
           out.push({
             '제품코드': code,
             '품목명': p.product_name || itemNames[codeUpper] || '',
@@ -5736,6 +5742,7 @@ async function handleRequest(req, res) {
             '_조판': p.jopan || '',
             '_원지사': p.paper_maker || '',
             '_후공정업체': p.post_vendor || '',
+            '_warehouses': whMap,                         // {wh_code: qty} — 프론트 드롭다운 필터용
             'legal_entity': isDd ? 'dd' : 'barunson',
             '_invSource': dbName,
             '_siteCode': siteCode
@@ -6244,7 +6251,8 @@ async function handleRequest(req, res) {
         let failCount = 0;
         const failedCodes = [];
         const BATCH_SIZE = 200;
-        const rowPh = "(?,?,?,?,?,?,?,?,datetime('now','localtime'))";
+        // ★ warehouses_json 추가 (placeholder 1개 늘어 9개 → 10개 + datetime).
+        const rowPh = "(?,?,?,?,?,?,?,?,?,datetime('now','localtime'))";
         const onConflict = `ON CONFLICT(product_code) DO UPDATE SET
               legal_entity=excluded.legal_entity,
               site_code=excluded.site_code,
@@ -6253,16 +6261,18 @@ async function handleRequest(req, res) {
               daily_out=excluded.daily_out,
               total_3m=excluded.total_3m,
               item_name=CASE WHEN excluded.item_name='' THEN inventory_snapshot.item_name ELSE excluded.item_name END,
+              warehouses_json=excluded.warehouses_json,
               synced_at=excluded.synced_at`;
         const rowParams = p => [
           p['제품코드'], p['legal_entity'], p['_siteCode'],
           p['현재고'] || 0, p['_xerpMonthly'] || 0, p['_xerpDaily'] || 0, p['_xerpTotal3m'] || 0,
-          p['품목명'] || ''
+          p['품목명'] || '',
+          p['_warehouses'] ? JSON.stringify(p['_warehouses']) : ''
         ];
         const runUpsert = db.transaction(async () => {
           // 폴백용 단건 UPSERT (배치 실패 시 어느 row 가 원인인지 식별)
           const singleUpsert = db.prepare(`INSERT INTO inventory_snapshot
-            (product_code, legal_entity, site_code, current_stock, monthly_out, daily_out, total_3m, item_name, synced_at)
+            (product_code, legal_entity, site_code, current_stock, monthly_out, daily_out, total_3m, item_name, warehouses_json, synced_at)
             VALUES ${rowPh}
             ${onConflict}`);
 
@@ -6270,7 +6280,7 @@ async function handleRequest(req, res) {
             const batch = rows.slice(i, i + BATCH_SIZE);
             const placeholders = batch.map(() => rowPh).join(',');
             const batchSql = `INSERT INTO inventory_snapshot
-              (product_code, legal_entity, site_code, current_stock, monthly_out, daily_out, total_3m, item_name, synced_at)
+              (product_code, legal_entity, site_code, current_stock, monthly_out, daily_out, total_3m, item_name, warehouses_json, synced_at)
               VALUES ${placeholders}
               ${onConflict}`;
             const flatParams = batch.flatMap(rowParams);

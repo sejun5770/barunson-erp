@@ -2308,6 +2308,10 @@ function closeMegaMenu() { /* no-op */ }
         <option value="이력없음">이력없음</option>
         <option value="기타">기타</option>
       </select>
+      <!-- 창고 드롭다운 — XERP 창고별 재고 필터. 옵션은 데이터 로드 후 populateWarehouseFilter() 가 채움. -->
+      <select id="warehouseFilter" onchange="render()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;color:#0f766e;font-weight:600" title="특정 창고의 재고만 표시. 미선택 시 전체 합산.">
+        <option value="">전체 창고</option>
+      </select>
       <!-- 생산지 -->
       <select id="originFilter" onchange="switchOrigin(this.value)" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:4px">
         <option value="all">전체 생산지</option>
@@ -7351,6 +7355,37 @@ function invalidateInventoryCache(){
   classified = {urgent:[],nohistory:[],danger:[],safe:[],nosale:[],printwarehouse:[],etc:[]};
   loadTime = '';
 }
+
+// 창고 드롭다운 채우기 — RAW 의 모든 _warehouses 키 합집합으로 옵션 구성.
+// 사용자가 "전체 창고"(빈값) 선택 시 가용재고는 합산. 특정 창고 선택 시 그 창고 재고만 표시.
+function populateWarehouseFilter(){
+  const sel = document.getElementById('warehouseFilter');
+  if (!sel) return;
+  const codes = new Set();
+  for (const p of RAW) {
+    const wh = p && p._warehouses;
+    if (!wh) continue;
+    for (const k of Object.keys(wh)) codes.add(k);
+  }
+  const sorted = Array.from(codes).sort();
+  // 기존 선택값 보존 (페이지 재방문 시)
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">전체 창고</option>' +
+    sorted.map(c => `<option value="${c}">${c}</option>`).join('');
+  if (prev && (prev === '' || codes.has(prev))) sel.value = prev;
+}
+
+// 현재 선택된 창고 (빈문자열 = 전체)
+function getSelectedWarehouse(){
+  return (document.getElementById('warehouseFilter')?.value || '').trim();
+}
+
+// 품목의 가용재고 — 창고 필터 적용. 미선택 시 전체 (p['가용재고']) 그대로.
+function getStockForCurrentWarehouse(p){
+  const wh = getSelectedWarehouse();
+  if (!wh) return Number(p['가용재고'] || 0);
+  return Number((p._warehouses && p._warehouses[wh]) || 0);
+}
 let productInfo={}, productNotes={}, orderedToday={}, postVendorMap={}; // postVendorMap: {code_process: vendorName}
 let vendors=JSON.parse(localStorage.getItem('vendors')||'[]');
 let poList=[];
@@ -7792,6 +7827,7 @@ async function processData(products){
   updateOriginCounts();
   updateStatusCounts();
   updatePendingCount();
+  populateWarehouseFilter();
 
   // Dashboard KPIs
   try {
@@ -7984,9 +8020,12 @@ function renderCell(c, p){
     return`<td style="text-align:center"><span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;color:${colors[o]||'#666'};background:${bgs[o]||'#f3f4f6'}">${o}</span></td>`;
   }
   if(c.special==='availStock'){
-    const av=typeof p['가용재고']==='number'?p['가용재고']:0;
-    const color=av<=0?'#ef4444':p._status==='urgent'?'#ea580c':'#333';
-    return`<td class="n" style="font-weight:700;color:${color}">${av.toLocaleString()}</td>`;
+    // 창고 드롭다운 선택 시 해당 창고 재고만, 미선택이면 전체 합산
+    const av = getStockForCurrentWarehouse(p);
+    const color = av<=0 ? '#ef4444' : p._status==='urgent' ? '#ea580c' : '#333';
+    const wh = getSelectedWarehouse();
+    const tip = wh ? `창고 ${wh} 기준` : '전체 창고 합산';
+    return`<td class="n" style="font-weight:700;color:${color}" title="${tip}">${av.toLocaleString()}</td>`;
   }
   if(c.special==='xerpMonthly'){
     // _xerpMonthly 없을 때 _monthly(classifyItem 계산값), 그것도 없으면 일평균×30 fallback
@@ -8037,14 +8076,17 @@ function renderCell(c, p){
     return`<td style="font-size:10px;text-align:center;color:#6366f1;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${os.join(', ')}">${os.join(', ')}</td>`;
   }
   if(c.special==='effectiveStock'){
-    const es=p._effectiveStock||0;
-    const av=p['가용재고']||0;
-    const pq=p._pendingQty||0;
-    const rns=p._receivedNotSynced||0;
-    if(!pq&&!rns)return`<td class="n" style="color:var(--text-muted)">${av?av.toLocaleString():'-'}</td>`;
-    const ss=p._safetyStock||0;
-    const color=es<=ss?'#ef4444':es<=ss*1.5?'#f59e0b':'#22c55e';
-    const tip=`현재고 ${av.toLocaleString()}${pq?` + 입고중 ${pq.toLocaleString()}`:''}${rns?` + 입고완료 ${rns.toLocaleString()}`:''}`;
+    // 창고 필터 시 av 가 해당 창고만 → es 도 그 기준으로 재계산
+    const av = getStockForCurrentWarehouse(p);
+    const pq = p._pendingQty || 0;
+    const rns = p._receivedNotSynced || 0;
+    const es = av + pq + rns;
+    if(!pq && !rns) return `<td class="n" style="color:var(--text-muted)">${av?av.toLocaleString():'-'}</td>`;
+    const ss = p._safetyStock || 0;
+    const color = es<=ss ? '#ef4444' : es<=ss*1.5 ? '#f59e0b' : '#22c55e';
+    const wh = getSelectedWarehouse();
+    const whTag = wh ? ` (창고 ${wh})` : '';
+    const tip = `현재고 ${av.toLocaleString()}${whTag}${pq?` + 입고중 ${pq.toLocaleString()}`:''}${rns?` + 입고완료 ${rns.toLocaleString()}`:''}`;
     return`<td class="n" style="color:${color};font-weight:700" title="${tip}">${es.toLocaleString()}</td>`;
   }
   if(c.special==='needOrder'){
