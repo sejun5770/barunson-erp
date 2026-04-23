@@ -4863,14 +4863,22 @@ async function handleRequest(req, res) {
     try { await db.prepare('SELECT temp_code FROM products LIMIT 1').get(); _hasTempCode = true; } catch(_){}
     try {
       let info;
-      const baseCols = 'product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo';
+      // op_category, is_new_product 는 PUT 핸들러에만 있었음. 신규등록 시에도 저장되도록 baseCols 포함.
+      const baseCols = 'product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo, op_category, is_new_product';
       const baseVals = [b.product_code, b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||''];
+        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', b.is_new_product ? 1 : 0];
       let cols = baseCols, vals = [...baseVals];
       if (_hasEntity.products) { cols += ', legal_entity'; vals.push(entity); }
       if (_hasTempCode) { cols += ', temp_code'; vals.push(b.temp_code||''); }
       const ph = vals.map((_,i)=>'?').join(',');
       info = await db.prepare(`INSERT INTO products (${cols}) VALUES (${ph})`).run(...vals);
+      // op_category → product_notes 동기화 (PUT 핸들러와 동일 — 재고현황 필터/그룹핑이 product_notes 를 참조)
+      if (b.op_category) {
+        try {
+          await db.prepare(`INSERT INTO product_notes (product_code, op_category, updated_at) VALUES (?,?,datetime('now','localtime'))
+            ON CONFLICT(product_code) DO UPDATE SET op_category=excluded.op_category, updated_at=excluded.updated_at`).run(b.product_code, b.op_category);
+        } catch(_){}
+      }
       ok(res, { id: info.lastInsertRowid });
     } catch(e) {
       fail(res, 400, e.message.includes('UNIQUE') ? '이미 등록된 품목코드입니다' : e.message);
@@ -4886,9 +4894,9 @@ async function handleRequest(req, res) {
     // temp_code 컬럼 존재 여부 런타임 체크
     let _hasTempCodeU = false;
     try { await db.prepare('SELECT temp_code FROM products LIMIT 1').get(); _hasTempCodeU = true; } catch(_){}
-    let setCols = 'product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?';
+    let setCols = 'product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?, is_new_product=?';
     let setVals = [b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-      b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||''];
+      b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', b.is_new_product ? 1 : 0];
     if (_hasEntity.products) { setCols += ', legal_entity=?'; setVals.push(entity); }
     if (_hasTempCodeU) { setCols += ', temp_code=?'; setVals.push(b.temp_code||''); }
     // 매입관리 필드: lead_time_days, moq, payment_terms, supplier_id
@@ -4992,9 +5000,12 @@ async function handleRequest(req, res) {
     };
     for (const it of items) { if (it) it.origin = _normOriginBulk(it.origin); }
 
+    // is_new_product 추가 — 기존에는 엑셀에 '신제품' 컬럼이 있어도 DB 저장 안 됐음.
+    //   엑셀에 컬럼이 없으면 프론트가 0 으로 기본값 세팅하므로, ON CONFLICT 에서 excluded.is_new_product=0 이면
+    //   기존값 보존 (업데이트로 기존 신제품 플래그가 일괄 해제되는 사고 방지).
     const upsert = _hasEntity.products
-      ? db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, memo, op_category, legal_entity)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      ? db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, memo, op_category, legal_entity, is_new_product)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(product_code) DO UPDATE SET
         product_name=CASE WHEN excluded.product_name='' THEN products.product_name ELSE excluded.product_name END,
         brand=CASE WHEN excluded.brand='' THEN products.brand ELSE excluded.brand END,
@@ -5007,9 +5018,10 @@ async function handleRequest(req, res) {
         memo=CASE WHEN excluded.memo='' THEN products.memo ELSE excluded.memo END,
         op_category=CASE WHEN excluded.op_category='' THEN products.op_category ELSE excluded.op_category END,
         legal_entity=CASE WHEN excluded.legal_entity='' THEN products.legal_entity ELSE excluded.legal_entity END,
+        is_new_product=CASE WHEN excluded.is_new_product=0 THEN products.is_new_product ELSE excluded.is_new_product END,
         updated_at=datetime('now','localtime')`)
-      : db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, memo, op_category)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      : db.prepare(`INSERT INTO products (product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, memo, op_category, is_new_product)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(product_code) DO UPDATE SET
         product_name=CASE WHEN excluded.product_name='' THEN products.product_name ELSE excluded.product_name END,
         brand=CASE WHEN excluded.brand='' THEN products.brand ELSE excluded.brand END,
@@ -5021,6 +5033,7 @@ async function handleRequest(req, res) {
         paper_maker=CASE WHEN excluded.paper_maker='' THEN products.paper_maker ELSE excluded.paper_maker END,
         memo=CASE WHEN excluded.memo='' THEN products.memo ELSE excluded.memo END,
         op_category=CASE WHEN excluded.op_category='' THEN products.op_category ELSE excluded.op_category END,
+        is_new_product=CASE WHEN excluded.is_new_product=0 THEN products.is_new_product ELSE excluded.is_new_product END,
         updated_at=datetime('now','localtime')`);
 
     // op_category → product_notes 동기화용
@@ -5040,6 +5053,8 @@ async function handleRequest(req, res) {
           it.paper_maker||'', it.memo||'', it.op_category||''
         ];
         if (_hasEntity.products) _bArgs.push((it.legal_entity === 'dd') ? 'dd' : 'barunson');
+        // is_new_product 는 INSERT 컬럼 맨 끝에 위치 (_hasEntity 여부와 무관). 프론트에서 Boolean/0/1 모두 올 수 있어 강제 변환.
+        _bArgs.push(it.is_new_product ? 1 : 0);
         await upsert.run(..._bArgs);
         // op_category가 있으면 product_notes에도 동기화
         if (it.op_category) await upsertNote.run(it.product_code, it.op_category);
