@@ -219,12 +219,12 @@ const xerpConfig = {
   options: { encrypt: true, trustServerCertificate: false, requestTimeout: 120000 },
   pool: { max: 5, min: 1, idleTimeoutMillis: 300000 }
 };
-// BHC(디얼디어)는 readonly_erp 접근 불가 → DB_USER(readonly_user) 사용
+// BHC(디얼디어)는 readonly_erp 접근 불가 → DB_USER(readonly_user) 우선, 없으면 xerpConfig 폴백
 const bhcConfig = {
-  server: envVars.DB_SERVER || process.env.DB_SERVER || '',
-  port: parseInt(envVars.DB_PORT || process.env.DB_PORT || '1433'),
-  user: envVars.DB_USER || process.env.DB_USER || '',
-  password: envVars.DB_PASSWORD || process.env.DB_PASSWORD || '',
+  server: envVars.DB_SERVER || process.env.DB_SERVER || xerpConfig.server,
+  port: parseInt(envVars.DB_PORT || process.env.DB_PORT) || xerpConfig.port,
+  user: envVars.DB_USER || process.env.DB_USER || xerpConfig.user,
+  password: envVars.DB_PASSWORD || process.env.DB_PASSWORD || xerpConfig.password,
   database: 'BHC',
   options: { encrypt: true, trustServerCertificate: false, requestTimeout: 120000 },
   pool: { max: 3, min: 0, idleTimeoutMillis: 60000 }
@@ -5626,8 +5626,10 @@ async function handleRequest(req, res) {
       let createdLocal = false;
       if (isDd) {
         // BHC는 별도 계정(DB_USER) + on-demand pool (readonly_erp는 BHC 접근 불가)
+        console.log(`[xerp-inv dd] BHC 풀 생성 (user: ${bhcConfig.user}, server: ${bhcConfig.server})`);
         workPool = new sql.ConnectionPool(bhcConfig);
         await workPool.connect();
+        console.log(`[xerp-inv dd] BHC 연결 성공`);
         createdLocal = true;
       } else {
         workPool = xerpPool;
