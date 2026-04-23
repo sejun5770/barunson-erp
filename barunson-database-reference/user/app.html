@@ -7496,6 +7496,7 @@ const COLS_STOCK=[
   {k:'운영구분',w:65,special:'opCategory',label:'운영구분'},
   {k:'제품코드',w:88,special:'productCode',label:'제품코드'},
   {k:'품목명',w:110,special:'productName',label:'품목명'},
+  {k:'규격',w:80,special:'spec',label:'규격'},
   {k:'생산지',w:50,special:'originBadge',label:'생산지'},
   {k:'가용재고',w:70,special:'availStock',num:true,label:'가용재고'},
   {k:'월출고',w:60,special:'xerpMonthly',num:true,label:'월출고'},
@@ -7512,6 +7513,7 @@ const COLS_ORDER=[
   {k:'상태',w:35,special:'statusBadge',label:'상태'},
   {k:'운영',w:50,special:'opCategory',label:'운영'},
   {k:'제품코드',w:80,special:'productCode',label:'제품코드'},
+  {k:'규격',w:80,special:'spec',label:'규격'},
   {k:'원자재코드',w:68,special:'matCode',label:'원자재코드'},
   {k:'원재료용지명',w:115,special:'matName',label:'원재료용지명'},
   {k:'제지사',w:50,special:'paperMaker',label:'제지사'},
@@ -8191,6 +8193,11 @@ function renderCell(c, p){
     const info=productInfo[code]||{};
     const spec=info['제품사양']||'';
     return`<td style="font-size:9px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(spec)}">${esc(spec||'-')}</td>`;
+  }
+  if(c.special==='spec'){
+    // products.spec — XERP 1회성 동기화 또는 사용자 수동 편집값. /api/xerp-inventory 응답에 _규격 필드로 옴.
+    const sp = p['_규격'] || '';
+    return`<td style="font-size:11px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(sp)}">${esc(sp||'-')}</td>`;
   }
   const v=p[c.k];
   if(c.num){

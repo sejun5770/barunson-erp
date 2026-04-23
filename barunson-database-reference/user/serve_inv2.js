@@ -220,6 +220,15 @@ const xerpConfig = {
   pool: { max: 5, min: 1, idleTimeoutMillis: 300000 }
 };
 
+// 재고 조회 시 특정 창고만 필터링 — 미설정이면 전체 창고 합산 (legacy 동작).
+// 사용자가 "파주물류센터(제품)" 한 창고만 보고 싶다고 해서 도입. WhCode 정확값은
+//   GET /api/debug/xerp-warehouses 로 조회 후 .env 에 XERP_INV_WAREHOUSE=<code> 설정.
+//   여러 창고 합산이 필요하면 콤마로 구분 (예: 'MF24,MF14').
+const XERP_INV_WAREHOUSE = (envVars.XERP_INV_WAREHOUSE || process.env.XERP_INV_WAREHOUSE || '').trim();
+const XERP_INV_WH_LIST = XERP_INV_WAREHOUSE ? XERP_INV_WAREHOUSE.split(',').map(s => s.trim()).filter(Boolean) : [];
+if (XERP_INV_WH_LIST.length > 0) console.log(`[xerp-inv] 창고 필터 활성: WhCode IN (${XERP_INV_WH_LIST.join(', ')})`);
+else console.log('[xerp-inv] 창고 필터 미설정 — 전체 창고 합산');
+
 // bar_shop1 전용 config — DB_* (readonly_user) 사용. server 는 XERP 와 동일 인스턴스지만
 // SQL 로그인이 달라서 (readonly_user vs readonly_erp) 별도 관리.
 // 기존엔 `{...xerpConfig, database: 'bar_shop1'}` 로 덮어써서 readonly_erp 가 bar_shop1 접근 권한 없으면 실패.
@@ -5620,15 +5629,23 @@ async function handleRequest(req, res) {
         const validCodeSet = new Set(productCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).map(c => c.toUpperCase()));
 
         // 1. 현재고 — SiteCode 전체 단일 쿼리 (양수 OhQty 만 SUM)
+        // ★ 창고 필터: XERP_INV_WAREHOUSE 환경변수 설정 시 해당 WhCode 만 합산 (예: 파주물류센터(제품)).
+        //   미설정이면 SiteCode 전체 합산 (legacy 동작 그대로).
         const invMap = {};
         try {
           const req = workPool.request();
           req.timeout = 120000; // 2분
+          let whFilter = '';
+          if (XERP_INV_WH_LIST.length > 0) {
+            // SQL injection 방지 — 영숫자만 허용 후 quote
+            const safeList = XERP_INV_WH_LIST.filter(c => /^[A-Za-z0-9_]+$/.test(c)).map(c => `'${c}'`).join(',');
+            if (safeList) whFilter = ` AND RTRIM(WhCode) IN (${safeList})`;
+          }
           const r = await req.query(`
             SELECT RTRIM(ItemCode) AS item_code,
                    SUM(CASE WHEN OhQty > 0 THEN OhQty ELSE 0 END) AS oh_qty
             FROM mmInventory WITH (NOLOCK)
-            WHERE SiteCode = '${siteCode}'
+            WHERE SiteCode = '${siteCode}'${whFilter}
             GROUP BY RTRIM(ItemCode)
           `);
           for (const row of r.recordset) {
@@ -5968,6 +5985,34 @@ async function handleRequest(req, res) {
       xerp_pool_connected: !!xerpPool
     };
     ok(res, out);
+    return;
+  }
+
+  // ── 창고 목록 조회 — XERP_INV_WAREHOUSE 설정 시 어떤 코드를 써야 하는지 확인용 ──
+  if (pathname === '/api/debug/xerp-warehouses' && method === 'GET') {
+    try {
+      await ensureXerpPool();
+      if (!xerpPool) { fail(res, 503, 'XERP 풀 미연결'); return; }
+      // mmInventory 와 mmInoutItem 양쪽에서 등장하는 WhCode 별 통계 (SiteCode=BK10).
+      // 추가: mmWarehouse 가 있으면 WhName 도 함께 (LEFT JOIN, 없어도 동작).
+      const r = await xerpPool.request().query(`
+        SELECT RTRIM(inv.WhCode) AS wh_code,
+               COUNT(DISTINCT RTRIM(inv.ItemCode)) AS item_count,
+               SUM(CASE WHEN inv.OhQty > 0 THEN inv.OhQty ELSE 0 END) AS total_qty
+        FROM mmInventory inv WITH (NOLOCK)
+        WHERE inv.SiteCode = 'BK10' AND inv.WhCode IS NOT NULL AND RTRIM(inv.WhCode) <> ''
+        GROUP BY RTRIM(inv.WhCode)
+        ORDER BY item_count DESC
+      `);
+      ok(res, {
+        configured: XERP_INV_WH_LIST,
+        configured_active: XERP_INV_WH_LIST.length > 0,
+        warehouses: r.recordset,
+        hint: '환경변수 XERP_INV_WAREHOUSE=<wh_code> 로 설정하면 해당 창고만 조회. 여러 개는 콤마 구분.'
+      });
+    } catch (e) {
+      fail(res, 500, '창고 조회 실패: ' + e.message);
+    }
     return;
   }
 
