@@ -2273,6 +2273,7 @@ function closeMegaMenu() { /* no-op */ }
       <div class="tab active" data-mtab="stock" onclick="switchInvMainTab('stock')" style="font-weight:600;font-size:13px;padding:8px 20px">재고현황</div>
       <div class="tab" data-mtab="order" onclick="switchInvMainTab('order')" style="font-weight:600;font-size:13px;padding:8px 20px">발주제안</div>
       <div class="tab" data-mtab="analysis" onclick="switchInvMainTab('analysis')" style="font-weight:600;font-size:13px;padding:8px 20px">재고분석</div>
+      <div class="tab" data-mtab="discontinued" onclick="switchInvMainTab('discontinued')" style="font-weight:600;font-size:13px;padding:8px 20px">소진후단종</div>
     </div>
 
     <!-- 필터 툴바 (재고현황/발주제안 공통) -->
@@ -7886,6 +7887,13 @@ function switchInvMainTab(tab){
     if(filterBar) filterBar.style.display='none';
     // Chart.js는 display:none→block 직후 레이아웃 미계산 상태에서 캔버스 크기 폭발 → rAF로 1프레임 지연
     requestAnimationFrame(()=>renderAnalysisTab());
+  } else if(tab==='discontinued'){
+    if(statusFilters) statusFilters.style.display='none';
+    if(orderToolbar) orderToolbar.style.display='none';
+    if(tableArea) tableArea.style.display='';
+    if(analysisArea) analysisArea.style.display='none';
+    if(filterBar) filterBar.style.display='flex';
+    buildHeader(); renderDiscontinuedTab();
   }
 }
 
@@ -8167,6 +8175,7 @@ function renderCell(c, p){
 function render(){
   if(invMainTab==='order'){renderOrderTab();return;}
   if(invMainTab==='analysis'){renderAnalysisTab();return;}
+  if(invMainTab==='discontinued'){renderDiscontinuedTab();return;}
 
   const q=(document.getElementById('searchInput')?.value||'').toLowerCase();
   const brand=document.getElementById('brandFilter')?.value||'';
@@ -8345,6 +8354,88 @@ function renderOrderTab(){
   const ocEl=document.getElementById('orderCount'); if(ocEl) ocEl.textContent=orderedCount;
   const sumEl=document.getElementById('orderSummary');
   if(sumEl) sumEl.textContent=`대상 ${f.length}건 | 선택 ${orderedCount}건`;
+}
+
+// ===== RENDER: 소진후단종 탭 =====
+// 운영구분이 '소진후단종' 으로 설정된 품목만 모아서 표시.
+// 필터(법인/생산지/브랜드/검색/출고이력)는 재고현황 탭과 동일하게 적용.
+// 운영구분 필터(opCategoryFilter)는 이 탭에서 의미가 없어 무시하고 항상 '소진후단종' 으로 고정.
+function renderDiscontinuedTab(){
+  const q=(document.getElementById('searchInput')?.value||'').toLowerCase();
+  const brand=document.getElementById('brandFilter')?.value||'';
+  const shipFilter=document.getElementById('shipmentFilter')?.value||'';
+  const legalEntity=document.getElementById('legalEntityFilter')?.value||'';
+
+  // 모든 상태의 품목을 합쳐서 op_category='소진후단종' 인 것만 추림
+  const data=[]
+    .concat(classified.urgent||[])
+    .concat(classified.nohistory||[])
+    .concat(classified.danger||[])
+    .concat(classified.safe||[])
+    .concat(classified.nosale||[])
+    .concat(classified.printwarehouse||[])
+    .concat(classified.etc||[]);
+
+  let f=data.filter(p=>{
+    const pnCat=productNotes[p['제품코드']]?.op_category||'';
+    if(pnCat!=='소진후단종')return false;
+    if(currentOrigin!=='all'&&p._origin!==currentOrigin)return false;
+    // 법인 필터 — 품목코드 prefix(DD*) 기반 (legal_entity 컬럼 fallback)
+    if(legalEntity){
+      const _code=String(p['제품코드']||p['품목코드']||'').toUpperCase();
+      const isDD=(p.legal_entity==='dd')||_code.startsWith('DD')||p._origin==='DD'||p['생산지']==='DD'||p['브랜드']==='DD';
+      if(legalEntity==='dd' && !isDD)return false;
+      if(legalEntity==='barunson' && isDD)return false;
+    }
+    if(brand&&(p['브랜드']||'')!==brand)return false;
+    if(q){
+      const c=(p['제품코드']||'').toLowerCase();
+      const n=(p['품목명']||'').toLowerCase();
+      if(!c.includes(q)&&!n.includes(q))return false;
+    }
+    if(shipFilter){
+      const hasShipment=(p._xerpMonthly||0)>0;
+      if(shipFilter==='active'&&!hasShipment)return false;
+      if(shipFilter==='inactive'&&hasShipment)return false;
+    }
+    return true;
+  });
+
+  // 정렬 — 사용자가 열 클릭으로 설정한 sortK 사용, 없으면 가용재고 오름차순 (곧 소진될 것부터)
+  const sk=sortK||'가용재고';
+  const sd=sortK?sortD:'asc';
+  f.sort((a,b)=>{
+    let va,vb;
+    if(sk==='운영구분'){
+      const opOrder={'운영품목':1,'소진후단종':2,'이력없음':3,'기타':4,'':5};
+      va=opOrder[productNotes[a['제품코드']]?.op_category||'']||5;
+      vb=opOrder[productNotes[b['제품코드']]?.op_category||'']||5;
+    } else {
+      va=a[sk]??''; vb=b[sk]??'';
+    }
+    if(va===null)va=9999;if(vb===null)vb=9999;
+    if(typeof va==='number'&&typeof vb==='number')return sd==='asc'?va-vb:vb-va;
+    va=String(va).toLowerCase();vb=String(vb).toLowerCase();
+    return sd==='asc'?va.localeCompare(vb):vb.localeCompare(va);
+  });
+
+  document.querySelectorAll('#hdr th').forEach(th=>{th.classList.remove('sa','sd');if(th.dataset.k===sk)th.classList.add(sd==='asc'?'sa':'sd');});
+
+  const cols=getCols();
+  const tb=document.getElementById('tb');
+  const show=f.slice(0,300);
+  tb.innerHTML=show.map(p=>{
+    const code=p['제품코드']||'';
+    const _codeU=String(code).toUpperCase();
+    const isDD=(p.legal_entity==='dd')||_codeU.startsWith('DD')||p['생산지']==='DD'||p['운영구분']==='DD'||p['브랜드']==='DD';
+    let rowBg=p._status==='urgent'?'background:#fff5f5':p._status==='danger'?'background:#fffbeb':'';
+    const ddBorder=isDD?'border-left:3px solid #ec4899;':'';
+    if(isDD && !rowBg) rowBg='background:#fdf2f8;';
+    return`<tr style="${ddBorder}${rowBg}">`+cols.map(c=>renderCell(c,p)).join('')+'</tr>';
+  }).join('');
+
+  const sb=document.getElementById('statusBar');
+  if(sb) sb.textContent=`소진후단종 ${f.length}개 | 전체 ${RAW.length}개 | ${loadTime||'-'}`;
 }
 
 // ===== RENDER: 재고분석 탭 =====
