@@ -6029,11 +6029,33 @@ async function handleRequest(req, res) {
   // 있는지 덤프해서 확인하기 위한 엔드포인트.
   if (pathname === '/api/debug/bhc-diag' && method === 'GET') {
     let bhcPool = null;
+    const connectAttempts = [];
     try {
-      bhcPool = new sql.ConnectionPool({ ...xerpConfig, database: 'BHC' });
-      await bhcPool.connect();
+      // XERP_DB_USER(readonly_erp) 는 BHC 접근 권한이 없을 수 있음. DB_USER(readonly_user) 도 시도.
+      // 어떤 credential 이 작동하는지 응답에 표시 → main sync 쪽 수정 근거로 사용.
+      const tryConfigs = [
+        { name: 'barShopConfig (DB_USER)', cfg: barShopConfig },
+        { name: 'xerpConfig (XERP_DB_USER)', cfg: xerpConfig }
+      ];
+      let usedConfig = null;
+      for (const tc of tryConfigs) {
+        try {
+          const pool = new sql.ConnectionPool({ ...tc.cfg, database: 'BHC' });
+          await pool.connect();
+          bhcPool = pool;
+          usedConfig = tc.name;
+          connectAttempts.push({ name: tc.name, result: 'ok' });
+          break;
+        } catch (e) {
+          connectAttempts.push({ name: tc.name, result: 'fail', error: e.message });
+        }
+      }
+      if (!bhcPool) {
+        jsonRes(res, 500, { ok: false, error: 'BHC 연결 실패 — 모든 credential 실패', attempts: connectAttempts });
+        return;
+      }
 
-      const out = { bhc_connection: 'ok' };
+      const out = { bhc_connection: 'ok', used_config: usedConfig, connect_attempts: connectAttempts };
 
       // 1) BHC.mmInventory 의 SiteCode 분포
       const sites = await bhcPool.request().query(`
