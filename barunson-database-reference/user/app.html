@@ -8291,10 +8291,13 @@ function renderOrderTab(){
       if(!c.includes(q)&&!n.includes(q))return false;
     }
     // 운영구분 필터
+    const pnCat=productNotes[p['제품코드']]?.op_category||'';
     if(opCat2){
-      const pnCat=productNotes[p['제품코드']]?.op_category||'';
       if(opCat2==='이력없음'){ if(pnCat&&pnCat!=='이력없음')return false; }
       else{ if(pnCat!==opCat2)return false; }
+    } else {
+      // 기본 동작: 소진후단종 품목은 발주제안에서 제외 (명시적으로 '소진후단종' 필터 선택 시에만 노출)
+      if(pnCat==='소진후단종')return false;
     }
     // 출고이력 필터
     if(shipFilter2){
