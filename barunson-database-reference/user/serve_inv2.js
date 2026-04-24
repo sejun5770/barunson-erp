@@ -6379,6 +6379,14 @@ async function handleRequest(req, res) {
   if (pathname === '/api/admin/dd-resync' && method === 'POST') {
     const out = { started_at: new Date().toISOString() };
     try {
+      // 0) credential 진단 — 비밀번호 본문은 숨기고 길이/끝문자/출처만 노출
+      const _pwSrc = (k) => (envVars[k] !== undefined ? 'envVars' : (process.env[k] !== undefined ? 'process.env' : 'missing'));
+      const _pwDiag = (pw) => ({ len: (pw || '').length, last_char: (pw || '').slice(-1) || '', has_hash: String(pw || '').includes('#') });
+      out.cred_diag = {
+        barShopConfig: { user: barShopConfig.user, ..._pwDiag(barShopConfig.password), pw_source: _pwSrc('DB_PASSWORD') },
+        xerpConfig:    { user: xerpConfig.user,    ..._pwDiag(xerpConfig.password),    pw_source: _pwSrc('XERP_DB_PASSWORD') }
+      };
+
       // 1) 로컬 DD 제품 리스트
       const locals = await db.prepare(
         "SELECT product_code, product_name FROM products WHERE (product_code LIKE 'DD%' OR legal_entity='dd' OR origin='DD') AND status IN ('active','inactive')"
