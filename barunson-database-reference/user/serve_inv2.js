@@ -932,7 +932,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <td style="${tdStyle}">${it.material_name || ''}</td>
       <td style="${tdStyle}">${it.spec_display || ''}</td>
       <td style="${tdStyle};color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
-      <td style="${tdStyle};text-align:right;font-weight:700;font-size:15px">${it.ream_qty || 0}R <span style="font-size:11px;color:#888;font-weight:400">(${(it.ordered_qty || 0).toLocaleString()}매)</span></td>
+      <td style="${tdStyle};text-align:right;font-weight:700;font-size:15px">${it.ream_qty || 0}R</td>
       <td style="${tdStyle};text-align:center">${it.cut_spec || ''}</td>
     </tr>`).join('');
   } else {
@@ -1105,7 +1105,6 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th>규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">规格</span>' : ''}</th>
           <th style="color:#c2410c">다음 입고처${isChinaVendor ? '<br><span style="font-weight:400;color:#999">下一入库处</span>' : ''}</th>
           <th class="right">발주수량(R)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
-          <th class="right">매수</th>
           <th class="center">절</th>
         </tr>` : `<tr>
           <th style="width:30px">#</th>
@@ -1127,7 +1126,6 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td>${it.spec_display || ''}</td>
               <td style="color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
               <td class="right bold" style="font-size:14px">${it.ream_qty || 0}R</td>
-              <td class="right" style="color:#888">${(it.ordered_qty || 0).toLocaleString()}</td>
               <td class="center">${it.cut_spec || ''}</td>
             </tr>`).join('');
           }
@@ -1174,7 +1172,6 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <td colspan="${isRawMaterial ? 6 : 3}" style="text-align:right;border:1px solid #ccc">합계 ${isChinaVendor ? '/ 合计' : ''}</td>
           ${isRawMaterial ? `
             <td class="right" style="border:1px solid #ccc;font-size:14px">${totalReams % 1 === 0 ? totalReams : totalReams.toFixed(1)}R</td>
-            <td class="right" style="border:1px solid #ccc">${totalQty.toLocaleString()}</td>
             <td style="border:1px solid #ccc"></td>
           ` : `
             <td class="right" style="border:1px solid #ccc">${totalReams % 1 === 0 ? totalReams : totalReams.toFixed(1)}R</td>
