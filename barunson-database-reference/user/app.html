@@ -6440,11 +6440,19 @@ function closeMegaMenu() { /* no-op */ }
 <!-- ========== WAREHOUSE (창고별 재고) PAGE ========== -->
 <div class="page" id="page-warehouse" style="background:#fff;color:#111">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
-    <h2 style="font-size:18px;font-weight:700;margin:0;color:#111">🏢 창고별 재고</h2>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <h2 style="font-size:18px;font-weight:700;margin:0;color:#111">🏢 창고별 재고</h2>
+      <!-- 법인 토글 -->
+      <div id="whEntityToggle" style="display:inline-flex;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">
+        <button id="whEntityBarunson" onclick="switchWhEntity('barunson')" style="border:none;padding:6px 14px;font-size:13px;cursor:pointer;background:#6366f1;color:#fff;font-weight:700">바른컴퍼니</button>
+        <button id="whEntityDD" onclick="switchWhEntity('dd')" style="border:none;padding:6px 14px;font-size:13px;cursor:pointer;background:#f3f4f6;color:#64748b;font-weight:600">디얼디어</button>
+      </div>
+    </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <input type="text" id="whSearch" placeholder="품목코드/이름 검색" onkeyup="if(event.key==='Enter')loadWarehouseInventory()" style="padding:6px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:200px">
       <button class="btn btn-sm" onclick="loadWarehouseInventory()" style="background:#0284c7;color:#fff">검색</button>
-      <button class="btn btn-sm" onclick="syncXerpToWarehouse()" style="background:#059669;color:#fff">XERP→본사 동기화</button>
+      <button id="whSyncXerpBtn" class="btn btn-sm" onclick="syncXerpToWarehouse()" style="background:#059669;color:#fff">XERP→바른컴퍼니 동기화</button>
+      <button id="whSyncDdBtn" class="btn btn-sm" onclick="syncDdToWarehouse()" style="background:#db2777;color:#fff;display:none">BHC→디얼디어 동기화</button>
       <button class="btn btn-sm" onclick="openWhTransferModal()" style="background:#7c3aed;color:#fff">재고이동</button>
       <button class="btn btn-sm" onclick="openWhAdjustModal()" style="background:#ea580c;color:#fff">재고조정</button>
       <button class="btn btn-sm" onclick="openWhSettingsModal()" style="background:#475569;color:#fff">⚙ 창고설정</button>
@@ -30606,6 +30614,45 @@ function exportCostExcel() {
 // ════════════════════════════════════════════════════════════════════
 var _whList = [];
 var _whActiveTab = 'all';
+// 현재 선택된 법인 (바른컴퍼니=barunson, 디얼디어=dd) — localStorage 영속
+var _whEntity = (typeof localStorage !== 'undefined' && localStorage.getItem('whEntity')) || 'barunson';
+
+function switchWhEntity(ent) {
+  _whEntity = (ent === 'dd') ? 'dd' : 'barunson';
+  try { localStorage.setItem('whEntity', _whEntity); } catch(_){}
+  // 토글 UI 갱신
+  var bBtn = document.getElementById('whEntityBarunson');
+  var dBtn = document.getElementById('whEntityDD');
+  if (bBtn && dBtn) {
+    if (_whEntity === 'barunson') {
+      bBtn.style.background = '#6366f1'; bBtn.style.color = '#fff'; bBtn.style.fontWeight = '700';
+      dBtn.style.background = '#f3f4f6'; dBtn.style.color = '#64748b'; dBtn.style.fontWeight = '600';
+    } else {
+      dBtn.style.background = '#ec4899'; dBtn.style.color = '#fff'; dBtn.style.fontWeight = '700';
+      bBtn.style.background = '#f3f4f6'; bBtn.style.color = '#64748b'; bBtn.style.fontWeight = '600';
+    }
+  }
+  // 동기화 버튼 표시 전환
+  var xBtn = document.getElementById('whSyncXerpBtn');
+  var dSync = document.getElementById('whSyncDdBtn');
+  if (xBtn) xBtn.style.display = (_whEntity === 'barunson') ? '' : 'none';
+  if (dSync) dSync.style.display = (_whEntity === 'dd') ? '' : 'none';
+  _whActiveTab = 'all';
+  loadWarehousePage();
+}
+
+async function syncDdToWarehouse() {
+  if (!await whConfirm('BHC(디얼디어) 재고를 끌어와서 디얼디어 창고를 자동 등록하고 재고를 동기화합니다. 진행할까요?')) return;
+  whToast('BHC 동기화 중... 최대 2분 소요', 'warn');
+  try {
+    var r = await authFetch('/api/admin/dd-resync', { method: 'POST' });
+    var rj = await r.json();
+    if (!r.ok || rj.ok === false) { whToast('동기화 실패: ' + (rj.error || JSON.stringify(rj.data || {}).slice(0,200)), 'error'); return; }
+    var d = rj.data || rj;
+    whToast('동기화 완료 — 창고 ' + (d.dd_warehouses_registered || 0) + '개, 재고 ' + (d.dd_warehouse_inventory_upserted || 0) + '건');
+    loadWarehousePage();
+  } catch(e) { whToast('동기화 오류: ' + e.message, 'error'); }
+}
 
 // 토스트 알림 (alert 대체)
 function whToast(msg, type) {
@@ -30635,7 +30682,24 @@ function whConfirm(msg) {
 
 async function loadWarehousePage() {
   try {
-    const r = await authFetch('/api/warehouses');
+    // 토글/동기화 버튼 초기 상태 보정 (페이지 첫 진입 시)
+    var bBtn = document.getElementById('whEntityBarunson');
+    var dBtn = document.getElementById('whEntityDD');
+    if (bBtn && dBtn) {
+      if (_whEntity === 'barunson') {
+        bBtn.style.background='#6366f1'; bBtn.style.color='#fff'; bBtn.style.fontWeight='700';
+        dBtn.style.background='#f3f4f6'; dBtn.style.color='#64748b'; dBtn.style.fontWeight='600';
+      } else {
+        dBtn.style.background='#ec4899'; dBtn.style.color='#fff'; dBtn.style.fontWeight='700';
+        bBtn.style.background='#f3f4f6'; bBtn.style.color='#64748b'; bBtn.style.fontWeight='600';
+      }
+    }
+    var xBtn = document.getElementById('whSyncXerpBtn');
+    var dSync = document.getElementById('whSyncDdBtn');
+    if (xBtn) xBtn.style.display = (_whEntity === 'barunson') ? '' : 'none';
+    if (dSync) dSync.style.display = (_whEntity === 'dd') ? '' : 'none';
+
+    const r = await authFetch('/api/warehouses?entity=' + encodeURIComponent(_whEntity));
     const rj = await r.json();
     _whList = rj.data || rj;
     renderWhTabs();
@@ -30723,13 +30787,21 @@ async function loadWarehouseInventory() {
 }
 
 async function syncXerpToWarehouse() {
-  var yes = await whConfirm('XERP 재고를 본사창고로 동기화합니다.\n진행하시겠습니까?');
+  var yes = await whConfirm('XERP 재고를 끌어와서 바른컴퍼니 창고를 자동 등록하고 재고를 동기화합니다.\n진행하시겠습니까?');
   if (!yes) return;
+  whToast('XERP 동기화 중...', 'warn');
   try {
     var r = await authFetch('/api/warehouses/sync-xerp', { method:'POST' });
     var d = await r.json();
-    if (r.ok) { whToast(d.data ? d.data.message : d.message); loadWarehouseInventory(); }
-    else whToast('실패: ' + (d.error||d.message), 'error');
+    if (r.ok) {
+      var body = d.data || d;
+      var msg = body.message || '동기화 완료';
+      if (body.warehouses_registered != null) msg += ' — 창고 ' + body.warehouses_registered + '개, 재고 ' + (body.inventory_upserted||0) + '건';
+      whToast(msg);
+      loadWarehousePage();
+    } else {
+      whToast('실패: ' + (d.error||d.message), 'error');
+    }
   } catch(e) { whToast('동기화 오류: ' + e.message, 'error'); }
 }
 
@@ -30852,7 +30924,7 @@ function openWhSettingsModal() {
   });
   html += '</tbody></table>';
   html += '<div style="border-top:1px solid #e5e7eb;padding-top:16px">';
-  html += '<h4 style="font-size:14px;font-weight:600;margin:0 0 12px 0">새 창고 추가</h4>';
+  html += '<h4 style="font-size:14px;font-weight:600;margin:0 0 12px 0">새 창고 추가 <span style="font-size:12px;font-weight:400;color:#64748b">(현재 법인: ' + (_whEntity==='dd'?'디얼디어':'바른컴퍼니') + ')</span></h4>';
   html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
   html += '<input id="newWhCode" placeholder="창고코드 (예: WH-05)" style="padding:8px;border:1px solid #d1d5db;border-radius:6px">';
   html += '<input id="newWhName" placeholder="창고이름" style="padding:8px;border:1px solid #d1d5db;border-radius:6px">';
@@ -30872,7 +30944,8 @@ async function addWarehouse() {
     code: document.getElementById('newWhCode').value.trim(),
     name: document.getElementById('newWhName').value.trim(),
     location: document.getElementById('newWhLoc').value.trim(),
-    description: document.getElementById('newWhDesc').value.trim()
+    description: document.getElementById('newWhDesc').value.trim(),
+    legal_entity: _whEntity
   };
   var resultEl = document.getElementById('whSettingsResult');
   if (!d.code || !d.name) { resultEl.style.display='block'; resultEl.style.background='#fef2f2'; resultEl.style.color='#dc2626'; resultEl.textContent='코드와 이름은 필수입니다'; return; }

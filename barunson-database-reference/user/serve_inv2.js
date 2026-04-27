@@ -3052,9 +3052,12 @@ await db.exec(`CREATE TABLE IF NOT EXISTS warehouses (
   description TEXT DEFAULT '',
   is_default  INTEGER DEFAULT 0,
   status      TEXT DEFAULT 'active',
+  legal_entity TEXT NOT NULL DEFAULT 'barunson',
   created_at  TEXT DEFAULT (datetime('now','localtime')),
   updated_at  TEXT DEFAULT (datetime('now','localtime'))
 )`);
+// 기존 DB 호환: legal_entity 컬럼 없을 시 추가
+try { await db.exec("ALTER TABLE warehouses ADD COLUMN legal_entity TEXT NOT NULL DEFAULT 'barunson'"); } catch(_){}
 
 await db.exec(`CREATE TABLE IF NOT EXISTS warehouse_inventory (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3103,12 +3106,75 @@ await db.exec("CREATE INDEX IF NOT EXISTS idx_wa_created ON warehouse_adjustment
 // 기본 창고 초기화 (처음 실행 시)
 const whCount = await db.prepare("SELECT COUNT(*) as cnt FROM warehouses").get();
 if (whCount.cnt === 0) {
-  const insertWh = db.prepare("INSERT INTO warehouses (code, name, location, description, is_default) VALUES (?, ?, ?, ?, ?)");
-  await insertWh.run('WH-HQ', '본사창고', '본사', 'XERP 연동 기본 창고', 1);
-  await insertWh.run('WH-02', '제2창고', '', '', 0);
-  await insertWh.run('WH-03', '제3창고', '', '', 0);
-  await insertWh.run('WH-04', '제4창고', '', '', 0);
+  const insertWh = db.prepare("INSERT INTO warehouses (code, name, location, description, is_default, legal_entity) VALUES (?, ?, ?, ?, ?, ?)");
+  await insertWh.run('WH-HQ', '(바른컴퍼니) 본사창고', '본사', 'XERP 연동 기본 창고', 1, 'barunson');
+  await insertWh.run('WH-02', '(바른컴퍼니) 제2창고', '', '', 0, 'barunson');
+  await insertWh.run('WH-03', '(바른컴퍼니) 제3창고', '', '', 0, 'barunson');
+  await insertWh.run('WH-04', '(바른컴퍼니) 제4창고', '', '', 0, 'barunson');
   console.log('[DB] 기본 창고 4개 초기화 완료');
+}
+
+// 기존 시드 창고 마이그레이션 — 이름 prefix + legal_entity 태깅 (멱등)
+try {
+  await db.exec(`UPDATE warehouses SET name = '(바른컴퍼니) ' || name
+    WHERE code IN ('WH-HQ','WH-02','WH-03','WH-04')
+      AND name NOT LIKE '(바른컴퍼니)%' AND name NOT LIKE '(디얼디어)%'`);
+  await db.exec(`UPDATE warehouses SET legal_entity='barunson'
+    WHERE (legal_entity IS NULL OR legal_entity='')`);
+} catch(_){}
+
+// ── 디얼디어 마스터 자동 import (멱등) ──
+// 파일: dd_master.json (디얼디어 스마트재고현황 엑셀에서 추출)
+// 동작: products 테이블에 UPSERT — 신규는 INSERT, 기존은 brand/origin/category/status/legal_entity 갱신
+//       사용자 편집 가능 컬럼(product_name, material_*, op_category, is_new_product, memo, spec)은 건드리지 않음
+try {
+  const _ddMasterPath = path.join(__dirname, 'dd_master.json');
+  if (fs.existsSync(_ddMasterPath)) {
+    const _ddRaw = JSON.parse(fs.readFileSync(_ddMasterPath, 'utf-8'));
+    const _ddItems = Array.isArray(_ddRaw) ? _ddRaw : (_ddRaw.items || []);
+    let _ddInserted = 0, _ddUpdated = 0, _ddFailed = 0;
+    // temp_code 컬럼 존재 여부 런타임 체크
+    let _hasTempCodeMig = false;
+    try { await db.prepare('SELECT temp_code FROM products LIMIT 1').get(); _hasTempCodeMig = true; } catch(_){}
+
+    let _ddSkippedBarunson = 0;
+    for (const it of _ddItems) {
+      const code = (it.product_code || '').trim();
+      if (!code) continue;
+      try {
+        // 존재 여부 확인 + 안전장치: 바른컴퍼니로 등록된 코드는 hijack 금지 (DD엑셀에 같은 코드가 있어도 skip)
+        const exists = await db.prepare("SELECT legal_entity FROM products WHERE product_code=?").get(code);
+        if (exists) {
+          if (exists.legal_entity === 'barunson') {
+            // 바른컴퍼니 품목과 코드 충돌 — 사용자 확인 필요. skip.
+            _ddSkippedBarunson++;
+            continue;
+          }
+          // 기존 DD 품목 갱신 — 마스터 컬럼만
+          let setSql = `brand=?, origin=?, category=?, status=?, legal_entity='dd', updated_at=datetime('now','localtime')`;
+          const args = [it.brand || '', it.origin || '한국', it.category || '', it.status || 'active'];
+          if (_hasTempCodeMig && it.online_code) { setSql += ', temp_code=?'; args.push(it.online_code); }
+          args.push(code);
+          await db.prepare(`UPDATE products SET ${setSql} WHERE product_code=?`).run(...args);
+          _ddUpdated++;
+        } else {
+          // INSERT — unit 기본값 'EA'
+          let cols = 'product_code, product_name, brand, origin, category, status, unit, legal_entity';
+          let vals = [code, '', it.brand || '', it.origin || '한국', it.category || '', it.status || 'active', 'EA', 'dd'];
+          if (_hasTempCodeMig && it.online_code) { cols += ', temp_code'; vals.push(it.online_code); }
+          const ph = vals.map(()=>'?').join(',');
+          await db.prepare(`INSERT INTO products (${cols}) VALUES (${ph})`).run(...vals);
+          _ddInserted++;
+        }
+      } catch(e) {
+        _ddFailed++;
+        if (_ddFailed <= 3) console.warn(`[DD-import] ${code} 실패:`, e.message);
+      }
+    }
+    console.log(`[DB] 디얼디어 마스터 import: 신규 ${_ddInserted}건, 업데이트 ${_ddUpdated}건, 바른컴퍼니 충돌 skip ${_ddSkippedBarunson}건, 실패 ${_ddFailed}건 (총 ${_ddItems.length}건 처리)`);
+  }
+} catch(e) {
+  console.error('[DB] 디얼디어 마스터 import 실패:', e.message);
 }
 
 // ── 공지/게시판 테이블 ──
@@ -6408,8 +6474,13 @@ async function handleRequest(req, res) {
       if (!bhcPool) { out.bhc_error = '모든 credential 실패'; ok(res, out); return; }
 
       // 3) 재고 쿼리 (mmInventory, SiteCode='BHC2')
-      const invByWh = {}; // {code: {wh: qty}}
-      const invMap = {};  // {code: totalQty}
+      // 매칭 정규화: BHC ItemCode 와 로컬 product_code 가 언더스코어 유무로 어긋나는 케이스(예: DDC0213 vs DDC_0213)가 있어
+      // exact 매칭 외에 underscore-stripped 매칭도 수행. 우선순위: exact > normalized.
+      const invByWh = {};     // {code(upper): {wh: qty}}
+      const invMap = {};      // {code(upper): totalQty}
+      const invByWhNorm = {}; // {code_no_underscore(upper): {wh: qty}}
+      const invMapNorm = {};  // {code_no_underscore(upper): totalQty}
+      const _stripUs = s => s.replace(/_/g, '');
       try {
         const req0 = bhcPool.request(); req0.timeout = 120000;
         const r = await req0.query(`
@@ -6424,6 +6495,14 @@ async function handleRequest(req, res) {
           if (!c) continue;
           invMap[c] = (invMap[c] || 0) + q;
           if (w && q > 0) { (invByWh[c] ||= {})[w] = (invByWh[c][w] || 0) + q; }
+          const cn = _stripUs(c);
+          if (cn !== c) {
+            invMapNorm[cn] = (invMapNorm[cn] || 0) + q;
+            if (w && q > 0) { (invByWhNorm[cn] ||= {})[w] = (invByWhNorm[cn][w] || 0) + q; }
+          } else {
+            invMapNorm[cn] = invMap[c];
+            if (invByWh[c]) invByWhNorm[cn] = invByWh[c];
+          }
         }
         out.bhc_inv_rows = r.recordset.length;
         out.bhc_inv_items = Object.keys(invMap).length;
@@ -6431,6 +6510,7 @@ async function handleRequest(req, res) {
 
       // 4) 3개월 출고 쿼리
       const shipMap = {};
+      const shipMapNorm = {};
       try {
         const today = new Date();
         const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
@@ -6447,7 +6527,12 @@ async function handleRequest(req, res) {
         for (const row of r.recordset) {
           const c = (row.item_code || '').trim().toUpperCase();
           const t = Math.round(row.total_qty || 0);
-          if (c) shipMap[c] = { total: t, monthly: Math.round(t / 3), daily: Math.round(t / 90) };
+          if (c) {
+            shipMap[c] = { total: t, monthly: Math.round(t / 3), daily: Math.round(t / 90) };
+            const cn = _stripUs(c);
+            if (cn !== c) shipMapNorm[cn] = shipMap[c];
+            else shipMapNorm[cn] = shipMap[c];
+          }
         }
         out.bhc_ship_items = Object.keys(shipMap).length;
       } catch (e) { out.ship_query_error = e.message; }
@@ -6457,6 +6542,7 @@ async function handleRequest(req, res) {
       // 5) 로컬 제품별 매칭 + UPSERT
       const matched = [];
       const unmatched = [];
+      let _matchedNormCount = 0;
       const sample = [];
       let upserted = 0;
       let upsertFailed = 0;
@@ -6474,10 +6560,25 @@ async function handleRequest(req, res) {
         const code = (p.product_code || '').replace(/[\s ​‌‍﻿]/g, '').trim();
         if (!code) continue;
         const cu = code.toUpperCase();
-        const stock = invMap[cu] || 0;
-        const ship = shipMap[cu] || { total: 0, monthly: 0, daily: 0 };
-        const whJson = invByWh[cu] ? JSON.stringify(invByWh[cu]) : '';
-        if (invMap[cu] !== undefined || shipMap[cu] !== undefined) matched.push(code);
+        const cn = _stripUs(cu);
+        // exact 우선, 없으면 underscore-stripped 매칭
+        let stock, ship, whObj, matchType;
+        if (invMap[cu] !== undefined || shipMap[cu] !== undefined) {
+          stock = invMap[cu] || 0;
+          ship = shipMap[cu] || { total: 0, monthly: 0, daily: 0 };
+          whObj = invByWh[cu];
+          matchType = 'exact';
+        } else if (invMapNorm[cn] !== undefined || shipMapNorm[cn] !== undefined) {
+          stock = invMapNorm[cn] || 0;
+          ship = shipMapNorm[cn] || { total: 0, monthly: 0, daily: 0 };
+          whObj = invByWhNorm[cn];
+          matchType = 'norm';
+        } else {
+          stock = 0; ship = { total: 0, monthly: 0, daily: 0 }; whObj = null; matchType = null;
+        }
+        const whJson = whObj ? JSON.stringify(whObj) : '';
+        if (matchType === 'exact') { matched.push(code); }
+        else if (matchType === 'norm') { matched.push(code); _matchedNormCount++; }
         else unmatched.push(code);
         try {
           await upsertStmt.run(code, 'dd', 'BHC2', stock, ship.monthly, ship.daily, ship.total, p.product_name || '', whJson);
@@ -6490,14 +6591,81 @@ async function handleRequest(req, res) {
       }
 
       out.matched_count = matched.length;
+      out.matched_normalized = _matchedNormCount;
+      out.matched_exact = matched.length - _matchedNormCount;
       out.unmatched_count = unmatched.length;
       out.unmatched_sample = unmatched.slice(0, 10);
       out.upserted = upserted;
       out.upsert_failed = upsertFailed;
       if (upsertErrs.length) out.upsert_errors = upsertErrs;
-      out.total_stock = locals.reduce((s, p) => s + (invMap[(p.product_code || '').toUpperCase()] || 0), 0);
+      out.total_stock = locals.reduce((s, p) => {
+        const u = (p.product_code || '').toUpperCase();
+        return s + (invMap[u] !== undefined ? invMap[u] : (invMapNorm[_stripUs(u)] || 0));
+      }, 0);
       out.total_monthly_out = Object.values(shipMap).reduce((s, v) => s + (v.monthly || 0), 0);
       out.sample_upserts = sample;
+
+      // 6) BHC WhCode → warehouses 자동 등록 + warehouse_inventory 동기화
+      //    invByWh: {ItemCode(upper): {WhCode: qty}} — 위에서 이미 채워둠
+      //    목적: 「창고별 재고현황」 화면에 디얼디어 창고가 떠서 매칭되도록 함
+      try {
+        const ddWhSet = new Set();
+        for (const c of Object.keys(invByWh)) {
+          for (const w of Object.keys(invByWh[c] || {})) if (w) ddWhSet.add(w);
+        }
+        out.dd_warehouses_discovered = [...ddWhSet];
+
+        // 창고 마스터 업서트 — 이름은 (디얼디어) prefix + WhCode 그대로
+        // ON CONFLICT 시 사용자가 화면에서 변경한 이름 보존, legal_entity 만 강제로 'dd' 마킹
+        const upsertWh = db.prepare(`INSERT INTO warehouses (code, name, description, legal_entity)
+          VALUES (?, ?, 'BHC mmInventory 자동연동', 'dd')
+          ON CONFLICT(code) DO UPDATE SET legal_entity='dd', updated_at=datetime('now','localtime')`);
+        for (const wh of ddWhSet) {
+          try { await upsertWh.run(wh, `(디얼디어) ${wh}`); } catch(_){}
+        }
+
+        // code → id 매핑 (DD 등록분만)
+        const whIdByCode = {};
+        const whRows = await db.prepare("SELECT id, code FROM warehouses WHERE legal_entity='dd'").all();
+        for (const r of whRows) whIdByCode[r.code] = r.id;
+
+        // 이전 자동동기화 stale 정리 — source 에서 사라진 품목 제거 (수동입력 데이터는 유지)
+        try {
+          await db.prepare(`DELETE FROM warehouse_inventory WHERE memo='BHC 자동연동' AND warehouse_id IN (SELECT id FROM warehouses WHERE legal_entity='dd')`).run();
+        } catch(_){}
+
+        // warehouse_inventory 업서트 — 품목 × 창고별 수량
+        const upsertWi = db.prepare(`INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity, memo, updated_at)
+          VALUES (?, ?, ?, ?, 'BHC 자동연동', datetime('now','localtime'))
+          ON CONFLICT(warehouse_id, product_code) DO UPDATE SET
+            product_name=CASE WHEN excluded.product_name='' THEN warehouse_inventory.product_name ELSE excluded.product_name END,
+            quantity=excluded.quantity, memo=excluded.memo, updated_at=excluded.updated_at`);
+        let wiUpserted = 0;
+        let wiNorm = 0;
+        for (const p of locals) {
+          const code = (p.product_code || '').replace(/[\s ​‌‍﻿]/g, '').trim();
+          if (!code) continue;
+          const cu = code.toUpperCase();
+          // exact 매칭 우선, 없으면 underscore-stripped 매칭으로 폴백
+          let whMap = invByWh[cu];
+          if (!whMap) {
+            const cn = _stripUs(cu);
+            if (cn !== cu && invByWhNorm[cn]) { whMap = invByWhNorm[cn]; wiNorm++; }
+          }
+          if (!whMap) continue;
+          for (const [wh, qty] of Object.entries(whMap)) {
+            const wid = whIdByCode[wh];
+            if (!wid) continue;
+            try { await upsertWi.run(wid, code, p.product_name || '', qty); wiUpserted++; } catch(_){}
+          }
+        }
+        out.dd_warehouses_registered = ddWhSet.size;
+        out.dd_warehouse_inventory_upserted = wiUpserted;
+        out.dd_warehouse_inventory_normalized = wiNorm;
+      } catch (whErr) {
+        out.dd_warehouse_register_error = whErr.message;
+      }
+
       out.finished_at = new Date().toISOString();
       ok(res, out);
     } catch (e) {
@@ -14914,9 +15082,14 @@ async function handleRequest(req, res) {
   //  다중 창고 관리 API
   // ════════════════════════════════════════════════════════════════════
 
-  // GET /api/warehouses — 창고 목록
+  // GET /api/warehouses — 창고 목록 (?entity=barunson|dd 필터)
   if (pathname === '/api/warehouses' && method === 'GET') {
-    const rows = await db.prepare("SELECT * FROM warehouses ORDER BY is_default DESC, id ASC").all();
+    const entity = parsed.searchParams.get('entity');
+    let sqlStr = "SELECT * FROM warehouses";
+    const args = [];
+    if (entity === 'barunson' || entity === 'dd') { sqlStr += " WHERE legal_entity=?"; args.push(entity); }
+    sqlStr += " ORDER BY is_default DESC, id ASC";
+    const rows = await db.prepare(sqlStr).all(...args);
     ok(res, rows);
     return;
   }
@@ -14924,10 +15097,12 @@ async function handleRequest(req, res) {
   // POST /api/warehouses — 창고 등록
   if (pathname === '/api/warehouses' && method === 'POST') {
     const body = await readJSON(req);
-    const { code, name, location, description } = body;
+    const { code, name, location, description, legal_entity } = body;
     if (!code || !name) { fail(res, 400, '창고코드와 이름은 필수입니다'); return; }
+    const entity = (legal_entity === 'dd') ? 'dd' : 'barunson';
     try {
-      await db.prepare("INSERT INTO warehouses (code, name, location, description) VALUES (?, ?, ?, ?)").run(code, name, location || '', description || '');
+      await db.prepare("INSERT INTO warehouses (code, name, location, description, legal_entity) VALUES (?, ?, ?, ?, ?)")
+        .run(code, name, location || '', description || '', entity);
       ok(res, { message: '창고 등록 완료' });
     } catch (e) {
       if (e.message.includes('UNIQUE') || e.message.includes('duplicate key') || e.message.includes('unique constraint')) fail(res, 409, '이미 존재하는 창고코드입니다');
@@ -14941,13 +15116,14 @@ async function handleRequest(req, res) {
   if (whPutMatch && method === 'PUT') {
     const body = await readJSON(req);
     const whId = parseInt(whPutMatch[1]);
-    const { name, location, description, status } = body;
+    const { name, location, description, status, legal_entity } = body;
     const fields = [];
     const vals = [];
     if (name !== undefined) { fields.push('name=?'); vals.push(name); }
     if (location !== undefined) { fields.push('location=?'); vals.push(location); }
     if (description !== undefined) { fields.push('description=?'); vals.push(description); }
     if (status !== undefined) { fields.push('status=?'); vals.push(status); }
+    if (legal_entity !== undefined) { fields.push('legal_entity=?'); vals.push(legal_entity === 'dd' ? 'dd' : 'barunson'); }
     if (fields.length === 0) { fail(res, 400, '수정할 내용이 없습니다'); return; }
     fields.push("updated_at=datetime('now','localtime')");
     vals.push(whId);
@@ -15201,15 +15377,24 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // POST /api/warehouses/sync-xerp — XERP 재고를 본사창고로 동기화
+  // POST /api/warehouses/sync-xerp — XERP mmInventory(SiteCode=BK10) 를 창고별로 동기화
+  // 변경: 기존엔 모든 재고를 default 창고 한 곳에 통째로 부었음 → WhCode 별로 분해해서
+  //       각 창고에 (바른컴퍼니) prefix 로 자동 등록 + warehouse_inventory 분배
   if (pathname === '/api/warehouses/sync-xerp' && method === 'POST') {
     try {
       const pool = await ensureXerpPool();
+      if (!pool) { fail(res, 503, 'XERP 미연결'); return; }
+      const WH_NAMES_LOCAL = {
+        MF01:'본사공장', MF02:'공장2', MF03:'공장부속', MF15:'공장보조',
+        MF21:'공장21', MF23:'후가공', MF24:'완제품', MT01:'자재창고',
+        MT04:'자재보조', MT09:'자재09', M006:'외주06', M011:'외주11', W062:'외부창고'
+      };
       const result = await pool.request().query(`
-        SELECT RTRIM(ItemCode) AS product_code, SUM(OhQty) AS quantity
+        SELECT RTRIM(ItemCode) AS product_code, RTRIM(WhCode) AS wh_code,
+               SUM(CASE WHEN OhQty > 0 THEN OhQty ELSE 0 END) AS quantity
         FROM mmInventory WITH (NOLOCK)
-        WHERE SiteCode = 'BK10' AND OhQty > 0
-        GROUP BY RTRIM(ItemCode)
+        WHERE SiteCode = 'BK10'
+        GROUP BY RTRIM(ItemCode), RTRIM(WhCode)
       `);
       // 로컬 products 테이블에서 품목명 매칭
       const localProducts = {};
@@ -15217,21 +15402,56 @@ async function handleRequest(req, res) {
         const prods = await db.prepare("SELECT product_code, product_name FROM products").all();
         for (const p of prods) localProducts[p.product_code] = p.product_name;
       } catch(e) {}
-      const defaultWh = await db.prepare("SELECT id FROM warehouses WHERE is_default=1 LIMIT 1").get();
-      if (!defaultWh) { fail(res, 500, '기본 창고가 설정되지 않았습니다'); return; }
 
-      const upsert = db.prepare(`INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity)
-        VALUES (?, ?, ?, ?) ON CONFLICT(warehouse_id, product_code) DO UPDATE SET quantity=excluded.quantity, product_name=excluded.product_name, updated_at=datetime('now','localtime')`);
-      const tx = db.transaction(async (rows) => {
-        let cnt = 0;
-        for (const r of rows) {
-          await upsert.run(defaultWh.id, r.product_code, localProducts[r.product_code] || r.product_code, parseInt(r.quantity) || 0);
-          cnt++;
-        }
-        return cnt;
+      // 1) unique WhCode 수집
+      const xerpWhSet = new Set();
+      for (const r of result.recordset) {
+        const wh = (r.wh_code || '').trim();
+        if (wh) xerpWhSet.add(wh);
+      }
+
+      // 2) warehouses 마스터 업서트 — (바른컴퍼니) prefix + legal_entity='barunson'
+      //    ON CONFLICT 시 사용자가 화면에서 변경한 이름은 보존, entity 만 강제 마킹
+      const upsertWh = db.prepare(`INSERT INTO warehouses (code, name, description, legal_entity)
+        VALUES (?, ?, 'XERP mmInventory 자동연동', 'barunson')
+        ON CONFLICT(code) DO UPDATE SET legal_entity='barunson', updated_at=datetime('now','localtime')`);
+      for (const wh of xerpWhSet) {
+        const dispName = `(바른컴퍼니) ${WH_NAMES_LOCAL[wh] || wh}`;
+        try { await upsertWh.run(wh, dispName); } catch(_){}
+      }
+
+      // 3) code → id 매핑
+      const whIdByCode = {};
+      const whRows = await db.prepare("SELECT id, code FROM warehouses").all();
+      for (const r of whRows) whIdByCode[r.code] = r.id;
+
+      // 3.5) 이전 XERP 자동동기화 stale 정리 — source 에서 사라진 품목 제거 (수동입력 데이터는 유지)
+      try {
+        await db.prepare(`DELETE FROM warehouse_inventory WHERE memo='XERP 자동연동' AND warehouse_id IN (SELECT id FROM warehouses WHERE legal_entity='barunson')`).run();
+      } catch(_){}
+
+      // 4) warehouse_inventory 업서트
+      const upsertWi = db.prepare(`INSERT INTO warehouse_inventory (warehouse_id, product_code, product_name, quantity, memo, updated_at)
+        VALUES (?, ?, ?, ?, 'XERP 자동연동', datetime('now','localtime'))
+        ON CONFLICT(warehouse_id, product_code) DO UPDATE SET
+          product_name=CASE WHEN excluded.product_name='' THEN warehouse_inventory.product_name ELSE excluded.product_name END,
+          quantity=excluded.quantity, memo=excluded.memo, updated_at=excluded.updated_at`);
+      let wiUpserted = 0;
+      for (const r of result.recordset) {
+        const code = (r.product_code || '').trim();
+        const wh = (r.wh_code || '').trim();
+        const qty = parseInt(r.quantity) || 0;
+        const wid = whIdByCode[wh];
+        if (!code || !wid) continue;
+        try { await upsertWi.run(wid, code, localProducts[code] || code, qty); wiUpserted++; } catch(_){}
+      }
+
+      ok(res, {
+        message: `XERP → 바른컴퍼니 창고 동기화 완료`,
+        warehouses_registered: xerpWhSet.size,
+        warehouses: [...xerpWhSet],
+        inventory_upserted: wiUpserted
       });
-      const count = await tx(result.recordset);
-      ok(res, { message: `XERP → 본사창고 동기화 완료 (${count}건)` });
     } catch (e) {
       fail(res, 500, 'XERP 동기화 실패: ' + e.message);
     }
