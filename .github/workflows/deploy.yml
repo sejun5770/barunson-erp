@@ -1,8 +1,9 @@
 name: Build and Publish
+# Docker Manager 가 push 감지 후 workflow_dispatch 로 빌드를 호출하므로,
+# `push:` 자동 트리거를 제거해 1 push = 1 빌드 = 1 deploy 로 정리.
+# 수동 빌드가 필요할 땐 GitHub Actions 화면에서 Run workflow.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 jobs:
   build-and-push:
