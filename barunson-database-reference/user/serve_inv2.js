@@ -5382,6 +5382,9 @@ async function handleRequest(req, res) {
     const body = await readJSON(req);
     const tsv = body?.tsv || '';
     const dryRun = !!body?.dry_run;
+    // skip_if_exists=true → 이미 products 테이블에 존재하는 품목코드는 UPDATE 하지 않고 그대로 두고 신규만 INSERT.
+    // 사용 케이스: 운영자가 "기존 등록된 품목은 절대 건드리지 말고 신규만 추가" 를 명시할 때.
+    const skipIfExists = !!body?.skip_if_exists;
     if (!tsv) { fail(res, 400, 'tsv required'); return; }
 
     // 1) 파싱
@@ -5418,20 +5421,51 @@ async function handleRequest(req, res) {
     const categoryCount = {};
     for (const r of unique) categoryCount[r.category || '(빈값)'] = (categoryCount[r.category || '(빈값)'] || 0) + 1;
 
+    // dry_run / skip_if_exists 양쪽에서 신규/기존 분류 정보가 필요. 코드 한 번만 조회하도록 미리 집계.
+    let existingCodeSet = null;
+    if (dryRun || skipIfExists) {
+      try {
+        // IN 절 안전: product_code 영숫자/_/- 만 (TSV 파싱 단계에서 이미 검증됐지만 방어적)
+        const safeCodes = unique.map(r => r.code).filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
+        if (safeCodes.length === 0) {
+          existingCodeSet = new Set();
+        } else {
+          // PG/SQLite 어댑터 호환 — placeholder 동적 생성
+          const ph = safeCodes.map(() => '?').join(',');
+          const rows2 = await db.prepare(`SELECT product_code FROM products WHERE product_code IN (${ph})`).all(...safeCodes);
+          existingCodeSet = new Set(rows2.map(r => r.product_code));
+        }
+      } catch (e) {
+        console.warn('[bulk-import-korea] existing 조회 실패 — skip_if_exists/dry_run 분류 생략:', e.message);
+        existingCodeSet = null;
+      }
+    }
+
     if (dryRun) {
+      const newRows = existingCodeSet ? unique.filter(r => !existingCodeSet.has(r.code)) : unique;
+      const existingRows = existingCodeSet ? unique.filter(r => existingCodeSet.has(r.code)) : [];
+      // 신규/기존별 카테고리 분포
+      const newCatCount = {};
+      for (const r of newRows) newCatCount[r.category || '(빈값)'] = (newCatCount[r.category || '(빈값)'] || 0) + 1;
       ok(res, {
         dry_run: true,
         parsed: rows.length,
         unique: unique.length,
         duplicates_removed: rows.length - unique.length,
         category_breakdown: categoryCount,
+        existing_check: existingCodeSet ? 'ok' : 'skipped',
+        new_codes_count: newRows.length,
+        existing_codes_count: existingRows.length,
+        new_category_breakdown: newCatCount,
+        new_codes_sample: newRows.slice(0, 20).map(r => r.code),
+        existing_codes_sample: existingRows.slice(0, 20).map(r => r.code),
         sample: unique.slice(0, 10)
       });
       return;
     }
 
     // 3) products UPSERT + product_post_vendor 기본 체인 INSERT
-    let inserted = 0, updated = 0, chainInserted = 0, chainSkipped = 0, errors = 0;
+    let inserted = 0, updated = 0, skippedExisting = 0, chainInserted = 0, chainSkipped = 0, errors = 0;
 
     // product_post_vendor 테이블 존재 여부 확인
     let ppvOK = true;
@@ -5441,6 +5475,11 @@ async function handleRequest(req, res) {
       try {
         const existing = await db.prepare('SELECT id FROM products WHERE product_code=?').get(r.code);
         if (existing) {
+          if (skipIfExists) {
+            // 기존 품목은 절대 건드리지 않음 (체인 INSERT 도 skip — 이미 등록된 품목은 운영자가 수동 관리 중)
+            skippedExisting++;
+            continue;
+          }
           await db.prepare(`UPDATE products SET
             category=CASE WHEN ?='' THEN category ELSE ? END,
             brand=CASE WHEN ?='' THEN brand ELSE ? END,
@@ -5480,12 +5519,14 @@ async function handleRequest(req, res) {
     }
 
     scheduleProductInfoReload();
-    console.log(`[bulk-import-korea] 완료: 신규 ${inserted} / 업데이트 ${updated} / 체인신설 ${chainInserted} / 체인유지 ${chainSkipped} / 오류 ${errors}`);
+    console.log(`[bulk-import-korea] 완료: 신규 ${inserted} / 업데이트 ${updated} / 기존skip ${skippedExisting} / 체인신설 ${chainInserted} / 체인유지 ${chainSkipped} / 오류 ${errors}`);
     ok(res, {
       parsed: rows.length,
       unique: unique.length,
       duplicates_removed: rows.length - unique.length,
+      skip_if_exists: skipIfExists,
       inserted, updated,
+      skipped_existing: skippedExisting,
       chain_inserted: chainInserted,
       chain_skipped_existing: chainSkipped,
       ppv_table_available: ppvOK,
