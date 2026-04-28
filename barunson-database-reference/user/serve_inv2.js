@@ -5875,13 +5875,20 @@ async function handleRequest(req, res) {
       const validCodeCount = productCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).length;
       if (!validCodeCount) return [];
 
-      // DB 풀 + SiteCode 분기
+      // DB 풀 + 매칭 분기
       const dbName = isDd ? 'BHC' : 'XERP';
+      // ★ 2026-04-28: DD 는 SiteCode 가 어느 것인지 운영에서 검증되지 않아 (4/27 의 BHC2 가설로 2주간
+      //   가용재고 0 이 지속됨) ItemCode prefix 'DD%' 로 매칭. SiteCode 와 무관하게 합산되며,
+      //   실제 잡힌 SiteCode 분포는 로그/응답으로 노출해 진짜 위치를 영구 진단 가능하게 한다.
+      //   BarunSon 은 종전대로 SiteCode='BK10' 명시 (DD 코드는 NOT LIKE 'DD%' 필터로 자동 분리됨).
+      const inventoryFilter = isDd ? "ItemCode LIKE 'DD%'" : "SiteCode = 'BK10'";
+      const shipmentFilter  = isDd ? "ItemCode LIKE 'DD%'" : "SiteCode = 'BK10'";
+      // snapshot 메타데이터용 — 클라이언트 폴백(`isDD ? 'BHC2' : 'BK10'`) 과 일관성 유지.
+      // 실제 발견된 SiteCode 는 invSiteDist 로그 / 응답으로 별도 노출.
       const siteCode = isDd ? 'BHC2' : 'BK10';
       let workPool = null;
       let createdLocal = false;
-      // DD/BarunSon 모두 동일한 XERP work DB 사용. mmInventory.SiteCode 로 분기
-      // (BK10=barunson, BHC2=DD). 별도 'BHC' database 접속은 readonly 계정 권한 부재로 실패.
+      // DD/BarunSon 모두 동일한 XERP work DB 사용. 별도 'BHC' database 접속은 readonly 계정 권한 부재로 실패.
       workPool = xerpPool;
 
       try {
@@ -5912,11 +5919,12 @@ async function handleRequest(req, res) {
           return norm ? (normMap[norm] || null) : null;
         };
 
-        // 1. 현재고 — SiteCode 전체 단일 쿼리, ItemCode + WhCode 별로 GROUP BY.
-        // ★ 창고별 분해 도입: 프론트가 드롭다운으로 특정 창고만 보고 싶을 수 있어서, 합산값(invMap) 외에
-        //   창고별 맵(invByWh: {item_code: {wh_code: qty}}) 도 별도 보관해 snapshot 에 JSON 으로 저장.
+        // 1. 현재고 — 단일 쿼리, ItemCode + WhCode + SiteCode 별로 GROUP BY.
+        // ★ 창고별 분해: 합산값(invMap) 외에 창고별 맵(invByWh) 도 별도 보관.
+        // ★ SiteCode 분포(invSiteDist) 도 함께 집계 — DD 의 진짜 SiteCode 가 어디인지 진단용.
         const invMap = {};                      // 전체 합산 — 기존 사용처 호환
         const invByWh = {};                     // {item_code: {wh_code: qty}}
+        const invSiteDist = {};                 // {site_code: row_count} — 진단용 분포
         let _normMatched = 0;                   // 정규화 매칭 통계
         try {
           const req = workPool.request();
@@ -5924,15 +5932,17 @@ async function handleRequest(req, res) {
           const r = await req.query(`
             SELECT RTRIM(ItemCode) AS item_code,
                    RTRIM(WhCode)   AS wh_code,
+                   RTRIM(SiteCode) AS site_code,
                    SUM(CASE WHEN OhQty > 0 THEN OhQty ELSE 0 END) AS oh_qty
             FROM mmInventory WITH (NOLOCK)
-            WHERE SiteCode = '${siteCode}'
-            GROUP BY RTRIM(ItemCode), RTRIM(WhCode)
+            WHERE ${inventoryFilter}
+            GROUP BY RTRIM(ItemCode), RTRIM(WhCode), RTRIM(SiteCode)
           `);
           for (const row of r.recordset) {
             const rawCode = (row.item_code || '').trim().toUpperCase();
             const code = resolveLocal(rawCode);
             const wh   = (row.wh_code   || '').trim();
+            const sc   = (row.site_code || '').trim();
             const qty  = Math.round(row.oh_qty || 0);
             if (!code) continue;
             if (code !== rawCode) _normMatched++;
@@ -5941,41 +5951,50 @@ async function handleRequest(req, res) {
               if (!invByWh[code]) invByWh[code] = {};
               invByWh[code][wh] = (invByWh[code][wh] || 0) + qty;
             }
+            if (sc) invSiteDist[sc] = (invSiteDist[sc] || 0) + 1;
           }
-          console.log(`[xerp-inv ${legalEntity}] 현재고 단일쿼리 성공: ${Object.keys(invMap).length}개 품목 매칭 (정규화 보정 ${_normMatched}건), 창고-품목 조합 ${r.recordset.length}건`);
+          console.log(`[xerp-inv ${legalEntity}] 현재고 단일쿼리 성공: ${Object.keys(invMap).length}개 품목 매칭 (정규화 보정 ${_normMatched}건), 창고-품목 조합 ${r.recordset.length}건, SiteCode 분포: ${JSON.stringify(invSiteDist)}`);
         } catch (invErr) {
           console.error(`[xerp-inv ${legalEntity}] 현재고 단일쿼리 실패 — 전체 sync 중단:`, invErr.message);
           throw invErr; // 전체 sync 실패 처리 (기존 snapshot 유지)
         }
 
-        // 2. 최근 3개월 출고 — SiteCode 전체 단일 쿼리
+        // 2. 최근 3개월 출고 — 단일 쿼리, SiteCode 분포도 함께 집계
         const today = new Date();
         const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
         const fmt = d => d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
         const shipMap = {};
+        const shipSiteDist = {};
         try {
           const req = workPool.request()
             .input('start3m', sql.NChar(16), fmt(start3m))
             .input('today', sql.NChar(16), fmt(today));
           req.timeout = 120000;
           const r = await req.query(`
-            SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty
+            SELECT RTRIM(ItemCode) AS item_code,
+                   RTRIM(SiteCode) AS site_code,
+                   SUM(InoutQty)   AS total_qty
             FROM mmInoutItem WITH (NOLOCK)
-            WHERE SiteCode = '${siteCode}' AND InoutGubun = 'SO'
+            WHERE ${shipmentFilter} AND InoutGubun = 'SO'
               AND InoutDate >= @start3m AND InoutDate < @today
-            GROUP BY RTRIM(ItemCode)
+            GROUP BY RTRIM(ItemCode), RTRIM(SiteCode)
           `);
           let _shipNormMatched = 0;
           for (const row of r.recordset) {
             const rawCode = (row.item_code || '').trim().toUpperCase();
             const code = resolveLocal(rawCode);
+            const sc   = (row.site_code || '').trim();
             if (code) {
               if (code !== rawCode) _shipNormMatched++;
               const total = Math.round(row.total_qty || 0);
-              shipMap[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
+              // 동일 코드가 여러 SiteCode 에 있을 수 있으므로 합산
+              const prev = shipMap[code] || { total: 0 };
+              const newTotal = prev.total + total;
+              shipMap[code] = { total: newTotal, monthly: Math.round(newTotal / 3), daily: Math.round(newTotal / 90) };
+              if (sc) shipSiteDist[sc] = (shipSiteDist[sc] || 0) + 1;
             }
           }
-          console.log(`[xerp-inv ${legalEntity}] 출고 단일쿼리 성공: ${Object.keys(shipMap).length}개 매칭 (정규화 보정 ${_shipNormMatched}건, 3개월치)`);
+          console.log(`[xerp-inv ${legalEntity}] 출고 단일쿼리 성공: ${Object.keys(shipMap).length}개 매칭 (정규화 보정 ${_shipNormMatched}건, 3개월치), SiteCode 분포: ${JSON.stringify(shipSiteDist)}`);
         } catch (shipErr) {
           console.warn(`[xerp-inv ${legalEntity}] 출고 단일쿼리 실패 — 출고 0 으로 진행:`, shipErr.message);
           // 출고는 실패해도 재고만이라도 보이도록 계속 진행
@@ -6473,24 +6492,29 @@ async function handleRequest(req, res) {
       out.bhc_used_config = 'xerpPool';
       const _ownsBhcPool = false; // 글로벌 풀 — close 하지 않음
 
-      // 3) 재고 쿼리 (mmInventory, SiteCode='BHC2')
-      // 매칭 정규화: BHC ItemCode 와 로컬 product_code 가 언더스코어 유무로 어긋나는 케이스(예: DDC0213 vs DDC_0213)가 있어
+      // 3) 재고 쿼리 (mmInventory) — SiteCode 무관, ItemCode prefix 'DD%' 로 매칭
+      //    이전엔 SiteCode='BHC2' 하드코딩이었으나 BHC2 SiteCode 에 DD 데이터가 없는 환경에서
+      //    가용재고 0 으로 떨어지는 문제. 어떤 SiteCode 에 있든 합산하고, 분포는 응답에 노출.
+      // 매칭 정규화: ItemCode 와 로컬 product_code 가 언더스코어 유무로 어긋나는 케이스(예: DDC0213 vs DDC_0213)가 있어
       // exact 매칭 외에 underscore-stripped 매칭도 수행. 우선순위: exact > normalized.
       const invByWh = {};     // {code(upper): {wh: qty}}
       const invMap = {};      // {code(upper): totalQty}
       const invByWhNorm = {}; // {code_no_underscore(upper): {wh: qty}}
       const invMapNorm = {};  // {code_no_underscore(upper): totalQty}
+      const invSiteDist = {}; // {site_code: row_count}
       const _stripUs = s => s.replace(/_/g, '');
       try {
         const req0 = bhcPool.request(); req0.timeout = 120000;
         const r = await req0.query(`
           SELECT RTRIM(ItemCode) AS item_code, RTRIM(WhCode) AS wh_code,
+                 RTRIM(SiteCode) AS site_code,
                  SUM(CASE WHEN OhQty>0 THEN OhQty ELSE 0 END) AS oh_qty
-          FROM mmInventory WITH (NOLOCK) WHERE SiteCode='BHC2'
-          GROUP BY RTRIM(ItemCode), RTRIM(WhCode)`);
+          FROM mmInventory WITH (NOLOCK) WHERE ItemCode LIKE 'DD%'
+          GROUP BY RTRIM(ItemCode), RTRIM(WhCode), RTRIM(SiteCode)`);
         for (const row of r.recordset) {
           const c = (row.item_code || '').trim().toUpperCase();
           const w = (row.wh_code || '').trim();
+          const s = (row.site_code || '').trim();
           const q = Math.round(row.oh_qty || 0);
           if (!c) continue;
           invMap[c] = (invMap[c] || 0) + q;
@@ -6503,14 +6527,17 @@ async function handleRequest(req, res) {
             invMapNorm[cn] = invMap[c];
             if (invByWh[c]) invByWhNorm[cn] = invByWh[c];
           }
+          if (s) invSiteDist[s] = (invSiteDist[s] || 0) + 1;
         }
         out.bhc_inv_rows = r.recordset.length;
         out.bhc_inv_items = Object.keys(invMap).length;
+        out.bhc_inv_site_dist = invSiteDist;
       } catch (e) { out.inv_query_error = e.message; }
 
-      // 4) 3개월 출고 쿼리
+      // 4) 3개월 출고 쿼리 — SiteCode 무관, ItemCode prefix 'DD%' 로
       const shipMap = {};
       const shipMapNorm = {};
+      const shipSiteDist = {};
       try {
         const today = new Date();
         const start3m = new Date(today); start3m.setMonth(start3m.getMonth() - 3);
@@ -6520,21 +6547,28 @@ async function handleRequest(req, res) {
           .input('e', sql.NChar(16), fmt(today));
         req1.timeout = 120000;
         const r = await req1.query(`
-          SELECT RTRIM(ItemCode) AS item_code, SUM(InoutQty) AS total_qty
+          SELECT RTRIM(ItemCode) AS item_code,
+                 RTRIM(SiteCode) AS site_code,
+                 SUM(InoutQty)   AS total_qty
           FROM mmInoutItem WITH (NOLOCK)
-          WHERE SiteCode='BHC2' AND InoutGubun='SO' AND InoutDate >= @s AND InoutDate < @e
-          GROUP BY RTRIM(ItemCode)`);
+          WHERE ItemCode LIKE 'DD%' AND InoutGubun='SO' AND InoutDate >= @s AND InoutDate < @e
+          GROUP BY RTRIM(ItemCode), RTRIM(SiteCode)`);
         for (const row of r.recordset) {
           const c = (row.item_code || '').trim().toUpperCase();
+          const s = (row.site_code || '').trim();
           const t = Math.round(row.total_qty || 0);
           if (c) {
-            shipMap[c] = { total: t, monthly: Math.round(t / 3), daily: Math.round(t / 90) };
+            // 동일 코드가 여러 SiteCode 에 있을 수 있으므로 합산
+            const prev = shipMap[c] || { total: 0 };
+            const newTotal = prev.total + t;
+            shipMap[c] = { total: newTotal, monthly: Math.round(newTotal / 3), daily: Math.round(newTotal / 90) };
             const cn = _stripUs(c);
-            if (cn !== c) shipMapNorm[cn] = shipMap[c];
-            else shipMapNorm[cn] = shipMap[c];
+            shipMapNorm[cn] = shipMap[c];
+            if (s) shipSiteDist[s] = (shipSiteDist[s] || 0) + 1;
           }
         }
         out.bhc_ship_items = Object.keys(shipMap).length;
+        out.bhc_ship_site_dist = shipSiteDist;
       } catch (e) { out.ship_query_error = e.message; }
 
       // bhcPool 은 XERP 글로벌 풀이므로 close 하지 않음 (다른 핸들러도 사용)
