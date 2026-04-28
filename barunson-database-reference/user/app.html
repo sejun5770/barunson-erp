@@ -7502,8 +7502,14 @@ async function loadProcessTypes() {
   } catch(e) { console.warn('공정 타입 로드 실패:', e); }
 }
 function getPostCols() {
-  if (window._postProcessTypes.length > 0) return window._postProcessTypes.map(p => p.name);
-  return ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
+  // 봉투가공은 항상 마지막 공정 — DB 에 다른 순서로 들어와도 강제로 끝으로 보냄.
+  const sortBongtuLast = arr => {
+    const rest = arr.filter(n => n !== '봉투가공');
+    const hasBongtu = arr.includes('봉투가공');
+    return hasBongtu ? [...rest, '봉투가공'] : rest;
+  };
+  if (window._postProcessTypes.length > 0) return sortBongtuLast(window._postProcessTypes.map(p => p.name));
+  return ['재단','인쇄','박/형압','톰슨','단면접착','우찌누끼','접지','코팅','봉투가공'];
 }
 loadProcessTypes().then(() => { if(typeof buildHistoryTableHeader==='function') buildHistoryTableHeader(); });
 
@@ -7536,7 +7542,12 @@ Promise.all([
     if(!ppvByCode[r.product_code]) ppvByCode[r.product_code]=[];
     ppvByCode[r.product_code].push(r);
   });
-  for(const code in ppvByCode) ppvByCode[code].sort((a,b)=>(a.step_order||1)-(b.step_order||1));
+  // step_order 정렬 + 봉투가공은 항상 최후미로 강제
+  for(const code in ppvByCode) ppvByCode[code].sort((a,b)=>{
+    if (a.process_type==='봉투가공' && b.process_type!=='봉투가공') return 1;
+    if (b.process_type==='봉투가공' && a.process_type!=='봉투가공') return -1;
+    return (a.step_order||1)-(b.step_order||1);
+  });
   // products 기본정보 머지
   // 제품코드에 섞인 invisible chars (ZWSP/NBSP/BOM 등) 제거 — /api/xerp-inventory 는 cleanup 하는데
   // /api/products 는 raw 로 내려주므로 originMap 키를 동일하게 cleanup 해야 매칭됨.
@@ -7547,7 +7558,7 @@ Promise.all([
     if(p.origin) originMap[_cc]=p.origin;
     const existing = productInfo[p.product_code] || {};
     // 레거시 후공정 키 제거 (product_post_vendor가 유일한 소스)
-    const postTypes=typeof getPostCols==='function'?getPostCols():['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
+    const postTypes=typeof getPostCols==='function'?getPostCols():['재단','인쇄','박/형압','톰슨','단면접착','우찌누끼','접지','코팅','봉투가공'];
     postTypes.forEach(pt=>{delete existing[pt];});
     productInfo[p.product_code] = {
       ...existing,
@@ -7561,10 +7572,12 @@ Promise.all([
       '제지사': p.paper_maker || existing['제지사'] || '',
     };
   });
-  // product_post_vendor → productInfo에 후공정 키 설정
+  // product_post_vendor → productInfo에 후공정 키 설정 + _steps 체인 저장
+  // _steps 는 발주현황 후공정 라인의 입고처(=다음 공정) lookup 용
   for(const[code, steps] of Object.entries(ppvByCode)){
     if(!productInfo[code]) productInfo[code]={};
     steps.forEach(s=>{ productInfo[code][s.process_type]=s.vendor_name; });
+    productInfo[code]._steps = steps.map(s=>({ process: s.process_type, vendor: s.vendor_name, step: s.step_order||1 }));
   }
   // ── 생산지 재적용 (race-condition 대응) ──
   // /api/products 가 XERP inventory 보다 늦게 끝나는 경우, 이미 RAW 에 들어간 품목들의
@@ -14101,7 +14114,7 @@ function openAssigneeModal(editId) {
   authFetch('/api/process-types?category=post').then(r => r.ok ? r.json() : {data:[]}).then(resp => {
     const types = (resp.data || []).map(t => t.name || t).filter(Boolean);
     const dl = document.getElementById('paProcessList');
-    dl.innerHTML = (types.length ? types : ['재단','톰슨','봉투가공','세아리','레이져','실크','박/형압','단면접착','우찌누끼','접지','코팅']).map(t => `<option value="${esc(t)}">`).join('');
+    dl.innerHTML = (types.length ? types : ['재단','톰슨','세아리','레이져','실크','박/형압','단면접착','우찌누끼','접지','코팅','봉투가공']).map(t => `<option value="${esc(t)}">`).join('');
   });
   if (editId) {
     const row = (window._vendorAssignees || []).find(r => r.id === editId);
@@ -14861,7 +14874,8 @@ let _pwMaterialVendors = {}; // { product_code: 'vendor_name' }
 let _pwPostChains = {};      // { product_code: [{step, process, vendor}, ...] }
 // 후가공 공정 타입 — 서버 _defaultPostTypes 의 is_active=1 9종과 동일하게 유지 (serve_inv2.js 참조)
 // 사용 순서: 재단 → 인쇄 → 박/형압 → 톰슨 → 봉투가공 → 단면접착 → 우찌누끼 → 접지 → 코팅
-const PROCESS_TYPES_POOL = ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
+// 봉투가공은 항상 마지막 공정
+const PROCESS_TYPES_POOL = ['재단','인쇄','박/형압','톰슨','단면접착','우찌누끼','접지','코팅','봉투가공'];
 
 function enterPOWizard(items) {
   _pwItems = items.slice();
@@ -16954,7 +16968,7 @@ function renderPOSubCard(po, idx, steps, icon) {
       const isMat = po.po_type==='원재료';
       const headerCols = isMat
         ? '<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>절</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>'
-        : '<th>제품코드</th><th>후공정업체</th><th>공정</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>';
+        : '<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>절</th><th>공정</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>';
       itemsHtml=`<table class="po-items-table" style="width:100%;font-size:12px;border-collapse:collapse">
         <thead><tr>${headerCols}</tr></thead>
         <tbody>${items.map(it=>{
@@ -16983,14 +16997,28 @@ function renderPOSubCard(po, idx, steps, icon) {
           } else {
             const postReamQty=toR(it.ordered_qty, it.product_code);
             const postOsVal=it.os_number||'';
+            // 후공정 라인 보강: 원재료처럼 원자재코드/원재료용지명/절 표시
+            const postMatCode = info['원자재코드']||'';
+            const postMatName = info['원재료용지명']||it.spec||'';
+            const postJeol = info['절']||'';
+            // 입고처 = 다음 후공정 단계의 업체 (마지막 단계면 자사창고 '바른손')
+            // _steps 는 step_order + 봉투가공 마지막 정렬이 적용된 상태로 들어옴
+            const _steps = info._steps || [];
+            const _curIdx = _steps.findIndex(s => (s.process||'') === (it.process_type||''));
+            const _nextStep = (_curIdx >= 0 && _curIdx < _steps.length-1) ? _steps[_curIdx+1] : null;
+            const nextWarehouse = _nextStep && _nextStep.vendor ? _nextStep.vendor : '바른손';
+            const _whColor = _nextStep ? '#7c3aed' : '#0369a1';
             return `<tr>
               <td style="font-weight:600">${esc(it.product_code||'')}</td>
               <td style="color:#7c3aed"><input type="text" value="${esc(po.vendor_name||'')}" list="poVendorDL_${po.po_id}" onclick="event.stopPropagation()" onchange="inlinePOVendor(${po.po_id},this.value)" style="width:90px;padding:2px 4px;border:1px solid transparent;border-radius:3px;font-size:12px;color:#7c3aed;font-weight:600;background:transparent;cursor:pointer" onfocus="this.style.border='1px solid #c4b5fd';this.style.background='#fff'" onblur="this.style.border='1px solid transparent';this.style.background='transparent'"></td>
+              <td style="color:#0369a1">${esc(postMatCode)}</td>
+              <td>${esc(postMatName)}</td>
+              <td>${esc(String(postJeol))}</td>
               <td><input type="text" value="${esc(it.process_type||it.spec||'')}" list="poProcessDL_${po.po_id}" onclick="event.stopPropagation()" onchange="inlinePOProcess(${po.po_id},${it.item_id},this.value)" style="width:80px;padding:2px 4px;border:1px solid transparent;border-radius:3px;font-size:12px;background:transparent;cursor:pointer" onfocus="this.style.border='1px solid #d1d5db';this.style.background='#fff'" onblur="this.style.border='1px solid transparent';this.style.background='transparent'"></td>
               <td style="font-weight:700">${esc(postReamQty)}</td>
               <td><input type="text" data-item-id="${it.item_id}" data-po-id="${po.po_id}" value="${esc(postOsVal)}" placeholder="OS번호" onclick="event.stopPropagation()" onchange="saveItemOS(this)" style="width:110px;padding:2px 4px;border:1px solid ${postOsVal?'#86efac':'#d1d5db'};border-radius:3px;font-size:11px;${postOsVal?'background:#f0fdf4':''}"></td>
               <td>${recvHtml}</td>
-              <td style="color:#0369a1;font-weight:600;font-size:11px">바른손</td>
+              <td style="color:${_whColor};font-weight:600;font-size:11px" title="다음 공정 업체 또는 자사창고">${esc(nextWarehouse)}</td>
             </tr>`;
           }
         }).join('')}</tbody></table>`;
@@ -17241,7 +17269,7 @@ function _poItemRenderList(items, isMat) {
 
   const edits = window._poItemEdits;
   // 공정 선택지 (동적 로드된 후공정 타입)
-  const procOptions = typeof getPostCols === 'function' ? getPostCols() : ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
+  const procOptions = typeof getPostCols === 'function' ? getPostCols() : ['재단','인쇄','박/형압','톰슨','단면접착','우찌누끼','접지','코팅','봉투가공'];
 
   let html = `<table style="width:100%;font-size:12px;border-collapse:collapse">
     <thead><tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">

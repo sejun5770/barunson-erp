@@ -633,7 +633,8 @@ async function reloadProductInfoFromDB() {
   try {
     const products = await db.prepare("SELECT product_code, material_code, material_name, cut_spec, jopan, paper_maker, product_spec, thomson, envelope, seari, laser, cutting, silk FROM products").all();
     let ppv = [];
-    try { ppv = await db.prepare('SELECT product_code, process_type, vendor_name, step_order FROM product_post_vendor ORDER BY product_code, step_order').all(); } catch(_) {}
+    // 봉투가공은 항상 마지막 — step_order 보다 우선
+    try { ppv = await db.prepare("SELECT product_code, process_type, vendor_name, step_order FROM product_post_vendor ORDER BY product_code, CASE WHEN process_type='봉투가공' THEN 1 ELSE 0 END, step_order").all(); } catch(_) {}
     const ppvByCode = {};
     const ppvStepsByCode = {};
     for (const r of ppv) {
@@ -646,7 +647,7 @@ async function reloadProductInfoFromDB() {
       }
     }
     // 후공정 타입 목록 (이 키들은 product_post_vendor에서만 관리)
-    let postProcessTypes = ['재단','인쇄','박/형압','톰슨','봉투가공','단면접착','우찌누끼','접지','코팅'];
+    let postProcessTypes = ['재단','인쇄','박/형압','톰슨','단면접착','우찌누끼','접지','코팅','봉투가공'];
     try { const pt = await getPostProcessTypes(); if (pt.length) postProcessTypes = pt; } catch(_) {}
     const postTypeSet = new Set(postProcessTypes);
 
@@ -5619,7 +5620,8 @@ async function handleRequest(req, res) {
   // ════════════════════════════════════════════════════════════════════
 
   if (pathname === '/api/product-post-vendor' && method === 'GET') {
-    const rows = await db.prepare('SELECT * FROM product_post_vendor ORDER BY product_code, step_order, process_type').all();
+    // 봉투가공은 항상 마지막 — step_order 와 무관
+    const rows = await db.prepare("SELECT * FROM product_post_vendor ORDER BY product_code, CASE WHEN process_type='봉투가공' THEN 1 ELSE 0 END, step_order, process_type").all();
     ok(res, rows);
     return;
   }
@@ -5892,11 +5894,30 @@ async function handleRequest(req, res) {
         // 로컬 products 와 매칭. 쿼리 1회 → 실패 감지 명확, 타임아웃 1개만 관리.
         const validCodeSet = new Set(productCodes.filter(c => /^[A-Za-z0-9_\-]+$/.test(c)).map(c => c.toUpperCase()));
 
+        // ★ 정규화 매칭: XERP 의 ItemCode 와 로컬 product_code 형식이 어긋날 때 (예: 로컬=DDC_0211,
+        //    XERP=DDC0211) 매칭 실패로 재고 0 으로 떨어지는 문제. 양쪽에서 언더바/하이픈/공백 제거 후 비교.
+        //    원본 매칭이 우선이고, 실패 시 정규화 키로 폴백.
+        const normalizeCode = c => (c || '').toUpperCase().replace(/[_\-\s]/g, '');
+        const normMap = {};   // 정규화코드 → 원본 로컬코드(첫 등장 우선)
+        for (const c of productCodes) {
+          if (!/^[A-Za-z0-9_\-]+$/.test(c)) continue;
+          const k = normalizeCode(c);
+          if (k && !normMap[k]) normMap[k] = c.toUpperCase();
+        }
+        // XERP 코드 → 로컬 코드 매핑 함수 (원본 우선, 정규화 폴백)
+        const resolveLocal = xerpCode => {
+          const upper = (xerpCode || '').toUpperCase();
+          if (validCodeSet.has(upper)) return upper;
+          const norm = normalizeCode(upper);
+          return norm ? (normMap[norm] || null) : null;
+        };
+
         // 1. 현재고 — SiteCode 전체 단일 쿼리, ItemCode + WhCode 별로 GROUP BY.
         // ★ 창고별 분해 도입: 프론트가 드롭다운으로 특정 창고만 보고 싶을 수 있어서, 합산값(invMap) 외에
         //   창고별 맵(invByWh: {item_code: {wh_code: qty}}) 도 별도 보관해 snapshot 에 JSON 으로 저장.
         const invMap = {};                      // 전체 합산 — 기존 사용처 호환
         const invByWh = {};                     // {item_code: {wh_code: qty}}
+        let _normMatched = 0;                   // 정규화 매칭 통계
         try {
           const req = workPool.request();
           req.timeout = 120000; // 2분
@@ -5909,17 +5930,19 @@ async function handleRequest(req, res) {
             GROUP BY RTRIM(ItemCode), RTRIM(WhCode)
           `);
           for (const row of r.recordset) {
-            const code = (row.item_code || '').trim().toUpperCase();
+            const rawCode = (row.item_code || '').trim().toUpperCase();
+            const code = resolveLocal(rawCode);
             const wh   = (row.wh_code   || '').trim();
             const qty  = Math.round(row.oh_qty || 0);
-            if (!code || !validCodeSet.has(code)) continue;
+            if (!code) continue;
+            if (code !== rawCode) _normMatched++;
             invMap[code] = (invMap[code] || 0) + qty;
             if (wh && qty > 0) {
               if (!invByWh[code]) invByWh[code] = {};
               invByWh[code][wh] = (invByWh[code][wh] || 0) + qty;
             }
           }
-          console.log(`[xerp-inv ${legalEntity}] 현재고 단일쿼리 성공: ${Object.keys(invMap).length}개 품목 매칭, 창고-품목 조합 ${r.recordset.length}건`);
+          console.log(`[xerp-inv ${legalEntity}] 현재고 단일쿼리 성공: ${Object.keys(invMap).length}개 품목 매칭 (정규화 보정 ${_normMatched}건), 창고-품목 조합 ${r.recordset.length}건`);
         } catch (invErr) {
           console.error(`[xerp-inv ${legalEntity}] 현재고 단일쿼리 실패 — 전체 sync 중단:`, invErr.message);
           throw invErr; // 전체 sync 실패 처리 (기존 snapshot 유지)
@@ -5942,14 +5965,17 @@ async function handleRequest(req, res) {
               AND InoutDate >= @start3m AND InoutDate < @today
             GROUP BY RTRIM(ItemCode)
           `);
+          let _shipNormMatched = 0;
           for (const row of r.recordset) {
-            const code = (row.item_code || '').trim().toUpperCase();
-            if (code && validCodeSet.has(code)) {
+            const rawCode = (row.item_code || '').trim().toUpperCase();
+            const code = resolveLocal(rawCode);
+            if (code) {
+              if (code !== rawCode) _shipNormMatched++;
               const total = Math.round(row.total_qty || 0);
               shipMap[code] = { total, monthly: Math.round(total / 3), daily: Math.round(total / 90) };
             }
           }
-          console.log(`[xerp-inv ${legalEntity}] 출고 단일쿼리 성공: ${Object.keys(shipMap).length}개 매칭 (3개월치)`);
+          console.log(`[xerp-inv ${legalEntity}] 출고 단일쿼리 성공: ${Object.keys(shipMap).length}개 매칭 (정규화 보정 ${_shipNormMatched}건, 3개월치)`);
         } catch (shipErr) {
           console.warn(`[xerp-inv ${legalEntity}] 출고 단일쿼리 실패 — 출고 0 으로 진행:`, shipErr.message);
           // 출고는 실패해도 재고만이라도 보이도록 계속 진행
