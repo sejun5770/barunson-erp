@@ -939,11 +939,13 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
 
   let tableHeader, tableRows;
   if (isRawMaterial) {
+    // 원재료 발주서: '규격' → '용지 규격' (XERP mmInoutItem.ItemSpec 동기화값, 예: 788*1061)
+    // po_items.spec 에 PO 등록 시 products.spec(=XERP 매칭값) 으로 자동 채워짐 (line ~11275)
     tableHeader = `<tr>
       <th style="${thStyle}">제품코드</th>
       <th style="${thStyle}">원재료코드</th>
       <th style="${thStyle}">원재료명</th>
-      <th style="${thStyle}">규격</th>
+      <th style="${thStyle}">용지 규격</th>
       <th style="${thStyle};color:#c2410c">다음 입고처</th>
       <th style="${thStyle};text-align:right">발주수량(R)</th>
       <th style="${thStyle};text-align:center">절</th>
@@ -952,7 +954,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <td style="${tdStyle};font-weight:600">${it.product_code || ''}</td>
       <td style="${tdStyle}">${it.material_code || ''}</td>
       <td style="${tdStyle}">${it.material_name || ''}</td>
-      <td style="${tdStyle}">${it.spec_display || ''}</td>
+      <td style="${tdStyle}">${it.spec || ''}</td>
       <td style="${tdStyle};color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
       <td style="${tdStyle};text-align:right;font-weight:700;font-size:15px">${it.ream_qty || 0}R</td>
       <td style="${tdStyle};text-align:center">${it.cut_spec || ''}</td>
@@ -1121,7 +1123,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th>제품코드${isChinaVendor ? '<br><span style="font-weight:400;color:#999">产品编号</span>' : ''}</th>
           <th>원재료코드</th>
           <th>원재료명${isChinaVendor ? '<br><span style="font-weight:400;color:#999">材料名称</span>' : ''}</th>
-          <th>규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">规格</span>' : ''}</th>
+          <th>용지 규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">纸张规格</span>' : ''}</th>
           <th style="color:#c2410c">다음 입고처${isChinaVendor ? '<br><span style="font-weight:400;color:#999">下一入库处</span>' : ''}</th>
           <th class="right">발주수량(R)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
           <th class="center">절</th>
@@ -1145,7 +1147,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td class="bold">${it.product_code || ''}</td>
               <td>${it.material_code || ''}</td>
               <td>${it.material_name || ''}</td>
-              <td>${it.spec_display || ''}</td>
+              <td>${it.spec || ''}</td>
               <td style="color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
               <td class="right bold" style="font-size:14px">${it.ream_qty || 0}R</td>
               <td class="center">${it.cut_spec || ''}</td>
