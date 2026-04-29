@@ -3002,10 +3002,12 @@ function closeMegaMenu() { /* no-op */ }
       <div class="status-tab" data-status="취소" onclick="filterPO('취소')">취소</div>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-      <!-- 원재료 마감 엑셀 기간 (이번달 1일 ~ 다음달 1일이 기본, 사용자가 직접 수정 가능) -->
+      <!-- 원재료 마감 엑셀: 기간 + 매입처 검색 (비우면 전체) -->
       <input type="date" id="poClosingFrom" style="padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;color:#475569" title="원재료 마감 시작일">
       <span style="color:#9ca3af;font-size:12px">~</span>
       <input type="date" id="poClosingTo" style="padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;color:#475569" title="원재료 마감 종료일 (미포함)">
+      <input type="text" id="poClosingVendor" list="poClosingVendorList" placeholder="매입처(전체)" style="padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;color:#475569;width:120px" title="매입처 부분일치 검색 — 비우면 전체">
+      <datalist id="poClosingVendorList"></datalist>
       <button class="btn btn-sm" onclick="downloadRawMaterialClosing()" style="white-space:nowrap;background:#fef3c7;border:1px solid #fbbf24;color:#92400e" title="원재료 PO 마감용 — 매입처/제품/OS등록여부 포함 (XERP 등록 + 거래처 원장 대조)">📊 원재료 마감 엑셀</button>
       <button class="btn btn-sm" onclick="downloadPOExcel()" style="white-space:nowrap">엑셀 다운로드</button>
     </div>
@@ -3473,9 +3475,24 @@ function closeMegaMenu() { /* no-op */ }
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
     <div>
       <div style="font-size:18px;font-weight:700">📄 발주서 관리</div>
-      <div style="font-size:12px;color:var(--text-muted);margin-top:2px">거래처별 발주서 내역</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:2px">발주서 작성 + 발주현황의 PO 통합 — 마감 작업 허브</div>
     </div>
     <button class="btn btn-primary btn-sm" onclick="openPOFormModal()" style="padding:8px 18px;font-size:13px">+ 새 발주서 작성</button>
+  </div>
+
+  <!-- 원재료 마감 도구 (사용자 마감 작업 허브) -->
+  <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:14px 16px;margin-bottom:16px">
+    <div style="display:flex;align-items:center;flex-wrap:wrap;gap:8px">
+      <div style="font-weight:700;font-size:13px;color:#92400e">📊 원재료 마감</div>
+      <span style="color:#9ca3af;font-size:11px;margin:0 8px">기간 + 매입처 검색 → 엑셀 다운로드 (OS등록여부 + 입고상태 + 거래처원장 대조용)</span>
+      <span style="flex:1"></span>
+      <input type="date" id="poClosingFromMgmt" style="padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;color:#475569" title="시작일">
+      <span style="color:#9ca3af;font-size:12px">~</span>
+      <input type="date" id="poClosingToMgmt" style="padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;color:#475569" title="종료일 (미포함)">
+      <input type="text" id="poClosingVendorMgmt" list="poClosingVendorListMgmt" placeholder="매입처(전체)" style="padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;color:#475569;width:130px" title="매입처 부분일치 검색">
+      <datalist id="poClosingVendorListMgmt"></datalist>
+      <button class="btn btn-sm" onclick="downloadRawMaterialClosing('Mgmt')" style="white-space:nowrap;background:#fef3c7;border:1px solid #fbbf24;color:#92400e">📊 마감 엑셀 다운로드</button>
+    </div>
   </div>
 
   <div id="poDraftList">
@@ -16940,13 +16957,17 @@ function downloadPOExcel(){
   XLSX.writeFile(wb,`발주현황_${origin}${status}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
-// 원재료 PO 마감 엑셀 다운로드 — 발주현황 헤더의 #poClosingFrom / #poClosingTo input 값 사용.
-// 비어있으면 기본값(이번달 1일 ~ 다음달 1일) 사용. 별도 prompt 없음 — 클릭 한 번에 다운로드.
-async function downloadRawMaterialClosing() {
-  const fromEl = document.getElementById('poClosingFrom');
-  const toEl = document.getElementById('poClosingTo');
+// 원재료 PO 마감 엑셀 다운로드 — 헤더의 #poClosingFrom{suffix} / To / Vendor input 값 사용.
+// suffix='' (발주현황) 또는 'Mgmt' (발주서 관리) — 두 페이지에서 같은 함수 재사용.
+// 비어있으면 기본 기간(이번달 1일 ~ 다음달 1일) 사용. vendor 비우면 전체.
+async function downloadRawMaterialClosing(suffix) {
+  suffix = suffix || '';
+  const fromEl = document.getElementById('poClosingFrom' + suffix);
+  const toEl = document.getElementById('poClosingTo' + suffix);
+  const vendorEl = document.getElementById('poClosingVendor' + suffix);
   let from = fromEl && fromEl.value ? fromEl.value : '';
   let to = toEl && toEl.value ? toEl.value : '';
+  const vendor = (vendorEl && vendorEl.value || '').trim();
   if (!from || !to) {
     const today = new Date();
     if (!from) from = today.toISOString().slice(0,7) + '-01';
@@ -16957,7 +16978,8 @@ async function downloadRawMaterialClosing() {
     if (fromEl && !fromEl.value) fromEl.value = from;
     if (toEl && !toEl.value) toEl.value = to;
   }
-  const url = `/api/po/raw-material-export?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+  let url = `/api/po/raw-material-export?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+  if (vendor) url += `&vendor=${encodeURIComponent(vendor)}`;
   try {
     const r = await authFetch(url);
     if (!r.ok) {
@@ -16967,7 +16989,8 @@ async function downloadRawMaterialClosing() {
     const blob = await r.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `원재료PO마감_${from}_${to}.xlsx`;
+    const vSuffix = vendor ? `_${vendor}` : '';
+    a.download = `원재료PO마감_${from}_${to}${vSuffix}.xlsx`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -16977,20 +17000,29 @@ async function downloadRawMaterialClosing() {
   }
 }
 
-// 발주현황 페이지 진입 시 #poClosingFrom / #poClosingTo 기본값 (이번달 1일 ~ 다음달 1일) 자동 채움.
-// 사용자가 직접 수정한 값이 있으면 보존.
+// 페이지 진입 시 마감 도구 input 기본값 + 매입처 datalist 채움.
+// 발주현황(po-list)과 발주서 관리(po-mgmt) 양쪽 모두 처리 — suffix 별로 input 찾아 채움.
 function setPoClosingDateDefaults() {
-  const fromEl = document.getElementById('poClosingFrom');
-  const toEl = document.getElementById('poClosingTo');
-  if (!fromEl || !toEl) return;
-  if (!fromEl.value) {
-    const today = new Date();
-    fromEl.value = today.toISOString().slice(0,7) + '-01';
-  }
-  if (!toEl.value) {
-    const today = new Date();
-    const next = new Date(today.getFullYear(), today.getMonth()+1, 1);
-    toEl.value = next.toISOString().slice(0,10);
+  const today = new Date();
+  const defaultFrom = today.toISOString().slice(0,7) + '-01';
+  const next = new Date(today.getFullYear(), today.getMonth()+1, 1);
+  const defaultTo = next.toISOString().slice(0,10);
+  const vendorOpts = (() => {
+    try {
+      if (typeof poList !== 'undefined' && Array.isArray(poList)) {
+        return [...new Set(poList.filter(p => (p.po_type||'') === '원재료' && p.vendor_name).map(p => p.vendor_name))].sort();
+      }
+    } catch(_) {}
+    return [];
+  })();
+  const optionsHtml = vendorOpts.map(v => `<option value="${esc(v)}">`).join('');
+  for (const sfx of ['', 'Mgmt']) {
+    const fromEl = document.getElementById('poClosingFrom' + sfx);
+    const toEl = document.getElementById('poClosingTo' + sfx);
+    if (fromEl && !fromEl.value) fromEl.value = defaultFrom;
+    if (toEl && !toEl.value) toEl.value = defaultTo;
+    const dl = document.getElementById('poClosingVendorList' + sfx);
+    if (dl && optionsHtml) dl.innerHTML = optionsHtml;
   }
 }
 
@@ -18506,6 +18538,8 @@ let poDraftEditId = null; // 수정 중인 발주서 ID
 
 // ── 발주서 관리 목록 ──
 async function loadPODrafts(){
+  // 마감 도구 input 기본값 (페이지 진입 시 1회) — 발주서 관리도 마감 작업 허브 역할
+  setPoClosingDateDefaults();
   const resp = await fetch('/api/po-drafts').then(r=>r.json()).catch(()=>({data:[]}));
   const drafts = resp.data || resp || [];
   renderPODrafts(drafts);

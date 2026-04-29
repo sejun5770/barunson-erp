@@ -10679,7 +10679,8 @@ async function handleRequest(req, res) {
   }
 
   // GET /api/po/raw-material-export — 원재료 PO 마감용 엑셀 다운로드 (사용자 마감 작업 + OS번호 등록 대조)
-  //   ?from=YYYY-MM-DD&to=YYYY-MM-DD  기본: 이번 달 1일 ~ 다음 달 1일
+  //   ?from=YYYY-MM-DD&to=YYYY-MM-DD     기본: 이번 달 1일 ~ 다음 달 1일
+  //   ?vendor=거래처명                    선택. 있으면 그 거래처명 부분일치(LIKE) 만 필터. 없으면 전체.
   //   응답: xlsx 파일 직접 다운로드 (Content-Disposition: attachment)
   //   행: po_items 단위. OS번호 등록 여부 컬럼 포함.
   if (pathname === '/api/po/raw-material-export' && method === 'GET') {
@@ -10690,7 +10691,11 @@ async function handleRequest(req, res) {
     const defaultTo = nextMonth.toISOString().slice(0, 10);
     const from = parsed.searchParams.get('from') || defaultFrom;
     const to   = parsed.searchParams.get('to')   || defaultTo;
+    const vendor = (parsed.searchParams.get('vendor') || '').trim();
     try {
+      // vendor 필터: 비어있으면 전체. 있으면 vendor_name LIKE '%vendor%' (부분일치)
+      const vendorFilter = vendor ? "AND h.vendor_name LIKE ?" : "";
+      const params = vendor ? [from, to, '%' + vendor + '%'] : [from, to];
       const rows = await db.prepare(`
         SELECT
           h.po_number, h.po_date, h.vendor_name, h.notes, h.status AS po_status,
@@ -10703,8 +10708,9 @@ async function handleRequest(req, res) {
         WHERE h.po_type = '원재료'
           AND h.status NOT IN ('cancelled','draft')
           AND h.po_date >= ? AND h.po_date < ?
+          ${vendorFilter}
         ORDER BY h.po_date DESC, h.vendor_name, h.po_number, i.item_id
-      `).all(from, to);
+      `).all(...params);
 
       const XLSX = require('xlsx');
       const wb = XLSX.utils.book_new();
