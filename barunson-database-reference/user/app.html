@@ -3001,7 +3001,10 @@ function closeMegaMenu() { /* no-op */ }
       <div class="status-tab" data-status="완료" onclick="filterPO('완료')">완료</div>
       <div class="status-tab" data-status="취소" onclick="filterPO('취소')">취소</div>
     </div>
-    <button class="btn btn-sm" onclick="downloadPOExcel()" style="white-space:nowrap">엑셀 다운로드</button>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn btn-sm" onclick="downloadRawMaterialClosing()" style="white-space:nowrap;background:#fef3c7;border:1px solid #fbbf24;color:#92400e" title="원재료 PO 마감용 — 매입처/제품/OS등록여부 포함 (XERP 등록 + 거래처 원장 대조)">📊 원재료 마감 엑셀</button>
+      <button class="btn btn-sm" onclick="downloadPOExcel()" style="white-space:nowrap">엑셀 다운로드</button>
+    </div>
   </div>
 
   <div id="poCardContainer" class="po-card-container">
@@ -16929,6 +16932,38 @@ function downloadPOExcel(){
   const origin=currentOriginContext||'전체';
   const status=poStatusFilter!=='all'?('_'+poStatusFilter):'';
   XLSX.writeFile(wb,`발주현황_${origin}${status}_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+// 원재료 PO 마감 엑셀 다운로드 (서버 endpoint 호출 — 모든 원재료 PO 항목 + OS등록여부 포함)
+// 사용자 마감 + XERP 등록 + 거래처 원장 대조용. 서버에서 xlsx 생성해 다운로드 응답.
+async function downloadRawMaterialClosing() {
+  const today = new Date();
+  const ym = today.toISOString().slice(0,7);
+  const defaultFrom = ym + '-01';
+  const nextMonth = new Date(today.getFullYear(), today.getMonth()+1, 1);
+  const defaultTo = nextMonth.toISOString().slice(0,10);
+  const from = prompt('시작일 (YYYY-MM-DD)', defaultFrom);
+  if (!from) return;
+  const to = prompt('종료일 (YYYY-MM-DD, 미포함 — 다음달 1일이 기본)', defaultTo);
+  if (!to) return;
+  const url = `/api/po/raw-material-export?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+  try {
+    const r = await authFetch(url);
+    if (!r.ok) {
+      const txt = await r.text().catch(()=>'');
+      throw new Error('HTTP ' + r.status + ': ' + (txt.slice(0,200) || r.statusText));
+    }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `원재료PO마감_${from}_${to}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  } catch (e) {
+    alert('원재료 마감 엑셀 다운로드 실패: ' + e.message);
+  }
 }
 
 function renderPOSubCard(po, idx, steps, icon) {

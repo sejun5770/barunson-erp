@@ -10678,6 +10678,86 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // GET /api/po/raw-material-export — 원재료 PO 마감용 엑셀 다운로드 (사용자 마감 작업 + OS번호 등록 대조)
+  //   ?from=YYYY-MM-DD&to=YYYY-MM-DD  기본: 이번 달 1일 ~ 다음 달 1일
+  //   응답: xlsx 파일 직접 다운로드 (Content-Disposition: attachment)
+  //   행: po_items 단위. OS번호 등록 여부 컬럼 포함.
+  if (pathname === '/api/po/raw-material-export' && method === 'GET') {
+    const today = new Date();
+    const ym = today.toISOString().slice(0, 7);
+    const defaultFrom = `${ym}-01`;
+    const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+    const defaultTo = nextMonth.toISOString().slice(0, 10);
+    const from = parsed.searchParams.get('from') || defaultFrom;
+    const to   = parsed.searchParams.get('to')   || defaultTo;
+    try {
+      const rows = await db.prepare(`
+        SELECT
+          h.po_number, h.po_date, h.vendor_name, h.notes, h.status AS po_status,
+          i.item_id, i.product_code, i.spec, i.os_number,
+          i.ordered_qty, i.received_qty,
+          p.material_code, p.material_name, p.cut_spec, p.jopan
+        FROM po_header h
+        JOIN po_items i ON h.po_id = i.po_id
+        LEFT JOIN products p ON i.product_code = p.product_code
+        WHERE h.po_type = '원재료'
+          AND h.status NOT IN ('cancelled','draft')
+          AND h.po_date >= ? AND h.po_date < ?
+        ORDER BY h.po_date DESC, h.vendor_name, h.po_number, i.item_id
+      `).all(from, to);
+
+      const XLSX = require('xlsx');
+      const wb = XLSX.utils.book_new();
+      const aoa = [
+        [`원재료 PO 마감 ${from} ~ ${to}  (${rows.length} 항목)`],
+        [],
+        ['PO번호','발주일','거래처','제품코드','원재료코드','원재료명','용지규격','수량(R)','낱개수량','절','OS번호','OS등록여부','입고상태','PO비고']
+      ];
+      let osMissing = 0;
+      for (const r of rows) {
+        const cut = parseFloat(r.cut_spec) || 1;
+        const jop = parseFloat(r.jopan) || 1;
+        const reams = (r.ordered_qty || 0) / 500 / cut / jop;
+        const reamsStr = isFinite(reams) ? (reams % 1 === 0 ? String(reams) : reams.toFixed(1)) : '';
+        const hasOs = r.os_number && String(r.os_number).trim() ? true : false;
+        if (!hasOs) osMissing++;
+        const osStatus = hasOs ? '✅ 등록' : '❌ 미등록';
+        const recvStatus = (r.received_qty || 0) >= (r.ordered_qty || 0) ? '입고완료'
+          : (r.received_qty || 0) > 0 ? `부분입고 (${r.received_qty}/${r.ordered_qty})` : '미입고';
+        aoa.push([
+          r.po_number || '', r.po_date || '', r.vendor_name || '',
+          r.product_code || '', r.material_code || '', r.material_name || '',
+          r.spec || '', reamsStr, r.ordered_qty || 0, r.cut_spec || '',
+          r.os_number || '', osStatus, recvStatus, r.notes || ''
+        ]);
+      }
+      // 합계 행
+      aoa.push([]);
+      aoa.push(['합계', '', '', '', '', '', '', '', '', '', '', `미등록 ${osMissing}/${rows.length}`, '', '']);
+
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [
+        {wch:16},{wch:12},{wch:16},{wch:14},{wch:12},{wch:20},
+        {wch:14},{wch:8},{wch:12},{wch:6},{wch:14},{wch:14},{wch:18},{wch:24}
+      ];
+      XLSX.utils.book_append_sheet(wb, ws, '원재료 PO');
+      const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+      const fileName = encodeURIComponent(`원재료PO마감_${from}_${to}.xlsx`);
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename*=UTF-8''${fileName}`,
+        'Content-Length': buf.length,
+      });
+      res.end(buf);
+      console.log(`[raw-material-export] ${from}~${to}: 총 ${rows.length} 항목 (OS 미등록 ${osMissing}, ${buf.length} bytes)`);
+    } catch (e) {
+      console.error('[raw-material-export] 실패:', e.message);
+      fail(res, 500, '엑셀 export 실패: ' + e.message);
+    }
+    return;
+  }
+
   // GET /api/po/os-pending — OS등록 대기 PO 목록 (os_pending + os_registered)
   if (pathname === '/api/po/os-pending' && method === 'GET') {
     const rows = await db.prepare(`SELECT * FROM po_header WHERE status IN ('os_pending','os_registered') ORDER BY po_date DESC`).all();
