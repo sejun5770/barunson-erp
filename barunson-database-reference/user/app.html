@@ -3001,7 +3001,11 @@ function closeMegaMenu() { /* no-op */ }
       <div class="status-tab" data-status="완료" onclick="filterPO('완료')">완료</div>
       <div class="status-tab" data-status="취소" onclick="filterPO('취소')">취소</div>
     </div>
-    <div style="display:flex;gap:6px;flex-wrap:wrap">
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <!-- 원재료 마감 엑셀 기간 (이번달 1일 ~ 다음달 1일이 기본, 사용자가 직접 수정 가능) -->
+      <input type="date" id="poClosingFrom" style="padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;color:#475569" title="원재료 마감 시작일">
+      <span style="color:#9ca3af;font-size:12px">~</span>
+      <input type="date" id="poClosingTo" style="padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;color:#475569" title="원재료 마감 종료일 (미포함)">
       <button class="btn btn-sm" onclick="downloadRawMaterialClosing()" style="white-space:nowrap;background:#fef3c7;border:1px solid #fbbf24;color:#92400e" title="원재료 PO 마감용 — 매입처/제품/OS등록여부 포함 (XERP 등록 + 거래처 원장 대조)">📊 원재료 마감 엑셀</button>
       <button class="btn btn-sm" onclick="downloadPOExcel()" style="white-space:nowrap">엑셀 다운로드</button>
     </div>
@@ -16645,6 +16649,8 @@ function renderPOStatusPipeline(po) {
 
 // ===== PO LIST (카드 기반 발주진행 현황) =====
 function loadPOList(callback){
+  // 원재료 마감 엑셀 기간 input 기본값 (페이지 진입 시 1회)
+  setPoClosingDateDefaults();
   let poUrl = '/api/po?include=items,progress';
   if (currentOriginContext) poUrl += '&origin=' + encodeURIComponent(currentOriginContext);
   // 법인 필터 (발주현황 페이지에서 토글한 _procEntity 사용)
@@ -16934,18 +16940,23 @@ function downloadPOExcel(){
   XLSX.writeFile(wb,`발주현황_${origin}${status}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
-// 원재료 PO 마감 엑셀 다운로드 (서버 endpoint 호출 — 모든 원재료 PO 항목 + OS등록여부 포함)
-// 사용자 마감 + XERP 등록 + 거래처 원장 대조용. 서버에서 xlsx 생성해 다운로드 응답.
+// 원재료 PO 마감 엑셀 다운로드 — 발주현황 헤더의 #poClosingFrom / #poClosingTo input 값 사용.
+// 비어있으면 기본값(이번달 1일 ~ 다음달 1일) 사용. 별도 prompt 없음 — 클릭 한 번에 다운로드.
 async function downloadRawMaterialClosing() {
-  const today = new Date();
-  const ym = today.toISOString().slice(0,7);
-  const defaultFrom = ym + '-01';
-  const nextMonth = new Date(today.getFullYear(), today.getMonth()+1, 1);
-  const defaultTo = nextMonth.toISOString().slice(0,10);
-  const from = prompt('시작일 (YYYY-MM-DD)', defaultFrom);
-  if (!from) return;
-  const to = prompt('종료일 (YYYY-MM-DD, 미포함 — 다음달 1일이 기본)', defaultTo);
-  if (!to) return;
+  const fromEl = document.getElementById('poClosingFrom');
+  const toEl = document.getElementById('poClosingTo');
+  let from = fromEl && fromEl.value ? fromEl.value : '';
+  let to = toEl && toEl.value ? toEl.value : '';
+  if (!from || !to) {
+    const today = new Date();
+    if (!from) from = today.toISOString().slice(0,7) + '-01';
+    if (!to) {
+      const next = new Date(today.getFullYear(), today.getMonth()+1, 1);
+      to = next.toISOString().slice(0,10);
+    }
+    if (fromEl && !fromEl.value) fromEl.value = from;
+    if (toEl && !toEl.value) toEl.value = to;
+  }
   const url = `/api/po/raw-material-export?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
   try {
     const r = await authFetch(url);
@@ -16963,6 +16974,23 @@ async function downloadRawMaterialClosing() {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   } catch (e) {
     alert('원재료 마감 엑셀 다운로드 실패: ' + e.message);
+  }
+}
+
+// 발주현황 페이지 진입 시 #poClosingFrom / #poClosingTo 기본값 (이번달 1일 ~ 다음달 1일) 자동 채움.
+// 사용자가 직접 수정한 값이 있으면 보존.
+function setPoClosingDateDefaults() {
+  const fromEl = document.getElementById('poClosingFrom');
+  const toEl = document.getElementById('poClosingTo');
+  if (!fromEl || !toEl) return;
+  if (!fromEl.value) {
+    const today = new Date();
+    fromEl.value = today.toISOString().slice(0,7) + '-01';
+  }
+  if (!toEl.value) {
+    const today = new Date();
+    const next = new Date(today.getFullYear(), today.getMonth()+1, 1);
+    toEl.value = next.toISOString().slice(0,10);
   }
 }
 
