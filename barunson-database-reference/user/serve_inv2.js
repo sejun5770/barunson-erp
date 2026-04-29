@@ -7045,29 +7045,39 @@ async function handleRequest(req, res) {
           const validSpecCodes = (needSpec || []).map(r => (r.product_code || '').replace(/[\s ​‌‍﻿]/g, '').trim()).filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
           if (validSpecCodes.length > 0 && xerpPool) {
             const specMap = {};
-            // ★ chunk 폐기 → SiteCode 전체 단일 쿼리 (chunk 23회 × 10s → 1회 ~10s)
             const validSpecSet = new Set(validSpecCodes.map(c => c.toUpperCase()));
+            // ★ 2026-04-28: PARTITION 범위를 후보 코드 IN 절로 축소.
+            //    이전: SiteCode='BK10' 전체 mmInoutItem 정렬 (수십만~수백만 row, 매 동기화마다 ~30~120s 부하)
+            //    이후: 후보 코드만 partition. 첫 동기화 후엔 후보가 거의 비어 ~수초 → ~수백ms 으로 수렴.
+            //    IN 절은 영숫자/_/- 만 (위 정규식 검증) — SQL injection 안전. plan compile 비용 고려해 1000개 chunk.
+            const t0spec = Date.now();
+            const CHUNK = 1000;
             try {
-              const reqQ = xerpPool.request();
-              reqQ.timeout = 120000;
-              const r = await reqQ.query(`
-                SELECT item_code, item_spec FROM (
-                  SELECT RTRIM(ItemCode) AS item_code,
-                         RTRIM(ItemSpec) AS item_spec,
-                         ROW_NUMBER() OVER (PARTITION BY RTRIM(ItemCode) ORDER BY InoutDate DESC, InoutSerNo DESC) AS rn
-                  FROM mmInoutItem WITH (NOLOCK)
-                  WHERE SiteCode = 'BK10'
-                ) t
-                WHERE t.rn = 1 AND t.item_spec <> ''
-              `);
-              for (const row of (r.recordset || [])) {
-                const c = (row.item_code || '').trim();
-                const sp = (row.item_spec || '').trim();
-                if (c && sp && validSpecSet.has(c.toUpperCase())) specMap[c] = sp;
+              for (let i = 0; i < validSpecCodes.length; i += CHUNK) {
+                const chunk = validSpecCodes.slice(i, i + CHUNK).map(c => c.toUpperCase());
+                const inClause = chunk.map(c => `'${c}'`).join(',');
+                const reqQ = xerpPool.request();
+                reqQ.timeout = 60000; // 60s — 단일 chunk 면 충분
+                const r = await reqQ.query(`
+                  SELECT item_code, item_spec FROM (
+                    SELECT RTRIM(ItemCode) AS item_code,
+                           RTRIM(ItemSpec) AS item_spec,
+                           ROW_NUMBER() OVER (PARTITION BY RTRIM(ItemCode) ORDER BY InoutDate DESC, InoutSerNo DESC) AS rn
+                    FROM mmInoutItem WITH (NOLOCK)
+                    WHERE SiteCode = 'BK10' AND RTRIM(ItemCode) IN (${inClause})
+                  ) t
+                  WHERE t.rn = 1 AND t.item_spec <> ''
+                `);
+                for (const row of (r.recordset || [])) {
+                  const c = (row.item_code || '').trim();
+                  const sp = (row.item_spec || '').trim();
+                  if (c && sp && validSpecSet.has(c.toUpperCase())) specMap[c] = sp;
+                }
               }
-              console.log(`[sync bg] 규격 단일쿼리 성공: ${Object.keys(specMap).length}개 매칭`);
+              const elapsed = ((Date.now() - t0spec) / 1000).toFixed(1);
+              console.log(`[sync bg] 규격 IN절 쿼리 성공: ${Object.keys(specMap).length}개 매칭 (후보 ${validSpecCodes.length}개, ${Math.ceil(validSpecCodes.length / CHUNK)} chunk, ${elapsed}s)`);
             } catch (e) {
-              console.warn(`[sync bg] 규격 단일쿼리 실패:`, e.message);
+              console.warn(`[sync bg] 규격 IN절 쿼리 실패:`, e.message);
             }
             // UPDATE only where spec is still empty (경합 방지 — 동기화 중 사용자가 수동 입력했을 수도)
             if (Object.keys(specMap).length > 0) {
