@@ -10678,6 +10678,42 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // GET /api/admin/dd-orders-schema — 디디 wedding DB 의 orders/order_items/products 테이블 스키마 dump
+  //   디디 출고 쿼리 작성 위한 사전 진단. order/product 키워드 매칭 테이블만 노출.
+  if (pathname === '/api/admin/dd-orders-schema' && method === 'GET') {
+    if (!await ensureDdPool()) { fail(res, 503, 'DD MySQL 미연결 (DD_DB_SERVER 미설정 또는 연결 실패)'); return; }
+    const out = { db: 'wedding' };
+    try {
+      const [tables] = await ddPool.query("SHOW TABLES");
+      const allNames = tables.map(r => Object.values(r)[0]);
+      const matched = allNames.filter(t => /order|product|item|ship/i.test(t));
+      out.matched_tables = matched;
+      out.all_tables_count = allNames.length;
+      for (const t of matched) {
+        try {
+          const [cols] = await ddPool.query(`SHOW COLUMNS FROM \`${t}\``);
+          out[t + '_columns'] = cols.map(c => ({ name: c.Field, type: c.Type, key: c.Key, null: c.Null }));
+          const [sample] = await ddPool.query(`SELECT * FROM \`${t}\` ORDER BY 1 DESC LIMIT 2`);
+          // 민감정보(전화번호/주소/이름) 마스킹
+          out[t + '_sample'] = (sample || []).map(row => {
+            const m = {};
+            for (const k of Object.keys(row)) {
+              const v = row[k];
+              if (typeof v === 'string' && /phone|tel|address|name|email|password/i.test(k)) {
+                m[k] = v.length > 0 ? '***' + (v.length > 4 ? v.slice(-2) : '') : '';
+              } else m[k] = v;
+            }
+            return m;
+          });
+          const [cnt] = await ddPool.query(`SELECT COUNT(*) AS cnt FROM \`${t}\``);
+          out[t + '_row_count'] = cnt[0]?.cnt || 0;
+        } catch (e) { out[t + '_error'] = e.message; }
+      }
+    } catch (e) { out.error = e.message; }
+    ok(res, out);
+    return;
+  }
+
   // GET /api/admin/inventory-trace?code=PRODUCT_CODE — 한 품목의 sync 상태를 모든 단계에서 진단
   //   응답: products / product_post_vendor / inventory_snapshot / XERP mmInventory 결과 / 마지막 sync 로그
   //   재고 0 / 입고처 빈값 / 화면 미표시 등 모든 진단의 단일 진입점
