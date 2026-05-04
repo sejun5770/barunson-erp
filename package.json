@@ -10,7 +10,7 @@
     "create-doc": "node create_plan_doc.js"
   },
   "dependencies": {
-    "bcrypt": "^5.1.1",
+    "bcryptjs": "^3.0.3",
     "pg": "^8.13.0",
     "docx": "^9.6.1",
     "googleapis": "^171.4.0",
