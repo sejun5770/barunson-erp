@@ -22,7 +22,7 @@ const pgAdapter = require('./pg-adapter');
 const nodemailer = require('nodemailer');
 const sql = require('mssql');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 
 // ── 파일 로거 (일별 로테이션, 30일 보관) ────────────────────────────
 const LOG_DIR = process.env.LOG_DIR || path.join(__dirname, 'logs');
@@ -7275,6 +7275,22 @@ async function handleRequest(req, res) {
       const info = await db.prepare("UPDATE sync_log SET status='failed', error_msg='수동 리셋', finished_at=datetime('now','localtime') WHERE sync_type='xerp_inventory' AND status='running'").run();
       ok(res, { reset_count: info?.changes || 0 });
     } catch (e) { fail(res, 500, '리셋 실패: ' + e.message); }
+    return;
+  }
+
+  // wedged 풀 강제 재초기화. 프로세스 재시작 없이 connectXERP() 를 깨끗한 상태에서 다시 시도.
+  if (pathname === '/api/admin/xerp/reconnect' && method === 'POST') {
+    const t0 = Date.now();
+    try {
+      if (xerpReconnectTimer) { clearTimeout(xerpReconnectTimer); xerpReconnectTimer = null; }
+      if (xerpPool) { try { await xerpPool.close(); } catch(_){} }
+      xerpPool = null;
+      try { await sql.close(); } catch(_){}
+      xerpReconnectAttempts = 0;
+      const okConn = await connectXERP();
+      if (!okConn) { fail(res, 503, 'XERP 재연결 실패 — 자격증명/네트워크 점검 필요'); return; }
+      ok(res, { reconnected: true, elapsed_ms: Date.now() - t0, user: xerpConfig.user, server: xerpConfig.server });
+    } catch (e) { fail(res, 500, 'XERP 재연결 오류: ' + e.message); }
     return;
   }
 
