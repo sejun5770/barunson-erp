@@ -3366,6 +3366,157 @@ try {
   console.error('[DB] 디얼디어 마스터 import 실패:', e.message);
 }
 
+// ── 시드 JSON 자동 import (멱등) ─────────────────────────────────────
+// 신규 배포 환경에서 빈 DB 로 시작 시, 리포에 커밋된 시드 데이터로 채움.
+// 기존 데이터가 있으면 skip — 사용자 편집 보존.
+async function _autoImportJson(fileName, tableName, options = {}) {
+  const filePath = path.join(__dirname, fileName);
+  if (!fs.existsSync(filePath)) {
+    console.log(`[seed] ${fileName} 없음 — 건너뜀`);
+    return;
+  }
+  let rows;
+  try {
+    rows = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    if (!Array.isArray(rows)) rows = rows.items || [];
+  } catch (e) {
+    console.warn(`[seed] ${fileName} 파싱 실패:`, e.message);
+    return;
+  }
+  if (!rows.length) return;
+
+  // skipIfPopulated=true 일 때만 기존 데이터 있으면 skip
+  // (PK/UNIQUE 로 자동 dedup 가능한 테이블은 false 로 매번 시도)
+  if (options.skipIfPopulated !== false) {
+    try {
+      const existing = await db.prepare(`SELECT COUNT(*) AS cnt FROM ${tableName}`).get();
+      const cnt = Number(existing?.cnt || 0);
+      if (cnt > 0) {
+        console.log(`[seed] ${tableName}: 이미 ${cnt}건 존재 — ${fileName} import 건너뜀`);
+        return;
+      }
+    } catch (e) {
+      console.warn(`[seed] ${tableName} 카운트 실패 — import 시도:`, e.message);
+    }
+  }
+
+  // 실제 테이블 컬럼 조회 (PG / SQLite 양쪽 호환)
+  let validCols;
+  try {
+    if (db.usingSqlite) {
+      const info = await db.prepare(`PRAGMA table_info(${tableName})`).all();
+      validCols = new Set(info.map(c => c.name));
+    } else {
+      const info = await db.prepare(
+        `SELECT column_name FROM information_schema.columns WHERE table_name=$1`
+      ).all(tableName);
+      validCols = new Set(info.map(c => c.column_name));
+    }
+  } catch (e) {
+    console.warn(`[seed] ${tableName} 컬럼 조회 실패 — 전체 컬럼 시도:`, e.message);
+    validCols = null;
+  }
+
+  // 첫 행 기준으로 컬럼 결정 (id 등 PK auto는 제외, 테이블에 없는 컬럼 제거)
+  const skipCols = new Set(options.skipCols || ['id']);
+  const sampleCols = Object.keys(rows[0]).filter(c => !skipCols.has(c));
+  const cols = validCols ? sampleCols.filter(c => validCols.has(c)) : sampleCols;
+  if (!cols.length) {
+    console.warn(`[seed] ${fileName}: 매칭되는 컬럼 없음`);
+    return;
+  }
+
+  const placeholders = cols.map(() => '?').join(',');
+  const sql = `INSERT OR IGNORE INTO ${tableName} (${cols.join(',')}) VALUES (${placeholders})`;
+  const stmt = await db.prepare(sql);
+  let inserted = 0, failed = 0;
+  for (const r of rows) {
+    try {
+      const vals = cols.map(c => r[c] !== undefined ? r[c] : null);
+      const info = await stmt.run(...vals);
+      if (info.changes > 0) inserted++;
+    } catch (e) {
+      failed++;
+      if (failed <= 2) console.warn(`[seed] ${tableName} 행 import 실패:`, e.message);
+    }
+  }
+  console.log(`[seed] ${tableName} ← ${fileName}: 신규 ${inserted}건, 실패 ${failed}건 (총 ${rows.length}건 시도)`);
+}
+
+// 1) 품목 마스터 (~9000건+) — products PK 가 product_code 라 항상 INSERT OR IGNORE 안전
+await _autoImportJson('seed_products.json', 'products', { skipIfPopulated: false }).catch(e =>
+  console.warn('[seed] products import 오류:', e.message)
+);
+// 2) OS 발주 이력 (생산발주) — 자연 unique 키 없어 첫 부팅에만 import
+await _autoImportJson('order_history_import.json', 'order_history').catch(e =>
+  console.warn('[seed] order_history import 오류:', e.message)
+);
+// 3) 후공정 거래 이력 — 팬다콤 / 코리아패키지 (vendor_name 주입 필요)
+async function _autoImportPostProcessHistory(fileName, vendorName) {
+  const filePath = path.join(__dirname, fileName);
+  if (!fs.existsSync(filePath)) return;
+  let rows;
+  try {
+    rows = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    if (!Array.isArray(rows)) rows = rows.items || [];
+  } catch (e) {
+    console.warn(`[seed] ${fileName} 파싱 실패:`, e.message);
+    return;
+  }
+  if (!rows.length) return;
+  // 이 거래처 분이 이미 있으면 skip
+  try {
+    const existing = await db.prepare(
+      `SELECT COUNT(*) AS cnt FROM post_process_history WHERE vendor_name=?`
+    ).get(vendorName);
+    const cnt = Number(existing?.cnt || 0);
+    if (cnt > 0) {
+      console.log(`[seed] post_process_history(${vendorName}): 이미 ${cnt}건 — ${fileName} 건너뜀`);
+      return;
+    }
+  } catch (_) {}
+
+  const cols = [
+    'vendor_name', 'month', 'date', 'product_code', 'process_type',
+    'spec', 'qty', 'product_qty', 'unit_price', 'amount'
+  ];
+  const sql = `INSERT OR IGNORE INTO post_process_history (${cols.join(',')})
+               VALUES (${cols.map(() => '?').join(',')})`;
+  const stmt = await db.prepare(sql);
+  let inserted = 0, failed = 0;
+  for (const r of rows) {
+    try {
+      const info = await stmt.run(
+        vendorName,
+        r.month || r.year_month || '',
+        r.date || '',
+        r.product_code || '',
+        r.process_type || r.process || '',
+        r.spec || '',
+        String(r.qty ?? ''),
+        String(r.product_qty ?? ''),
+        r.unit_price !== null && r.unit_price !== undefined ? Number(r.unit_price) : null,
+        Number(r.amount || 0)
+      );
+      if (info.changes > 0) inserted++;
+    } catch (e) {
+      failed++;
+      if (failed <= 2) console.warn(`[seed] post_process_history(${vendorName}) 실패:`, e.message);
+    }
+  }
+  console.log(`[seed] post_process_history(${vendorName}) ← ${fileName}: 신규 ${inserted}건, 실패 ${failed}건`);
+}
+
+// 팬다콤·코리아패키지는 root 레벨에 있음
+await _autoImportPostProcessHistory(
+  path.relative(__dirname, path.join(__dirname, '..', '..', 'pandacom_data.json')),
+  '팬다콤'
+).catch(e => console.warn('[seed] 팬다콤 import 오류:', e.message));
+await _autoImportPostProcessHistory(
+  path.relative(__dirname, path.join(__dirname, '..', '..', 'korea_pkg_data.json')),
+  '코리아패키지'
+).catch(e => console.warn('[seed] 코리아패키지 import 오류:', e.message));
+
 // ── 공지/게시판 테이블 ──
 await db.exec(`CREATE TABLE IF NOT EXISTS notices (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
