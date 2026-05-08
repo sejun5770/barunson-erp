@@ -1469,6 +1469,7 @@ var _megaData = {
     title: '재고관리',
     items: [
       {icon:'📦',bg:'#fef2f2',fg:'#ef4444',name:'재고현황',desc:'XERP 실시간 재고',page:'inventory',badgeId:'qmInventory'},
+      {icon:'🗃',bg:'#ecfeff',fg:'#0891b2',name:'재고현황2',desc:'DB 스냅샷 + 발주 입고 조정 (테스트용)',page:'inventory2'},
       {icon:'🏢',bg:'#ecfdf5',fg:'#059669',name:'창고별 재고',desc:'창고별 현황/이동/조정',page:'warehouse',companies:['barunson']},
       {icon:'🔄',bg:'#fff7ed',fg:'#ea580c',name:'입출고 현황',desc:'입고/출고 내역 조회',page:'shipments'},
       {icon:'📈',bg:'#fef2f2',fg:'#b91c1c',name:'출고현황',desc:'연도/월/제품별 출고 대시보드',page:'shipment-status'},
@@ -2011,6 +2012,10 @@ function closeMegaMenu() { /* no-op */ }
         <div><div class="hm-name">재고현황</div><div class="hm-desc">XERP 실시간 재고</div></div>
         <div class="hm-right"><span class="hm-badge" style="background:#fef2f2;color:#ef4444" id="qmInventory">-</span></div>
       </div>
+      <div class="hm-item" data-page="inventory2" onclick="showPage('inventory2')">
+        <div class="hm-icon" style="background:#ecfeff;color:#0891b2">🗃</div>
+        <div><div class="hm-name">재고현황2</div><div class="hm-desc">DB 스냅샷 + 발주 입고 조정</div></div>
+      </div>
       <div class="hm-item" data-page="warehouse" onclick="showPage('warehouse')">
         <div class="hm-icon" style="background:#ecfdf5;color:#059669">🏢</div>
         <div><div class="hm-name">창고별 재고</div><div class="hm-desc">창고별 현황/이동/조정</div></div>
@@ -2381,6 +2386,105 @@ function closeMegaMenu() { /* no-op */ }
     <div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px;margin-top:16px">
       <div style="font-weight:700;font-size:14px;margin-bottom:12px">요약 통계</div>
       <div id="invAnalysisSummary" style="font-size:12px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- PAGE: 재고현황2 (XERP 스냅샷 + 발주 입고 조정)               -->
+<!-- ※ 재고현황(원본)과 완전히 분리된 데이터 소스 (우리 DB 스냅샷) -->
+<!-- ============================================================ -->
+<div class="page" id="page-inventory2">
+  <!-- 안내 배너 -->
+  <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:12px;color:#1e40af;line-height:1.6">
+    <b>재고현황2</b> — 우리 DB에 적재된 XERP 스냅샷(<span id="inv2SnapshotDate">-</span>) + 발주 입고처리 조정 합산.
+    원본 <b>재고현황</b>(XERP 실시간)과는 별도이며, 발주현황의 [재고2 입고처리] 액션 결과가 여기에만 반영됩니다.
+  </div>
+
+  <!-- 관리자 패널 -->
+  <div id="inv2AdminPanel" style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:12px 14px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div style="font-weight:700;font-size:13px;color:#0f172a">📦 데이터 적재 (관리자 전용)</div>
+      <div style="flex:1"></div>
+      <button class="btn btn-sm" onclick="inv2Backfill()" style="background:#dc2626;color:#fff;font-size:12px">전체 재적재 (2022~어제)</button>
+      <button class="btn btn-sm" onclick="inv2Sync()" style="background:#2563eb;color:#fff;font-size:12px">증분 동기화</button>
+      <button class="btn btn-sm" onclick="inv2RefreshJobs()" style="background:#64748b;color:#fff;font-size:12px">작업 새로고침</button>
+    </div>
+    <div id="inv2JobStats" style="margin-top:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;font-size:11px"></div>
+    <div id="inv2JobsArea" style="margin-top:8px"></div>
+  </div>
+
+  <!-- 필터 + 검색 -->
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+    <input type="text" id="inv2Search" placeholder="제품코드/품목명 검색" oninput="renderInv2()" style="font-size:12px;padding:5px 10px;border:1px solid #d1d5db;border-radius:5px;min-width:220px">
+    <select id="inv2WarehouseFilter" onchange="renderInv2()" style="font-size:12px;padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;color:#0f766e;font-weight:600">
+      <option value="">전체 창고 합산</option>
+    </select>
+    <select id="inv2StockFilter" onchange="renderInv2()" style="font-size:12px;padding:5px 8px;border:1px solid #d1d5db;border-radius:5px">
+      <option value="">전체 품목</option>
+      <option value="positive">재고 &gt; 0</option>
+      <option value="zero">재고 = 0</option>
+      <option value="adjusted">조정이력 있음</option>
+    </select>
+    <div style="flex:1"></div>
+    <span id="inv2ResultInfo" style="font-size:11px;color:#94a3b8"></span>
+    <button class="btn btn-sm" onclick="loadInventory2()" style="background:#059669;color:#fff;font-size:12px">🔄 새로고침</button>
+  </div>
+
+  <!-- KPI -->
+  <div id="inv2KpiArea" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:10px"></div>
+
+  <!-- 테이블 -->
+  <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">
+    <div style="overflow:auto;max-height:calc(100vh - 380px)">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead style="position:sticky;top:0;z-index:1;background:#f8fafc">
+          <tr>
+            <th style="padding:8px 10px;border-bottom:2px solid #e2e8f0;text-align:center;width:40px">#</th>
+            <th style="padding:8px 10px;border-bottom:2px solid #e2e8f0;text-align:left;min-width:110px">제품코드</th>
+            <th style="padding:8px 10px;border-bottom:2px solid #e2e8f0;text-align:left;min-width:240px">품목명</th>
+            <th style="padding:8px 10px;border-bottom:2px solid #e2e8f0;text-align:right;min-width:90px" title="스냅샷 + 입고조정">가용재고</th>
+            <th style="padding:8px 10px;border-bottom:2px solid #e2e8f0;text-align:right;min-width:90px;color:#64748b">스냅샷</th>
+            <th style="padding:8px 10px;border-bottom:2px solid #e2e8f0;text-align:right;min-width:90px;color:#dc2626">조정합계</th>
+            <th style="padding:8px 10px;border-bottom:2px solid #e2e8f0;text-align:left;min-width:140px">창고별 분포</th>
+            <th style="padding:8px 10px;border-bottom:2px solid #e2e8f0;text-align:center;width:80px">조정이력</th>
+          </tr>
+        </thead>
+        <tbody id="inv2TableBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 조정이력 모달 -->
+  <div id="inv2AdjModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)inv2CloseAdjModal()">
+    <div style="background:#fff;border-radius:10px;padding:20px;max-width:720px;width:90%;max-height:80vh;overflow:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:16px;font-weight:700">조정 이력 — <span id="inv2AdjModalCode"></span></div>
+        <button onclick="inv2CloseAdjModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748b">×</button>
+      </div>
+      <div id="inv2AdjModalBody" style="font-size:12px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 재고현황2 입고처리 모달 (발주현황 페이지 등 어디서든 호출 가능) -->
+<div id="inv2ReceiveModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1100;align-items:center;justify-content:center" onclick="if(event.target===this)closeInv2ReceiveModal()">
+  <div style="background:#fff;border-radius:10px;padding:20px;max-width:760px;width:92%;max-height:84vh;overflow:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="font-size:16px;font-weight:700">📥 재고현황2 입고처리 — PO <span id="inv2RecvPoNumber" style="color:#0e7490;font-family:monospace"></span></div>
+      <button onclick="closeInv2ReceiveModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748b">×</button>
+    </div>
+    <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#92400e">
+      ⚠ 이 작업은 <b>재고현황2</b>(우리 DB) 에만 반영됩니다. 원본 재고현황(XERP 실시간) 과 PO 의 received_qty 는 변경되지 않습니다.
+    </div>
+    <div id="inv2RecvBody" style="font-size:12px"></div>
+    <div style="margin-top:12px">
+      <label style="font-size:12px;color:#475569">메모(선택)</label>
+      <input type="text" id="inv2RecvNotes" placeholder="입고 메모" style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;margin-top:4px">
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+      <button onclick="closeInv2ReceiveModal()" style="background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;padding:6px 14px;border-radius:5px;font-size:12px;cursor:pointer">취소</button>
+      <button onclick="submitInv2Receive()" style="background:#0e7490;color:#fff;border:none;padding:6px 14px;border-radius:5px;font-size:12px;font-weight:600;cursor:pointer">재고현황2 에 입고 반영</button>
     </div>
   </div>
 </div>
@@ -7497,6 +7601,7 @@ var pageTitles={
   'invoices':'거래명세서','mat-purchase':'원재료 매입','china-shipment':'중국 선적',
   'vendors':'거래처 관리','notes':'미팅일지','bom':'제품공정','mrp':'MRP',
   'auto-order':'필수 자동발주','product-mgmt':'품목관리','shipments':'입출고 현황',
+  'inventory2':'재고현황2',
   'inventory-ledger':'수불원장',
   'post-process':'후공정 단가 관리','defects':'불량관리','production-req':'생산요청',
   'production-stock':'생산재고','closing':'마감현황','report':'보고서','settings':'설정',
@@ -10063,7 +10168,7 @@ function showPage(page, opts){
     'auto-order':'purchase','create-po':'purchase','po-list':'purchase','po-mgmt':'purchase','china-shipment':'purchase',
     'delivery-schedule':'purchase','receipts':'purchase','os-register':'purchase',
     'sales':'sales','sales-barun':'sales','sales-dd':'sales','sales-gift':'sales','customer-orders':'sales','shipping':'sales','sales-status':'sales',
-    'inventory':'stock','warehouse':'stock','shipments':'stock','inventory-ledger':'stock','shipment-status':'stock',
+    'inventory':'stock','inventory2':'stock','warehouse':'stock','shipments':'stock','inventory-ledger':'stock','shipment-status':'stock',
     'production-req':'production','production-stock':'production','mrp':'production',
     'invoices':'accounting','mat-purchase':'accounting','cost-mgmt':'accounting','closing':'accounting',
     'chart-of-accounts':'accounting','journal':'accounting','general-ledger':'accounting',
@@ -10127,6 +10232,7 @@ function showPage(page, opts){
   if(page==='dashboard') { renderDashFavorites(); filterHomeMegaByCompany(); }
   if(page==='analytics') loadDashboard();
   if(page==='inventory') loadInventoryPage();
+  if(page==='inventory2') loadInventory2Page();
   if(page==='order-todo') loadOrderTodo();
   if(page==='create-po') loadCreatePO();
   if(page==='po-list') loadPOList();
@@ -17151,6 +17257,8 @@ function renderPOSubCard(po, idx, steps, icon) {
     if(po.vendor_email){
       actions+=` <button class="btn btn-sm" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;margin-left:4px" onclick="event.stopPropagation();openVendorPortalView('${esc(po.vendor_email)}','${esc(po.vendor_name||'')}')">👁 거래처화면</button>`;
     }
+    // ─ 재고현황2 입고처리 (재고현황2 전용 — 우리 DB 의 inv2_adjustments 에 +수량 기록) ─
+    actions+=` <button class="btn btn-sm" style="background:#ecfeff;color:#0e7490;border:1px solid #67e8f9;margin-left:4px;font-weight:600" onclick="event.stopPropagation();openInv2ReceiveModal(${po.po_id})" title="발주 입고를 재고현황2 에 반영 (원본 재고현황은 영향 없음)">📥 재고2 입고처리</button>`;
 
     // 품목 테이블
     const items=po.items||[];
@@ -28141,6 +28249,283 @@ function _exportPivotExcel(d, metric, title, prefix) {
   var ymd = new Date().toISOString().slice(0,10).replace(/-/g,'');
   XLSX.writeFile(wb, prefix + '_' + ymd + '.xlsx');
 }
+
+// ════════════════════════════════════════════════════════════════════
+//  재고현황2 (DB 스냅샷 + 발주 입고 조정)
+//  ※ 기존 재고현황 함수/변수와 완전히 분리. 모두 _inv2* 또는 inv2* 네임스페이스.
+// ════════════════════════════════════════════════════════════════════
+var _inv2Data = null;       // 마지막 /api/inventory2 응답
+var _inv2JobsTimer = null;  // 진행 중 작업 polling 타이머
+
+async function loadInventory2Page() {
+  // 페이지 진입 시 — 데이터 + 작업 이력 로드
+  await loadInventory2();
+  await inv2RefreshJobs();
+}
+
+async function loadInventory2() {
+  var area = document.getElementById('inv2TableBody');
+  if (area) area.innerHTML = '<tr><td colspan="8" style="padding:60px;text-align:center;color:#94a3b8">로딩중...</td></tr>';
+  try {
+    var r = await authFetch('/api/inventory2');
+    var json = await r.json();
+    if (!json.ok) throw new Error(json.error || '조회 실패');
+    _inv2Data = json.data;
+    document.getElementById('inv2SnapshotDate').textContent = _inv2Data.snapshot_date || '없음';
+    if (_inv2Data.message) {
+      area.innerHTML = '<tr><td colspan="8" style="padding:60px;text-align:center;color:#dc2626">' + esc(_inv2Data.message) + '</td></tr>';
+      document.getElementById('inv2KpiArea').innerHTML = '';
+      return;
+    }
+    // 창고 드롭다운 채우기
+    var whSet = new Set();
+    (_inv2Data.products || []).forEach(function(p){ Object.keys(p._warehouses||{}).forEach(function(w){ if(w) whSet.add(w); }); });
+    var whSel = document.getElementById('inv2WarehouseFilter');
+    var prev = whSel.value;
+    whSel.innerHTML = '<option value="">전체 창고 합산</option>' + [...whSet].sort().map(function(w){ return '<option value="'+esc(w)+'">'+esc(w)+'</option>'; }).join('');
+    if (prev && whSet.has(prev)) whSel.value = prev;
+    renderInv2();
+  } catch (e) {
+    if (area) area.innerHTML = '<tr><td colspan="8" style="padding:60px;text-align:center;color:#ef4444">재고현황2 로드 실패: ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function renderInv2() {
+  if (!_inv2Data) return;
+  var products = _inv2Data.products || [];
+  var search = (document.getElementById('inv2Search').value || '').toLowerCase().trim();
+  var whFilter = document.getElementById('inv2WarehouseFilter').value;
+  var stockFilter = document.getElementById('inv2StockFilter').value;
+
+  var filtered = products.slice();
+  if (search) filtered = filtered.filter(function(p){
+    return ((p['제품코드']||'').toLowerCase().indexOf(search) >= 0) ||
+           ((p['품목명']||'').toLowerCase().indexOf(search) >= 0);
+  });
+  // 가용재고는 창고 필터에 따라 동적 계산
+  filtered = filtered.map(function(p){
+    var displayQty;
+    if (whFilter) {
+      var whQty = (p._warehouses||{})[whFilter] || 0;
+      displayQty = whQty + (p._adjustments || 0);
+    } else {
+      displayQty = p['가용재고'] || 0;
+    }
+    return Object.assign({}, p, { _displayQty: displayQty });
+  });
+  if (stockFilter === 'positive') filtered = filtered.filter(function(p){ return (p._displayQty||0) > 0; });
+  else if (stockFilter === 'zero') filtered = filtered.filter(function(p){ return (p._displayQty||0) === 0; });
+  else if (stockFilter === 'adjusted') filtered = filtered.filter(function(p){ return (p._adjustments||0) !== 0; });
+
+  // 가용재고 내림차순
+  filtered.sort(function(a, b){ return (b._displayQty||0) - (a._displayQty||0); });
+
+  // KPI
+  var totalQty = filtered.reduce(function(s, p){ return s + Math.max(0, p._displayQty||0); }, 0);
+  var totalAdj = filtered.reduce(function(s, p){ return s + (p._adjustments||0); }, 0);
+  var posCount = filtered.filter(function(p){ return (p._displayQty||0) > 0; }).length;
+  var adjCount = filtered.filter(function(p){ return (p._adjustments||0) !== 0; }).length;
+  var kh = '';
+  kh += '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px;border-left:4px solid #2563eb"><div style="font-size:11px;color:#94a3b8">표시 품목수</div><div style="font-size:18px;font-weight:700;color:#0f172a">'+filtered.length.toLocaleString()+' / '+products.length.toLocaleString()+'</div></div>';
+  kh += '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px;border-left:4px solid #16a34a"><div style="font-size:11px;color:#94a3b8">재고 보유 품목</div><div style="font-size:18px;font-weight:700;color:#0f172a">'+posCount.toLocaleString()+' 종</div></div>';
+  kh += '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px;border-left:4px solid #d97706"><div style="font-size:11px;color:#94a3b8">총 가용재고</div><div style="font-size:18px;font-weight:700;color:#0f172a">'+totalQty.toLocaleString()+'</div></div>';
+  kh += '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px;border-left:4px solid #dc2626"><div style="font-size:11px;color:#94a3b8">조정 품목수 / 합계</div><div style="font-size:18px;font-weight:700;color:#0f172a">'+adjCount.toLocaleString()+' 종 / '+(totalAdj>=0?'+':'')+totalAdj.toLocaleString()+'</div></div>';
+  document.getElementById('inv2KpiArea').innerHTML = kh;
+
+  // 테이블
+  var tb = document.getElementById('inv2TableBody');
+  if (!filtered.length) {
+    tb.innerHTML = '<tr><td colspan="8" style="padding:60px;text-align:center;color:#94a3b8">표시할 데이터가 없습니다</td></tr>';
+  } else {
+    var html = '';
+    filtered.slice(0, 1000).forEach(function(p, i){
+      var whEntries = Object.entries(p._warehouses||{}).filter(function(kv){ return kv[1] !== 0; });
+      var whText = whEntries.length ? whEntries.map(function(kv){ return '<span style="background:#f1f5f9;padding:1px 6px;border-radius:8px;margin-right:4px;font-size:10px">'+esc(kv[0])+': '+Number(kv[1]).toLocaleString()+'</span>'; }).join('') : '<span style="color:#94a3b8;font-size:11px">-</span>';
+      var adjColor = (p._adjustments||0) > 0 ? '#16a34a' : ((p._adjustments||0) < 0 ? '#dc2626' : '#94a3b8');
+      var qtyColor = (p._displayQty||0) > 0 ? '#0f172a' : '#94a3b8';
+      html += '<tr style="border-bottom:1px solid #f1f5f9">'
+        + '<td style="padding:6px 10px;text-align:center;color:#64748b">'+(i+1)+'</td>'
+        + '<td style="padding:6px 10px;font-family:monospace;font-size:11px">'+esc(p['제품코드'])+'</td>'
+        + '<td style="padding:6px 10px">'+esc(p['품목명']||p['제품코드'])+'</td>'
+        + '<td style="padding:6px 10px;text-align:right;font-weight:700;color:'+qtyColor+'">'+Number(p._displayQty||0).toLocaleString()+'</td>'
+        + '<td style="padding:6px 10px;text-align:right;color:#64748b">'+Number(p._snapshot_qty||0).toLocaleString()+'</td>'
+        + '<td style="padding:6px 10px;text-align:right;color:'+adjColor+';font-weight:600">'+((p._adjustments||0)>=0?'+':'')+Number(p._adjustments||0).toLocaleString()+'</td>'
+        + '<td style="padding:6px 10px">'+whText+'</td>'
+        + '<td style="padding:6px 10px;text-align:center"><button class="btn btn-sm" onclick="inv2ShowAdj(\''+esc(p['제품코드'])+'\')" style="font-size:10px;padding:2px 8px;background:#f1f5f9;color:#334155;border:1px solid #e2e8f0">보기</button></td>'
+        + '</tr>';
+    });
+    tb.innerHTML = html;
+  }
+  document.getElementById('inv2ResultInfo').textContent = '표시 ' + filtered.length.toLocaleString() + ' / 전체 ' + products.length.toLocaleString() + ' 품목 · 스냅샷 ' + (_inv2Data.snapshot_date||'-') + (filtered.length > 1000 ? ' (상위 1000건만 표시)' : '');
+}
+
+async function inv2Backfill() {
+  if (!confirm('2022-01-01 부터 어제까지의 XERP 데이터를 우리 DB에 전체 재적재합니다.\n\n• 입출고/매출 수백만 행을 월 단위로 백그라운드 처리합니다.\n• 진행 중에도 다른 작업은 가능합니다.\n• 같은 데이터는 멱등성으로 중복되지 않습니다.\n\n진행하시겠습니까?')) return;
+  try {
+    var r = await authFetch('/api/inv2/backfill', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({}) });
+    var json = await r.json();
+    if (!json.ok) throw new Error(json.error || '백필 등록 실패');
+    whToast('백필 작업 ' + (json.data.jobs||[]).length + '건 등록됨');
+    inv2StartJobsPolling();
+  } catch (e) { whToast('백필 등록 실패: ' + e.message, 'error'); }
+}
+
+async function inv2Sync() {
+  if (!confirm('마지막 적재일 다음날부터 어제까지의 데이터를 증분 동기화합니다. 진행하시겠습니까?')) return;
+  try {
+    var r = await authFetch('/api/inv2/sync', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({}) });
+    var json = await r.json();
+    if (!json.ok) throw new Error(json.error || '동기화 등록 실패');
+    whToast('증분 동기화 작업 등록됨');
+    inv2StartJobsPolling();
+  } catch (e) { whToast('동기화 실패: ' + e.message, 'error'); }
+}
+
+async function inv2RefreshJobs() {
+  try {
+    var r = await authFetch('/api/inv2/jobs');
+    var json = await r.json();
+    if (!json.ok) return;
+    var jobs = json.data.jobs || [];
+    var stats = json.data.stats || {};
+    // 통계 카드
+    var sh = '';
+    var labels = { inout: '입출고', sales: '매출', inventory: '재고스냅샷' };
+    Object.keys(labels).forEach(function(k){
+      var s = stats[k] || {};
+      sh += '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px"><div style="color:#64748b;font-size:10px">' + labels[k] + '</div><div style="font-weight:600;color:#0f172a">최종: ' + (s.last_date || '-') + '</div><div style="color:#64748b;font-size:10px">총 ' + Number(s.total_rows||0).toLocaleString() + ' 행</div></div>';
+    });
+    document.getElementById('inv2JobStats').innerHTML = sh;
+
+    // 작업 목록
+    var hasRunning = jobs.some(function(j){ return j.status === 'running' || j.status === 'queued'; });
+    if (jobs.length === 0) { document.getElementById('inv2JobsArea').innerHTML = ''; }
+    else {
+      var jh = '<div style="font-size:11px;color:#64748b;margin-bottom:4px">최근 작업 ' + jobs.length + '건</div>';
+      jh += '<div style="max-height:180px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px">';
+      jh += '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+      jh += '<thead><tr style="background:#f8fafc"><th style="padding:5px 8px;text-align:left">#</th><th style="padding:5px 8px;text-align:left">유형</th><th style="padding:5px 8px;text-align:left">테이블</th><th style="padding:5px 8px;text-align:left">기간</th><th style="padding:5px 8px;text-align:center">상태</th><th style="padding:5px 8px;text-align:right">진행</th><th style="padding:5px 8px;text-align:right">행수</th><th style="padding:5px 8px;text-align:left">단계</th><th style="padding:5px 8px;text-align:left">완료</th></tr></thead><tbody>';
+      jobs.slice(0, 15).forEach(function(j){
+        var col = j.status === 'completed' ? '#16a34a' : (j.status === 'failed' ? '#dc2626' : (j.status === 'running' ? '#2563eb' : '#64748b'));
+        jh += '<tr style="border-top:1px solid #f1f5f9">'
+          + '<td style="padding:4px 8px">'+j.job_id+'</td>'
+          + '<td style="padding:4px 8px">'+esc(j.job_type)+'</td>'
+          + '<td style="padding:4px 8px">'+esc(j.table_name)+'</td>'
+          + '<td style="padding:4px 8px;font-family:monospace;font-size:10px">'+esc(j.range_start||'')+'~'+esc(j.range_end||'')+'</td>'
+          + '<td style="padding:4px 8px;text-align:center;color:'+col+';font-weight:600">'+esc(j.status)+'</td>'
+          + '<td style="padding:4px 8px;text-align:right">'+(j.progress_pct||0)+'%</td>'
+          + '<td style="padding:4px 8px;text-align:right">'+Number(j.rows_inserted||0).toLocaleString()+'</td>'
+          + '<td style="padding:4px 8px;color:#64748b">'+esc(j.current_step||'')+(j.error_msg ? ' <span style="color:#dc2626">— '+esc(j.error_msg)+'</span>' : '')+'</td>'
+          + '<td style="padding:4px 8px;color:#64748b;font-size:10px">'+esc((j.finished_at||'').slice(5,16))+'</td>'
+          + '</tr>';
+      });
+      jh += '</tbody></table></div>';
+      document.getElementById('inv2JobsArea').innerHTML = jh;
+    }
+    if (hasRunning) inv2StartJobsPolling();
+    else inv2StopJobsPolling();
+  } catch(e) {}
+}
+
+function inv2StartJobsPolling() {
+  if (_inv2JobsTimer) return;
+  _inv2JobsTimer = setInterval(function(){ inv2RefreshJobs(); }, 3000);
+}
+function inv2StopJobsPolling() {
+  if (_inv2JobsTimer) { clearInterval(_inv2JobsTimer); _inv2JobsTimer = null; }
+}
+
+async function inv2ShowAdj(code) {
+  var modal = document.getElementById('inv2AdjModal');
+  document.getElementById('inv2AdjModalCode').textContent = code;
+  var body = document.getElementById('inv2AdjModalBody');
+  body.innerHTML = '<div style="padding:30px;text-align:center;color:#94a3b8">로딩중...</div>';
+  modal.style.display = 'flex';
+  try {
+    var r = await authFetch('/api/inv2/adjustments?item_code=' + encodeURIComponent(code));
+    var json = await r.json();
+    var rows = (json.data && json.data.adjustments) || [];
+    if (!rows.length) { body.innerHTML = '<div style="padding:30px;text-align:center;color:#94a3b8">조정 이력이 없습니다</div>'; return; }
+    var h = '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#f8fafc"><th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e2e8f0">일시</th><th style="padding:6px 10px;text-align:right;border-bottom:1px solid #e2e8f0">증감</th><th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e2e8f0">사유</th><th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e2e8f0">PO</th><th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e2e8f0">담당자</th><th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e2e8f0">메모</th></tr></thead><tbody>';
+    rows.forEach(function(a){
+      var col = a.delta_qty > 0 ? '#16a34a' : '#dc2626';
+      h += '<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:6px 10px;color:#64748b;font-size:11px">'+esc((a.created_at||a.adj_date||'').slice(0,16))+'</td><td style="padding:6px 10px;text-align:right;color:'+col+';font-weight:700">'+(a.delta_qty>0?'+':'')+Number(a.delta_qty).toLocaleString()+'</td><td style="padding:6px 10px">'+esc(a.reason||'')+'</td><td style="padding:6px 10px;font-family:monospace;font-size:11px">'+esc(a.po_number||(a.po_id?'#'+a.po_id:''))+'</td><td style="padding:6px 10px">'+esc(a.user_name||'')+'</td><td style="padding:6px 10px;color:#64748b">'+esc(a.notes||'')+'</td></tr>';
+    });
+    h += '</tbody></table>';
+    body.innerHTML = h;
+  } catch(e) { body.innerHTML = '<div style="padding:30px;text-align:center;color:#ef4444">조회 실패: '+esc(e.message)+'</div>'; }
+}
+function inv2CloseAdjModal() { document.getElementById('inv2AdjModal').style.display = 'none'; }
+
+// ─── 발주현황에서 호출: 재고현황2 입고처리 모달 ───
+var _inv2RecvPoId = null;
+function openInv2ReceiveModal(poId) {
+  _inv2RecvPoId = poId;
+  var po = (typeof poList !== 'undefined' ? poList : []).find(function(p){ return p.po_id === poId; });
+  if (!po) { whToast('PO 정보를 찾을 수 없습니다'); return; }
+  document.getElementById('inv2RecvPoNumber').textContent = po.po_number || ('#' + poId);
+  document.getElementById('inv2RecvNotes').value = '';
+  var items = po.items || [];
+  if (!items.length) { whToast('PO 에 품목이 없습니다'); return; }
+  var h = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+  h += '<thead><tr style="background:#f8fafc"><th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e2e8f0">제품코드</th><th style="padding:6px 10px;text-align:right;border-bottom:1px solid #e2e8f0">발주수량</th><th style="padding:6px 10px;text-align:right;border-bottom:1px solid #e2e8f0">기존입고</th><th style="padding:6px 10px;text-align:right;border-bottom:1px solid #e2e8f0">미입고</th><th style="padding:6px 10px;text-align:right;border-bottom:1px solid #e2e8f0;color:#0e7490">이번 입고수량</th></tr></thead><tbody>';
+  items.forEach(function(it, idx) {
+    var ordered = Number(it.ordered_qty || 0);
+    var received = Number(it.received_qty || 0);
+    var remain = Math.max(0, ordered - received);
+    h += '<tr style="border-bottom:1px solid #f1f5f9">'
+      + '<td style="padding:6px 10px;font-family:monospace;font-size:11px">'+esc(it.product_code||'')+'</td>'
+      + '<td style="padding:6px 10px;text-align:right">'+ordered.toLocaleString()+'</td>'
+      + '<td style="padding:6px 10px;text-align:right;color:#64748b">'+received.toLocaleString()+'</td>'
+      + '<td style="padding:6px 10px;text-align:right;color:#dc2626">'+remain.toLocaleString()+'</td>'
+      + '<td style="padding:6px 10px;text-align:right"><input type="number" data-code="'+esc(it.product_code||'')+'" value="'+remain+'" min="0" max="'+ordered+'" style="width:100px;padding:4px 6px;border:1px solid #67e8f9;border-radius:4px;text-align:right;font-weight:600;color:#0e7490;font-size:12px"></td>'
+      + '</tr>';
+  });
+  h += '</tbody></table>';
+  document.getElementById('inv2RecvBody').innerHTML = h;
+  document.getElementById('inv2ReceiveModal').style.display = 'flex';
+}
+
+function closeInv2ReceiveModal() {
+  document.getElementById('inv2ReceiveModal').style.display = 'none';
+  _inv2RecvPoId = null;
+}
+
+async function submitInv2Receive() {
+  if (!_inv2RecvPoId) return;
+  var inputs = document.querySelectorAll('#inv2RecvBody input[type=number][data-code]');
+  var items = [];
+  inputs.forEach(function(inp) {
+    var qty = parseInt(inp.value, 10);
+    if (qty > 0) items.push({ product_code: inp.getAttribute('data-code'), qty: qty });
+  });
+  if (!items.length) { whToast('입고수량이 0 입니다'); return; }
+  var notes = document.getElementById('inv2RecvNotes').value || '';
+  try {
+    var r = await authFetch('/api/po/' + _inv2RecvPoId + '/receive2', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ items: items, notes: notes })
+    });
+    var json = await r.json();
+    if (!json.ok) throw new Error(json.error || '입고처리 실패');
+    whToast('재고현황2 에 입고 반영됨 (' + json.data.count + '품목). 재고현황2 페이지에서 확인하세요.');
+    closeInv2ReceiveModal();
+  } catch (e) {
+    whToast('입고처리 실패: ' + e.message, 'error');
+  }
+}
+
+// 페이지 이탈 시 polling 정지
+(function(){
+  var origShow = window.showPage;
+  if (typeof origShow === 'function') {
+    window.showPage = function(p, opts) {
+      if (p !== 'inventory2') inv2StopJobsPolling();
+      return origShow(p, opts);
+    };
+  }
+})();
 
 // ════════════════════════════════════════════════════════════════════
 //  공지/게시판 (Notice Board)

@@ -1786,6 +1786,116 @@ try {
   console.error('[init] ★ sync_log 테이블 생성 실패:', e.message);
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  재고현황2 (XERP 스냅샷 적재 + 입고 조정) 전용 테이블
+//  ※ 기존 inventory_snapshot / sync_log 와 분리. prefix = inv2_
+//  - inv2_inventory_snapshot : XERP mmInventory 행 단위 스냅샷
+//  - inv2_inout              : XERP mmInoutItem 행 단위 (SO/MO/SI/MI)
+//  - inv2_sales              : XERP ERP_SalesData 행 단위
+//  - inv2_adjustments        : 발주 입고처리/수동 조정 로그 (재고 +/-)
+//  - inv2_sync_jobs          : 백필/동기화 작업 진행률 추적
+// ════════════════════════════════════════════════════════════════════
+try {
+  await db.exec(`CREATE TABLE IF NOT EXISTS inv2_inventory_snapshot (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date TEXT NOT NULL,
+    site_code     TEXT DEFAULT 'BK10',
+    wh_code       TEXT DEFAULT '',
+    item_code     TEXT NOT NULL,
+    item_name     TEXT DEFAULT '',
+    stock_qty     NUMERIC DEFAULT 0,
+    synced_at     TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_snap_item ON inv2_inventory_snapshot(item_code)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_snap_date ON inv2_inventory_snapshot(snapshot_date)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_snap_wh ON inv2_inventory_snapshot(wh_code)");
+
+  await db.exec(`CREATE TABLE IF NOT EXISTS inv2_inout (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    inout_date    TEXT NOT NULL,
+    site_code     TEXT DEFAULT 'BK10',
+    wh_code       TEXT DEFAULT '',
+    inout_no      TEXT DEFAULT '',
+    inout_seq     INTEGER DEFAULT 0,
+    inout_gubun   TEXT DEFAULT '',
+    item_code     TEXT NOT NULL,
+    item_name     TEXT DEFAULT '',
+    inout_qty     NUMERIC DEFAULT 0,
+    inout_amnt    NUMERIC DEFAULT 0,
+    synced_at     TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  // 멱등성 — 동일 (no, seq, gubun, code) 중복 방지
+  try { await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_inv2_inout ON inv2_inout(inout_no, inout_seq, inout_gubun, item_code)"); } catch(_){}
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_inout_date ON inv2_inout(inout_date)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_inout_item ON inv2_inout(item_code)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_inout_gubun ON inv2_inout(inout_gubun)");
+
+  await db.exec(`CREATE TABLE IF NOT EXISTS inv2_sales (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    h_date        TEXT NOT NULL,
+    h_orderid     TEXT DEFAULT '',
+    b_seq         INTEGER DEFAULT 0,
+    b_goodcode    TEXT DEFAULT '',
+    b_ordernum    NUMERIC DEFAULT 0,
+    b_sumprice    NUMERIC DEFAULT 0,
+    h_sumprice    NUMERIC DEFAULT 0,
+    h_offerprice  NUMERIC DEFAULT 0,
+    h_supertax    NUMERIC DEFAULT 0,
+    fee_amnt      NUMERIC DEFAULT 0,
+    dept_gubun    TEXT DEFAULT '',
+    synced_at     TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  try { await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_inv2_sales ON inv2_sales(h_orderid, b_seq, b_goodcode)"); } catch(_){}
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_sales_date ON inv2_sales(h_date)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_sales_code ON inv2_sales(b_goodcode)");
+
+  await db.exec(`CREATE TABLE IF NOT EXISTS inv2_adjustments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    adj_date      TEXT DEFAULT (date('now','localtime')),
+    item_code     TEXT NOT NULL,
+    delta_qty     NUMERIC NOT NULL,
+    reason        TEXT DEFAULT 'manual',
+    po_id         INTEGER,
+    po_number     TEXT DEFAULT '',
+    user_id       INTEGER,
+    user_name     TEXT DEFAULT '',
+    notes         TEXT DEFAULT '',
+    created_at    TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_adj_item ON inv2_adjustments(item_code)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_adj_po ON inv2_adjustments(po_id)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_adj_date ON inv2_adjustments(adj_date)");
+
+  await db.exec(`CREATE TABLE IF NOT EXISTS inv2_sync_jobs (
+    job_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_type      TEXT NOT NULL,
+    table_name    TEXT NOT NULL,
+    range_start   TEXT DEFAULT '',
+    range_end     TEXT DEFAULT '',
+    status        TEXT DEFAULT 'queued',
+    progress_pct  INTEGER DEFAULT 0,
+    current_step  TEXT DEFAULT '',
+    rows_inserted INTEGER DEFAULT 0,
+    error_msg     TEXT DEFAULT '',
+    started_at    TEXT DEFAULT '',
+    finished_at   TEXT DEFAULT '',
+    triggered_by  TEXT DEFAULT 'manual',
+    created_at    TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_sync_status ON inv2_sync_jobs(status)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_inv2_sync_table ON inv2_sync_jobs(table_name)");
+
+  // 서버 재시작 시 stale running 작업 자동 해제 (sync_log 와 동일 패턴)
+  try {
+    const cleared = await db.prepare("UPDATE inv2_sync_jobs SET status='failed', error_msg='서버 재시작 감지 — 자동 해제', finished_at=datetime('now','localtime') WHERE status='running' OR status='queued'").run();
+    if (cleared && cleared.changes > 0) console.log(`[init] inv2_sync_jobs stale 자동 해제: ${cleared.changes}건`);
+  } catch(_){}
+
+  console.log('[init] inv2_* 테이블 OK (재고현황2)');
+} catch(e) {
+  console.error('[init] ★ inv2_* 테이블 생성 실패:', e.message);
+}
+
 // ── BOM 조판 계산 확장 컬럼 ──
 try { await db.exec("ALTER TABLE bom_items ADD COLUMN material_type TEXT DEFAULT 'IMPOSITION'"); } catch {}
 try { await db.exec("ALTER TABLE bom_items ADD COLUMN paper_standard TEXT DEFAULT ''"); } catch {}
@@ -3919,6 +4029,7 @@ const ALL_PAGES = [
   { id: 'shipments', name: '입출고 현황', group: '재고' },
   { id: 'shipment-status', name: '출고현황', group: '재고' },
   { id: 'sales-status', name: '판매현황', group: '판매' },
+  { id: 'inventory2', name: '재고현황2', group: '재고' },
   // 생산
   { id: 'production-req', name: '생산요청', group: '생산' },
   { id: 'production-stock', name: '생산재고', group: '생산' },
@@ -3987,23 +4098,23 @@ const ALL_PAGES = [
 // 역할 기본 권한 맵 (개별 permissions가 없을 때 fallback)
 const ROLE_PERMISSIONS = {
   admin: ['*'],  // 모든 권한
-  purchase: ['dashboard', 'inventory', 'warehouse', 'shipments', 'shipment-status', 'inventory-ledger', 'auto-order', 'create-po', 'po-list', 'os-register',
+  purchase: ['dashboard', 'inventory', 'inventory2', 'warehouse', 'shipments', 'shipment-status', 'inventory-ledger', 'auto-order', 'create-po', 'po-list', 'os-register',
     'delivery-schedule', 'receipts', 'invoices', 'notes', 'product-mgmt', 'bom', 'mrp', 'post-process', 'defects',
     'closing', 'report', 'po-mgmt', 'china-shipment', 'mat-purchase', 'tasks', 'meeting-log', 'sales', 'sales-status', 'sales-barun', 'sales-dd', 'sales-gift', 'cost-mgmt', 'board', 'audit-log', 'exec-dashboard', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'work-order', 'lot-tracking',
     'approval', 'sales-order', 'budget', 'notification', 'safety-stock', 'cycle-count', 'mfg-cost', 'procurement', 'vendor-performance'],
-  production: ['dashboard', 'inventory', 'warehouse', 'shipments', 'inventory-ledger', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks', 'approval', 'lot-tracking',
+  production: ['dashboard', 'inventory', 'inventory2', 'warehouse', 'shipments', 'inventory-ledger', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks', 'approval', 'lot-tracking',
     'process-routing', 'equipment', 'mfg-cost', 'safety-stock', 'work-order'],
-  logistics: ['dashboard', 'inventory', 'warehouse', 'shipments', 'shipment-status', 'inventory-ledger', 'receipts', 'delivery-schedule', 'shipping', 'lot-tracking',
+  logistics: ['dashboard', 'inventory', 'inventory2', 'warehouse', 'shipments', 'shipment-status', 'inventory-ledger', 'receipts', 'delivery-schedule', 'shipping', 'lot-tracking',
     'safety-stock', 'cycle-count', 'barcode', 'tasks', 'notes', 'board', 'notification', 'customer-orders'],
   sales_team: ['dashboard', 'sales', 'sales-status', 'sales-barun', 'sales-dd', 'sales-gift', 'sales-order', 'customer-orders', 'shipping',
-    'inventory', 'warehouse', 'shipments', 'shipment-status', 'ar-ap', 'invoices', 'tasks', 'notes', 'board', 'notification', 'exec-dashboard', 'analytics', 'report'],
+    'inventory', 'inventory2', 'warehouse', 'shipments', 'shipment-status', 'ar-ap', 'invoices', 'tasks', 'notes', 'board', 'notification', 'exec-dashboard', 'analytics', 'report'],
   accounting: ['dashboard', 'invoices', 'mat-purchase', 'cost-mgmt', 'closing', 'chart-of-accounts', 'journal', 'general-ledger',
     'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'budget', 'mfg-cost', 'vat-report', 'journal-auto',
     'sales', 'sales-status', 'sales-barun', 'sales-dd', 'sales-gift', 'tasks', 'notes', 'board', 'notification', 'approval', 'exec-dashboard'],
-  packaging: ['dashboard', 'inventory', 'warehouse', 'shipments', 'production-req', 'production-stock', 'work-order', 'bom',
+  packaging: ['dashboard', 'inventory', 'inventory2', 'warehouse', 'shipments', 'production-req', 'production-stock', 'work-order', 'bom',
     'post-process', 'lot-tracking', 'receipts', 'tasks', 'notes', 'board', 'notification'],
-  viewer: ['dashboard', 'inventory', 'warehouse', 'shipments', 'shipment-status', 'po-list', 'notes', 'sales', 'sales-status', 'sales-barun', 'sales-gift', 'cost-mgmt', 'board', 'customer-orders', 'shipping',
+  viewer: ['dashboard', 'inventory', 'inventory2', 'warehouse', 'shipments', 'shipment-status', 'po-list', 'notes', 'sales', 'sales-status', 'sales-barun', 'sales-gift', 'cost-mgmt', 'board', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap'],
 };
 
@@ -4338,6 +4449,187 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Rejection:', msg);
   try { logError('error', msg, stack); } catch(_) {}
 });
+
+// ════════════════════════════════════════════════════════════════════
+//  재고현황2 백그라운드 적재 (XERP → 로컬 Postgres)
+//  - 월 단위 청크로 진행, 진행률을 inv2_sync_jobs.progress_pct 에 기록
+//  - 멱등성: UNIQUE 인덱스 + ON CONFLICT DO NOTHING
+//  - 동시 실행 방지: 같은 (job_type, table_name) 의 running 잡이 있으면 스킵
+// ════════════════════════════════════════════════════════════════════
+function _ymdToDate(ymd) {
+  return new Date(parseInt(ymd.slice(0,4)), parseInt(ymd.slice(4,6))-1, parseInt(ymd.slice(6,8)));
+}
+function _fmtYMD(d) {
+  return d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+}
+function _monthChunks(startYMD, endYMD) {
+  const out = [];
+  const sy = parseInt(startYMD.slice(0,4)), sm = parseInt(startYMD.slice(4,6))-1;
+  const endD = _ymdToDate(endYMD);
+  let cur = new Date(sy, sm, 1);
+  while (cur <= endD) {
+    const last = new Date(cur.getFullYear(), cur.getMonth()+1, 0);
+    const ms = _fmtYMD(cur);
+    const me = _fmtYMD(last);
+    out.push({ start: ms < startYMD ? startYMD : ms, end: me > endYMD ? endYMD : me });
+    cur = new Date(cur.getFullYear(), cur.getMonth()+1, 1);
+  }
+  return out;
+}
+async function _inv2UpdateJob(jobId, fields) {
+  const cols = Object.keys(fields);
+  if (!cols.length) return;
+  const sets = cols.map(c => `${c}=?`).join(',');
+  const vals = cols.map(c => fields[c]);
+  vals.push(jobId);
+  try { await db.prepare(`UPDATE inv2_sync_jobs SET ${sets} WHERE job_id=?`).run(...vals); } catch(e) {
+    console.warn('[inv2 job] update fail', jobId, e.message);
+  }
+}
+async function _inv2RunInoutBackfill(jobId, startYMD, endYMD) {
+  try {
+    await _inv2UpdateJob(jobId, { status:'running', started_at:'NOW_PG', current_step:'XERP 연결 확인' });
+    // started_at handled separately to use NOW()
+    await db.prepare("UPDATE inv2_sync_jobs SET started_at=datetime('now','localtime') WHERE job_id=? AND (started_at IS NULL OR started_at='')").run(jobId);
+    if (!await ensureXerpPool()) throw new Error('XERP 풀 연결 불가');
+    const chunks = _monthChunks(startYMD, endYMD);
+    let inserted = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      const c = chunks[i];
+      const ymLabel = c.start.slice(0,4) + '-' + c.start.slice(4,6);
+      await _inv2UpdateJob(jobId, { current_step: `[입출고] ${ymLabel} 조회 중...`, progress_pct: Math.floor(i / chunks.length * 100) });
+      // endNext = end+1day exclusive
+      const endNext = _fmtYMD(new Date(parseInt(c.end.slice(0,4)), parseInt(c.end.slice(4,6))-1, parseInt(c.end.slice(6,8))+1));
+      const r = await xerpPool.request()
+        .input('s', sql.NChar(16), c.start)
+        .input('e', sql.NChar(16), endNext)
+        .query(`SELECT RTRIM(InoutDate) AS d, RTRIM(WhCode) AS wh, RTRIM(InoutNo) AS no,
+                       InoutSeq AS seq, RTRIM(InoutGubun) AS gb,
+                       RTRIM(ItemCode) AS code, RTRIM(ItemName) AS name,
+                       InoutQty AS qty, InoutAmnt AS amnt
+                FROM mmInoutItem WITH (NOLOCK)
+                WHERE SiteCode = '${XERP_SITE_CODE}'
+                  AND InoutGubun IN ('SO','MO','SI','MI')
+                  AND InoutDate >= @s AND InoutDate < @e`);
+      const rows = r.recordset || [];
+      // 배치 INSERT — 한 트랜잭션에서 ON CONFLICT DO NOTHING
+      const insStmt = db.prepare(`INSERT INTO inv2_inout (inout_date, site_code, wh_code, inout_no, inout_seq, inout_gubun, item_code, item_name, inout_qty, inout_amnt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
+      const tx = db.transaction(async () => {
+        for (const row of rows) {
+          await insStmt.run(
+            (row.d||'').trim(), XERP_SITE_CODE, (row.wh||'').trim(),
+            (row.no||'').trim(), Number(row.seq||0), (row.gb||'').trim(),
+            (row.code||'').trim(), (row.name||'').trim(),
+            Number(row.qty||0), Number(row.amnt||0)
+          );
+        }
+      });
+      await tx();
+      inserted += rows.length;
+      await _inv2UpdateJob(jobId, { rows_inserted: inserted, current_step: `[입출고] ${ymLabel} 완료 (+${rows.length}행, 누적 ${inserted})` });
+    }
+    await _inv2UpdateJob(jobId, { status:'completed', progress_pct: 100, finished_at: 'NOW_PG', current_step: `완료 (총 ${inserted}행)` });
+    await db.prepare("UPDATE inv2_sync_jobs SET finished_at=datetime('now','localtime') WHERE job_id=?").run(jobId);
+    console.log(`[inv2 job ${jobId}] inout backfill done (+${inserted})`);
+  } catch (e) {
+    console.error(`[inv2 job ${jobId}] inout backfill failed:`, e.message);
+    await _inv2UpdateJob(jobId, { status:'failed', error_msg: e.message, finished_at:'NOW_PG' });
+    await db.prepare("UPDATE inv2_sync_jobs SET finished_at=datetime('now','localtime') WHERE job_id=? AND (finished_at IS NULL OR finished_at='')").run(jobId);
+  }
+}
+async function _inv2RunSalesBackfill(jobId, startYMD, endYMD) {
+  try {
+    await _inv2UpdateJob(jobId, { status:'running', current_step:'XERP 연결 확인' });
+    await db.prepare("UPDATE inv2_sync_jobs SET started_at=datetime('now','localtime') WHERE job_id=? AND (started_at IS NULL OR started_at='')").run(jobId);
+    if (!await ensureXerpPool()) throw new Error('XERP 풀 연결 불가');
+    const chunks = _monthChunks(startYMD, endYMD);
+    let inserted = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      const c = chunks[i];
+      const ymLabel = c.start.slice(0,4) + '-' + c.start.slice(4,6);
+      await _inv2UpdateJob(jobId, { current_step:`[매출] ${ymLabel} 조회 중...`, progress_pct: Math.floor(i / chunks.length * 100) });
+      const r = await xerpPool.request()
+        .input('s', sql.NVarChar(16), c.start)
+        .input('e', sql.NVarChar(16), c.end)
+        .query(`SELECT RTRIM(h_date) AS d, RTRIM(h_orderid) AS oid, b_seq AS seq, RTRIM(b_goodCode) AS code,
+                       b_OrderNum AS qty, b_sumPrice AS bsum, h_sumPrice AS hsum,
+                       h_offerPrice AS off, h_superTax AS tax, FeeAmnt AS fee, RTRIM(DeptGubun) AS dg
+                FROM ERP_SalesData WITH (NOLOCK)
+                WHERE h_date >= @s AND h_date <= @e`);
+      const rows = r.recordset || [];
+      const insStmt = db.prepare(`INSERT INTO inv2_sales (h_date, h_orderid, b_seq, b_goodcode, b_ordernum, b_sumprice, h_sumprice, h_offerprice, h_supertax, fee_amnt, dept_gubun)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`);
+      const tx = db.transaction(async () => {
+        for (const row of rows) {
+          await insStmt.run(
+            (row.d||'').trim(), (row.oid||'').trim(), Number(row.seq||0),
+            (row.code||'').trim(), Number(row.qty||0), Number(row.bsum||0),
+            Number(row.hsum||0), Number(row.off||0), Number(row.tax||0),
+            Number(row.fee||0), (row.dg||'').trim()
+          );
+        }
+      });
+      await tx();
+      inserted += rows.length;
+      await _inv2UpdateJob(jobId, { rows_inserted: inserted, current_step:`[매출] ${ymLabel} 완료 (+${rows.length}행, 누적 ${inserted})` });
+    }
+    await _inv2UpdateJob(jobId, { status:'completed', progress_pct:100, current_step:`완료 (총 ${inserted}행)` });
+    await db.prepare("UPDATE inv2_sync_jobs SET finished_at=datetime('now','localtime') WHERE job_id=?").run(jobId);
+    console.log(`[inv2 job ${jobId}] sales backfill done (+${inserted})`);
+  } catch (e) {
+    console.error(`[inv2 job ${jobId}] sales backfill failed:`, e.message);
+    await _inv2UpdateJob(jobId, { status:'failed', error_msg: e.message });
+    await db.prepare("UPDATE inv2_sync_jobs SET finished_at=datetime('now','localtime') WHERE job_id=?").run(jobId);
+  }
+}
+async function _inv2RunInventorySnapshot(jobId) {
+  try {
+    await _inv2UpdateJob(jobId, { status:'running', current_step:'mmInventory 조회' });
+    await db.prepare("UPDATE inv2_sync_jobs SET started_at=datetime('now','localtime') WHERE job_id=?").run(jobId);
+    if (!await ensureXerpPool()) throw new Error('XERP 풀 연결 불가');
+    const r = await xerpPool.request().query(`
+      SELECT RTRIM(WhCode) AS wh, RTRIM(ItemCode) AS code, RTRIM(ItemName) AS name, ItemStock AS qty
+      FROM mmInventory WITH (NOLOCK)
+      WHERE SiteCode = '${XERP_SITE_CODE}' AND WhCode IS NOT NULL AND RTRIM(WhCode) <> ''
+    `);
+    const rows = r.recordset || [];
+    const today = new Date();
+    const snapshotDate = today.getFullYear() + '-' + String(today.getMonth()+1).padStart(2,'0') + '-' + String(today.getDate()).padStart(2,'0');
+    // 같은 날짜 스냅샷 중복 방지: 먼저 삭제
+    await db.prepare("DELETE FROM inv2_inventory_snapshot WHERE snapshot_date=?").run(snapshotDate);
+    const insStmt = db.prepare(`INSERT INTO inv2_inventory_snapshot (snapshot_date, site_code, wh_code, item_code, item_name, stock_qty) VALUES (?, ?, ?, ?, ?, ?)`);
+    let inserted = 0;
+    const tx = db.transaction(async () => {
+      for (const row of rows) {
+        await insStmt.run(snapshotDate, XERP_SITE_CODE, (row.wh||'').trim(), (row.code||'').trim(), (row.name||'').trim(), Number(row.qty||0));
+        inserted++;
+      }
+    });
+    await tx();
+    await _inv2UpdateJob(jobId, { status:'completed', progress_pct:100, rows_inserted: inserted, current_step:`완료 (${snapshotDate} 기준 ${inserted}행)` });
+    await db.prepare("UPDATE inv2_sync_jobs SET finished_at=datetime('now','localtime') WHERE job_id=?").run(jobId);
+    console.log(`[inv2 job ${jobId}] inventory snapshot done (+${inserted})`);
+  } catch (e) {
+    console.error(`[inv2 job ${jobId}] inventory snapshot failed:`, e.message);
+    await _inv2UpdateJob(jobId, { status:'failed', error_msg: e.message });
+    await db.prepare("UPDATE inv2_sync_jobs SET finished_at=datetime('now','localtime') WHERE job_id=?").run(jobId);
+  }
+}
+async function _inv2EnqueueJob(jobType, tableName, rangeStart, rangeEnd, triggeredBy) {
+  // 같은 (job_type, table_name) 이 running/queued 면 거부
+  const existing = await db.prepare("SELECT job_id FROM inv2_sync_jobs WHERE table_name=? AND status IN ('running','queued') ORDER BY job_id DESC LIMIT 1").get(tableName);
+  if (existing) return { skipped: true, job_id: existing.job_id, reason: '이미 진행 중인 작업이 있음' };
+  const r = await db.prepare(`INSERT INTO inv2_sync_jobs (job_type, table_name, range_start, range_end, status, triggered_by) VALUES (?, ?, ?, ?, 'queued', ?)`).run(jobType, tableName, rangeStart, rangeEnd, triggeredBy);
+  const jobId = r.lastInsertRowid;
+  // fire-and-forget
+  setImmediate(() => {
+    if (tableName === 'inout') _inv2RunInoutBackfill(jobId, rangeStart, rangeEnd);
+    else if (tableName === 'sales') _inv2RunSalesBackfill(jobId, rangeStart, rangeEnd);
+    else if (tableName === 'inventory') _inv2RunInventorySnapshot(jobId);
+  });
+  return { job_id: jobId };
+}
 
 async function handleRequest(req, res) {
   res._req = req; // gzip 판단용 req 참조 보관
@@ -17236,6 +17528,219 @@ async function handleRequest(req, res) {
     }
 
     ok(res, { years, months: [1,2,3,4,5,6,7,8,9,10,11,12], gubun: gubunList, products, grandTotals, truncated, totalProducts: Object.keys(productMap).length, sources });
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  재고현황2 (XERP 스냅샷) API
+  //  - POST /api/inv2/backfill   : 2022-01-01 ~ 어제 전체 백필 (admin)
+  //  - POST /api/inv2/sync       : 마지막 적재일 다음날 ~ 어제 증분 (admin)
+  //  - GET  /api/inv2/jobs       : 작업 진행률/이력 (최근 20건)
+  //  - GET  /api/inventory2      : 재고현황2 데이터 (스냅샷 + 조정)
+  //  - POST /api/inv2/adjust     : 수동 +/- 조정 (admin)
+  //  - POST /api/po/:id/receive2 : 발주 입고처리 → 재고2 증가
+  // ════════════════════════════════════════════════════════════════════
+
+  // POST /api/inv2/backfill — 2022-01-01 부터 어제까지 전체 백필
+  if (pathname === '/api/inv2/backfill' && method === 'POST') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded || decoded.role !== 'admin') { fail(res, 403, '관리자 권한이 필요합니다'); return; }
+    const body = await readJSON(req).catch(() => ({}));
+    const tables = Array.isArray(body.tables) && body.tables.length ? body.tables : ['inout','sales','inventory'];
+    const startYMD = (body.start && /^\d{8}$/.test(body.start)) ? body.start : '20220101';
+    const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+    const endYMD = (body.end && /^\d{8}$/.test(body.end)) ? body.end : _fmtYMD(yesterday);
+    const triggeredBy = (decoded.username || decoded.userId || 'admin') + '';
+    const results = [];
+    for (const t of tables) {
+      if (!['inout','sales','inventory'].includes(t)) continue;
+      const r = await _inv2EnqueueJob('backfill', t, startYMD, endYMD, triggeredBy);
+      results.push({ table: t, ...r });
+    }
+    ok(res, { message: '백필 작업 등록됨 (백그라운드 실행)', range: { start: startYMD, end: endYMD }, jobs: results });
+    return;
+  }
+
+  // POST /api/inv2/sync — 증분 동기화 (마지막 적재일 다음날 ~ 어제)
+  if (pathname === '/api/inv2/sync' && method === 'POST') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded || decoded.role !== 'admin') { fail(res, 403, '관리자 권한이 필요합니다'); return; }
+    const body = await readJSON(req).catch(() => ({}));
+    const tables = Array.isArray(body.tables) && body.tables.length ? body.tables : ['inout','sales','inventory'];
+    const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+    const endYMD = _fmtYMD(yesterday);
+    const triggeredBy = (decoded.username || decoded.userId || 'admin') + '';
+    const results = [];
+    for (const t of tables) {
+      if (!['inout','sales','inventory'].includes(t)) continue;
+      let startYMD = '20220101';
+      if (t === 'inout') {
+        const last = await db.prepare("SELECT MAX(inout_date) AS d FROM inv2_inout").get();
+        if (last && last.d) {
+          const d = new Date(parseInt(last.d.slice(0,4)), parseInt(last.d.slice(4,6))-1, parseInt(last.d.slice(6,8))+1);
+          startYMD = _fmtYMD(d);
+        }
+      } else if (t === 'sales') {
+        const last = await db.prepare("SELECT MAX(h_date) AS d FROM inv2_sales").get();
+        if (last && last.d) {
+          const d = new Date(parseInt(last.d.slice(0,4)), parseInt(last.d.slice(4,6))-1, parseInt(last.d.slice(6,8))+1);
+          startYMD = _fmtYMD(d);
+        }
+      }
+      // inventory 는 항상 최신 1회 스냅샷
+      if (t !== 'inventory' && startYMD > endYMD) {
+        results.push({ table: t, skipped: true, reason: '이미 최신 (last >= yesterday)' });
+        continue;
+      }
+      const r = await _inv2EnqueueJob('sync', t, startYMD, endYMD, triggeredBy);
+      results.push({ table: t, ...r, range: { start: startYMD, end: endYMD } });
+    }
+    ok(res, { message: '증분 동기화 작업 등록됨', jobs: results });
+    return;
+  }
+
+  // GET /api/inv2/jobs — 최근 작업 이력
+  if (pathname === '/api/inv2/jobs' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
+    const jobs = await db.prepare("SELECT * FROM inv2_sync_jobs ORDER BY job_id DESC LIMIT 30").all();
+    // 테이블별 마지막 적재일 + 통계
+    const stats = {};
+    try {
+      const inoutLast = await db.prepare("SELECT MAX(inout_date) AS d, COUNT(*) AS n FROM inv2_inout").get();
+      const salesLast = await db.prepare("SELECT MAX(h_date) AS d, COUNT(*) AS n FROM inv2_sales").get();
+      const invLast = await db.prepare("SELECT MAX(snapshot_date) AS d, COUNT(*) AS n FROM inv2_inventory_snapshot").get();
+      stats.inout = { last_date: (inoutLast||{}).d || '', total_rows: Number((inoutLast||{}).n || 0) };
+      stats.sales = { last_date: (salesLast||{}).d || '', total_rows: Number((salesLast||{}).n || 0) };
+      stats.inventory = { last_date: (invLast||{}).d || '', total_rows: Number((invLast||{}).n || 0) };
+    } catch(_) {}
+    ok(res, { jobs, stats });
+    return;
+  }
+
+  // GET /api/inventory2 — 재고현황2 조회 (스냅샷 + adjustments 합산)
+  if (pathname === '/api/inventory2' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
+    try {
+      // 최신 스냅샷 날짜
+      const latest = await db.prepare("SELECT MAX(snapshot_date) AS d FROM inv2_inventory_snapshot").get();
+      const snapshotDate = (latest||{}).d || '';
+      if (!snapshotDate) {
+        ok(res, { products: [], snapshot_date: '', total: 0, message: '스냅샷이 없습니다. [전체 재적재] 버튼으로 적재하세요.' });
+        return;
+      }
+      // 품목별 합산 (창고별 JSON 도 같이 구성)
+      const snapRows = await db.prepare(`
+        SELECT item_code, MAX(item_name) AS item_name, wh_code, SUM(stock_qty) AS qty
+        FROM inv2_inventory_snapshot WHERE snapshot_date = ?
+        GROUP BY item_code, wh_code
+      `).all(snapshotDate);
+      const productMap = {};
+      for (const r of snapRows) {
+        const code = (r.item_code || '').trim();
+        if (!code) continue;
+        if (!productMap[code]) productMap[code] = {
+          제품코드: code, 품목명: r.item_name || code, 가용재고: 0,
+          _warehouses: {}, _snapshot_qty: 0, _adjustments: 0,
+          snapshot_date: snapshotDate
+        };
+        const wh = (r.wh_code || '').trim();
+        const q = Number(r.qty || 0);
+        if (wh) productMap[code]._warehouses[wh] = (productMap[code]._warehouses[wh] || 0) + q;
+        productMap[code]._snapshot_qty += q;
+      }
+      // adjustments 합산 (스냅샷 일자 이후만)
+      const adjRows = await db.prepare(`
+        SELECT item_code, SUM(delta_qty) AS delta, COUNT(*) AS cnt
+        FROM inv2_adjustments WHERE adj_date > ? GROUP BY item_code
+      `).all(snapshotDate);
+      for (const r of adjRows) {
+        const code = (r.item_code || '').trim();
+        if (!productMap[code]) productMap[code] = {
+          제품코드: code, 품목명: code, 가용재고: 0,
+          _warehouses: {}, _snapshot_qty: 0, _adjustments: 0,
+          snapshot_date: snapshotDate
+        };
+        productMap[code]._adjustments = Number(r.delta || 0);
+      }
+      // 최종 가용재고 = 스냅샷 + 조정
+      const products = Object.values(productMap).map(p => {
+        p.가용재고 = (p._snapshot_qty || 0) + (p._adjustments || 0);
+        return p;
+      });
+      products.sort((a, b) => (b.가용재고 || 0) - (a.가용재고 || 0));
+      ok(res, { products, snapshot_date: snapshotDate, total: products.length });
+    } catch (e) {
+      console.error('inventory2 조회 오류:', e.message);
+      fail(res, 500, '재고현황2 조회 오류: ' + e.message);
+    }
+    return;
+  }
+
+  // POST /api/inv2/adjust — 수동 +/- 조정 (admin)
+  if (pathname === '/api/inv2/adjust' && method === 'POST') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
+    const body = await readJSON(req).catch(() => ({}));
+    const code = (body.item_code || '').trim();
+    const delta = Number(body.delta_qty || 0);
+    if (!code || !Number.isFinite(delta) || delta === 0) { fail(res, 400, 'item_code 와 0 이 아닌 delta_qty 가 필요합니다'); return; }
+    try {
+      const r = await db.prepare(`INSERT INTO inv2_adjustments (item_code, delta_qty, reason, user_id, user_name, notes) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(code, delta, body.reason || 'manual', decoded.userId || null, decoded.username || '', body.notes || '');
+      ok(res, { adj_id: r.lastInsertRowid, item_code: code, delta_qty: delta });
+    } catch (e) {
+      fail(res, 500, '조정 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // POST /api/po/:id/receive2 — 발주 입고처리 → inv2_adjustments 에 +수량 기록
+  // body: { items: [{ product_code, qty }], notes }
+  // 기존 /api/receipts 와 분리: 재고현황2 전용. 기존 PO/재고현황은 영향 없음.
+  const m_receive2 = pathname.match(/^\/api\/po\/(\d+)\/receive2$/);
+  if (m_receive2 && method === 'POST') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
+    const poId = parseInt(m_receive2[1], 10);
+    const body = await readJSON(req).catch(() => ({}));
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) { fail(res, 400, '입고 품목이 없습니다'); return; }
+    try {
+      const po = await db.prepare("SELECT po_number FROM po_header WHERE po_id=?").get(poId);
+      const poNumber = (po && po.po_number) || '';
+      const insStmt = db.prepare(`INSERT INTO inv2_adjustments (item_code, delta_qty, reason, po_id, po_number, user_id, user_name, notes) VALUES (?, ?, 'po_receive', ?, ?, ?, ?, ?)`);
+      const ids = [];
+      const tx = db.transaction(async () => {
+        for (const it of items) {
+          const code = (it.product_code || '').trim();
+          const qty = Number(it.qty || 0);
+          if (!code || qty <= 0) continue;
+          const r = await insStmt.run(code, qty, poId, poNumber, decoded.userId || null, decoded.username || '', body.notes || '');
+          ids.push(r.lastInsertRowid);
+        }
+      });
+      await tx();
+      ok(res, { po_id: poId, po_number: poNumber, adjustments: ids, count: ids.length });
+    } catch (e) {
+      fail(res, 500, '입고처리 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // GET /api/inv2/adjustments — 조정 이력 조회 (재고현황2 상세 패널용)
+  if (pathname === '/api/inv2/adjustments' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
+    const code = parsed.searchParams.get('item_code');
+    let rows;
+    if (code) {
+      rows = await db.prepare("SELECT * FROM inv2_adjustments WHERE item_code=? ORDER BY id DESC LIMIT 200").all(code);
+    } else {
+      rows = await db.prepare("SELECT * FROM inv2_adjustments ORDER BY id DESC LIMIT 100").all();
+    }
+    ok(res, { adjustments: rows });
     return;
   }
 
