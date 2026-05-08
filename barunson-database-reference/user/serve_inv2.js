@@ -17229,6 +17229,166 @@ async function handleRequest(req, res) {
     ok(res, result); return;
   }
 
+  // ── GET /api/diag/item-monthly ─ 데이터 검증용 진단 (ERP_SalesData vs mmInoutItem) ──
+  // 쿼리: code=BE004 & ym=202605
+  // 응답: 두 테이블의 합계, 일별 분포, 샘플 행 — 어디서 차이 나는지 즉시 비교
+  if (pathname === '/api/diag/item-monthly' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
+    const code = (parsed.searchParams.get('code') || '').trim();
+    const ym = (parsed.searchParams.get('ym') || '').trim();
+    if (!code || !/^[A-Za-z0-9_\-]+$/.test(code)) { fail(res, 400, '제품코드(code)가 잘못되었습니다'); return; }
+    if (!/^\d{6}$/.test(ym)) { fail(res, 400, 'ym 은 YYYYMM 형식이어야 합니다 (예: 202605)'); return; }
+    const yyyy = parseInt(ym.slice(0,4), 10);
+    const mm = parseInt(ym.slice(4,6), 10);
+    const start = ym + '01';
+    const lastDay = new Date(yyyy, mm, 0).getDate();
+    const end = ym + String(lastDay).padStart(2, '0');
+    const endNext = ym + String(lastDay + 1).padStart(2, '0'); // 단순화: mm월 마지막 날 +1 = 다음달 1일이 아닐 수 있음 → 별도 계산
+    const nextMonth = new Date(yyyy, mm, 1);
+    const endExclusive = nextMonth.getFullYear() + String(nextMonth.getMonth() + 1).padStart(2, '0') + '01';
+
+    if (!await ensureXerpPool()) { fail(res, 503, 'XERP 데이터베이스 미연결'); return; }
+    const result = { code, ym, period: { start, end, endExclusive }, sources: {} };
+
+    // 1) ERP_SalesData (매출 데이터)
+    try {
+      // 합계
+      const sumR = await xerpPool.request()
+        .input('s', sql.NVarChar(16), start)
+        .input('e', sql.NVarChar(16), end)
+        .input('c', sql.VarChar(50), code)
+        .query(`SELECT
+                  COUNT(*) AS row_count,
+                  ISNULL(SUM(b_OrderNum),0) AS sum_qty,
+                  ISNULL(SUM(b_sumPrice),0) AS sum_price,
+                  COUNT(DISTINCT h_orderid) AS distinct_orders
+                FROM ERP_SalesData WITH (NOLOCK)
+                WHERE h_date >= @s AND h_date <= @e
+                  AND RTRIM(b_goodCode) = @c`);
+      // 일별
+      const dailyR = await xerpPool.request()
+        .input('s', sql.NVarChar(16), start)
+        .input('e', sql.NVarChar(16), end)
+        .input('c', sql.VarChar(50), code)
+        .query(`SELECT RTRIM(h_date) AS d,
+                       COUNT(*) AS rows,
+                       ISNULL(SUM(b_OrderNum),0) AS qty,
+                       ISNULL(SUM(b_sumPrice),0) AS price
+                FROM ERP_SalesData WITH (NOLOCK)
+                WHERE h_date >= @s AND h_date <= @e
+                  AND RTRIM(b_goodCode) = @c
+                GROUP BY RTRIM(h_date)
+                ORDER BY RTRIM(h_date)`);
+      // 샘플 raw 10행
+      const sampleR = await xerpPool.request()
+        .input('s', sql.NVarChar(16), start)
+        .input('e', sql.NVarChar(16), end)
+        .input('c', sql.VarChar(50), code)
+        .query(`SELECT TOP 10 RTRIM(h_date) AS h_date, RTRIM(h_orderid) AS h_orderid,
+                       b_seq, RTRIM(b_goodCode) AS b_goodCode,
+                       b_OrderNum AS qty, b_sumPrice AS price,
+                       RTRIM(DeptGubun) AS DeptGubun, h_offerPrice, h_superTax, FeeAmnt
+                FROM ERP_SalesData WITH (NOLOCK)
+                WHERE h_date >= @s AND h_date <= @e
+                  AND RTRIM(b_goodCode) = @c
+                ORDER BY h_date DESC, b_seq`);
+      const sum = sumR.recordset[0] || {};
+      result.sources.erp_sales_data = {
+        table: 'ERP_SalesData',
+        meaning: '매출(주문) 데이터 — h_date 기준',
+        sum_qty: Number(sum.sum_qty || 0),
+        sum_price: Number(sum.sum_price || 0),
+        row_count: Number(sum.row_count || 0),
+        distinct_orders: Number(sum.distinct_orders || 0),
+        daily: dailyR.recordset.map(r => ({ date: r.d, rows: Number(r.rows||0), qty: Number(r.qty||0), price: Number(r.price||0) })),
+        sample: sampleR.recordset
+      };
+    } catch (e) {
+      result.sources.erp_sales_data = { error: e.message };
+    }
+
+    // 2) mmInoutItem — 구분별 (SO/MO/SI/MI 모두)
+    try {
+      const sumR = await xerpPool.request()
+        .input('s', sql.NChar(16), start)
+        .input('e', sql.NChar(16), endExclusive)
+        .input('c', sql.VarChar(50), code)
+        .query(`SELECT RTRIM(InoutGubun) AS gubun,
+                       COUNT(*) AS row_count,
+                       ISNULL(SUM(InoutQty),0) AS sum_qty,
+                       ISNULL(SUM(InoutAmnt),0) AS sum_amnt
+                FROM mmInoutItem WITH (NOLOCK)
+                WHERE SiteCode = '${XERP_SITE_CODE}'
+                  AND InoutDate >= @s AND InoutDate < @e
+                  AND RTRIM(ItemCode) = @c
+                GROUP BY RTRIM(InoutGubun)`);
+      // 일별 (SO 한정)
+      const dailyR = await xerpPool.request()
+        .input('s', sql.NChar(16), start)
+        .input('e', sql.NChar(16), endExclusive)
+        .input('c', sql.VarChar(50), code)
+        .query(`SELECT RTRIM(InoutDate) AS d, RTRIM(InoutGubun) AS gubun,
+                       COUNT(*) AS rows,
+                       ISNULL(SUM(InoutQty),0) AS qty,
+                       ISNULL(SUM(InoutAmnt),0) AS amnt
+                FROM mmInoutItem WITH (NOLOCK)
+                WHERE SiteCode = '${XERP_SITE_CODE}'
+                  AND InoutDate >= @s AND InoutDate < @e
+                  AND RTRIM(ItemCode) = @c
+                GROUP BY RTRIM(InoutDate), RTRIM(InoutGubun)
+                ORDER BY RTRIM(InoutDate), RTRIM(InoutGubun)`);
+      const sampleR = await xerpPool.request()
+        .input('s', sql.NChar(16), start)
+        .input('e', sql.NChar(16), endExclusive)
+        .input('c', sql.VarChar(50), code)
+        .query(`SELECT TOP 15 RTRIM(InoutDate) AS InoutDate, RTRIM(InoutNo) AS InoutNo, InoutSeq,
+                       RTRIM(InoutGubun) AS InoutGubun, RTRIM(WhCode) AS WhCode,
+                       RTRIM(ItemCode) AS ItemCode, RTRIM(ItemName) AS ItemName,
+                       InoutQty, InoutAmnt
+                FROM mmInoutItem WITH (NOLOCK)
+                WHERE SiteCode = '${XERP_SITE_CODE}'
+                  AND InoutDate >= @s AND InoutDate < @e
+                  AND RTRIM(ItemCode) = @c
+                ORDER BY InoutDate DESC, InoutSeq`);
+      const byGubun = {};
+      for (const g of ['SO','MO','SI','MI']) byGubun[g] = { row_count: 0, sum_qty: 0, sum_amnt: 0 };
+      sumR.recordset.forEach(r => {
+        const g = (r.gubun || '').trim();
+        if (byGubun[g]) byGubun[g] = { row_count: Number(r.row_count||0), sum_qty: Number(r.sum_qty||0), sum_amnt: Number(r.sum_amnt||0) };
+      });
+      result.sources.mm_inout_item = {
+        table: 'mmInoutItem',
+        meaning: '실제 입출고 트랜잭션 — InoutDate 기준',
+        site: XERP_SITE_CODE,
+        by_gubun: byGubun,
+        gubun_label: { SO: '매출출고', MO: '원자재출고', SI: '매출입고(반품)', MI: '원자재입고' },
+        daily: dailyR.recordset.map(r => ({ date: (r.d||'').trim(), gubun: (r.gubun||'').trim(), rows: Number(r.rows||0), qty: Number(r.qty||0), amnt: Number(r.amnt||0) })),
+        sample: sampleR.recordset
+      };
+    } catch (e) {
+      result.sources.mm_inout_item = { error: e.message };
+    }
+
+    // 3) 비교 요약
+    const sales = result.sources.erp_sales_data || {};
+    const inout = result.sources.mm_inout_item || {};
+    const soQty = ((inout.by_gubun||{}).SO || {}).sum_qty || 0;
+    const salesQty = sales.sum_qty || 0;
+    result.comparison = {
+      erp_sales_qty: salesQty,
+      mm_so_qty: soQty,
+      diff: soQty - salesQty,
+      diff_pct: salesQty > 0 ? Math.round((soQty - salesQty) / salesQty * 1000) / 10 : null,
+      hint: soQty > salesQty
+        ? '출고(SO) > 매출 — 무상출고/사은품/덤 가능성 또는 매출 미확정 출고'
+        : (soQty < salesQty ? '매출 > 출고(SO) — 분할 출고 미완료 또는 다음달 출고 예정 가능성' : '동일')
+    };
+
+    ok(res, result);
+    return;
+  }
+
   // ── GET /api/sales/pivot ─ 판매현황 대시보드 (연도×월×제품 피벗) ──
   // 쿼리: years=2024,2025,2026 (기본: 최근 3년) / source=all|xerp|dd|gift / limit=100 / search=
   if (pathname === '/api/sales/pivot' && method === 'GET') {
