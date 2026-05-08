@@ -3,7 +3,7 @@ FROM node:20-slim
 # Python + MSSQL 드라이버 + Chromium (PDF 생성용) 설치
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
-    freetds-dev gcc g++ \
+    freetds-dev gcc g++ make \
     chromium \
     fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
