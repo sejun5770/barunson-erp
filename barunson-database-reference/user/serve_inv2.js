@@ -1411,31 +1411,34 @@ const db = pgAdapter;
 async function startServer() {
   // PostgreSQL 연결
   await db.connect({
-    host: envVars.PG_HOST || process.env.PG_HOST || 'onely-postgres',
+    host: envVars.PG_HOST || process.env.PG_HOST || 'localhost',
     port: envVars.PG_PORT || process.env.PG_PORT || '5432',
-    user: envVars.PG_USER || process.env.PG_USER || 'onely',
-    password: envVars.PG_PASSWORD || process.env.PG_PASSWORD || 'onely',
+    user: envVars.PG_USER || process.env.PG_USER || 'postgres',
+    password: envVars.PG_PASSWORD || process.env.PG_PASSWORD || 'postgres',
     database: envVars.PG_DATABASE || process.env.PG_DATABASE || 'sc_erp',
   });
   console.log('✅ PostgreSQL 연결 완료');
 
-  // ── [prelude] onely superuser 로 DDL 권한 선제 해결 ────────────────────
+  // ── [prelude] superuser 로 DDL 권한 선제 해결 ────────────────────
   // prod 에선 PG_USER=sc_erp 로 접속하는데, sc_erp 가 public 스키마 CREATE 권한도 없고
   // 기존 테이블의 owner 도 아니어서 후속 CREATE TABLE / ALTER TABLE 전부 silent-fail.
   // 결과: sync_log 테이블이 없어서 /api/sync/xerp-inventory 가 snapshot 비활성으로 떨어지고
   //       "live 리프레시 중" 루프 + "⚠️ 동기화 필요" 배지 영구 표시 (ISSUE-2026-04-22-DB-PERMISSION.md).
-  // 해결: 매 부팅마다 onely superuser 로 (a) schema GRANT, (b) 모든 public 테이블 owner 를 sc_erp 로 이전,
+  // 해결: 매 부팅마다 admin superuser 로 (a) schema GRANT, (b) 모든 public 테이블 owner 를 sc_erp 로 이전,
   //       (c) sync_log/inventory_snapshot 을 superuser 권한으로 직접 CREATE — 이후 sc_erp CREATE/ALTER 가 정상화됨.
+  // PG_ADMIN_USER / PG_ADMIN_PASSWORD 가 .env 에 설정되지 않으면 prelude 자체를 skip.
   {
-    const _pguser = envVars.PG_USER || process.env.PG_USER || 'onely';
-    const _pgadminUser = envVars.PG_ADMIN_USER || process.env.PG_ADMIN_USER || 'onely';
-    const _pgadminPass = envVars.PG_ADMIN_PASSWORD || process.env.PG_ADMIN_PASSWORD || 'onely';
-    // 이미 superuser 로 접속 중이면 prelude 자체를 skip (중복 연결 불필요)
-    if (_pguser === _pgadminUser) {
+    const _pguser = envVars.PG_USER || process.env.PG_USER || 'postgres';
+    const _pgadminUser = envVars.PG_ADMIN_USER || process.env.PG_ADMIN_USER || '';
+    const _pgadminPass = envVars.PG_ADMIN_PASSWORD || process.env.PG_ADMIN_PASSWORD || '';
+    // admin 자격증명이 설정되지 않았거나 이미 superuser 로 접속 중이면 prelude 자체를 skip
+    if (!_pgadminUser || !_pgadminPass) {
+      console.log('[prelude] PG_ADMIN_USER/PG_ADMIN_PASSWORD 미설정 — 권한 prelude 생략');
+    } else if (_pguser === _pgadminUser) {
       console.log('[prelude] 접속 계정이 이미 admin(' + _pgadminUser + ') — 권한 prelude 생략');
     } else {
       const { Pool: _PgPool } = require('pg');
-      const _adminHost = envVars.PG_HOST || process.env.PG_HOST || 'onely-postgres';
+      const _adminHost = envVars.PG_HOST || process.env.PG_HOST || 'localhost';
       const _adminPort = parseInt(envVars.PG_PORT || process.env.PG_PORT || '5432');
       const _adminDb = envVars.PG_DATABASE || process.env.PG_DATABASE || 'sc_erp';
       let _adminPool = null;
@@ -1710,7 +1713,7 @@ await db.exec(`
 
 // ── XERP 재고/출고 스냅샷 테이블 (2026-04 재도입) ──
 // 매번 XERP 호출하지 않고 하루 1회 또는 수동 '동기화' 시에만 갱신.
-// 프로덕션 PG onely 유저에 CREATE 권한 없는 경우를 대비해 별도 try/catch.
+// 프로덕션 PG 사용자에 CREATE 권한 없는 경우를 대비해 별도 try/catch.
 try {
   await db.exec(`CREATE TABLE IF NOT EXISTS inventory_snapshot (
     product_code   TEXT PRIMARY KEY,
@@ -1743,7 +1746,7 @@ try {
   console.error('[init] ★ inventory_snapshot 테이블 생성 실패:', e.message);
   console.error('[init] ★ 관리자가 아래 SQL을 PG 에 실행해야 함:');
   console.error('[init] ★  CREATE TABLE inventory_snapshot (...);');
-  console.error('[init] ★  GRANT SELECT,INSERT,UPDATE,DELETE ON inventory_snapshot TO onely;');
+  console.error('[init] ★  GRANT SELECT,INSERT,UPDATE,DELETE ON inventory_snapshot TO <PG_USER>;');
 }
 
 try {
@@ -2097,14 +2100,20 @@ try {
   if (ddPoUpdated.changes > 0) console.log(`[entity-backfill] DD 관련 PO ${ddPoUpdated.changes}건 → legal_entity='dd' 마킹`);
 } catch(e) { console.warn('[entity-backfill] DD 마킹 오류:', e.message); }
 
-// ── DDL 권한 부족 대응: onely 계정으로 legal_entity 컬럼 추가 시도 ──
-// sc_erp 계정은 ALTER TABLE 불가 → onely(superuser)로 별도 연결하여 DDL 실행
+// ── DDL 권한 부족 대응: admin 계정으로 legal_entity 컬럼 추가 시도 ──
+// sc_erp 계정은 ALTER TABLE 불가 → admin(superuser)로 별도 연결하여 DDL 실행
+// PG_ADMIN_USER / PG_ADMIN_PASSWORD 미설정 시 이 블록 전체 skip (보안: 자격증명 하드코딩 금지)
 {
+  const _ddlAdminUser = envVars.PG_ADMIN_USER || process.env.PG_ADMIN_USER || '';
+  const _ddlAdminPass = envVars.PG_ADMIN_PASSWORD || process.env.PG_ADMIN_PASSWORD || '';
+  if (!_ddlAdminUser || !_ddlAdminPass) {
+    console.log('[DDL/admin] PG_ADMIN_USER/PG_ADMIN_PASSWORD 미설정 — DDL 보강 단계 생략');
+  } else {
   const { Pool: _PgPool } = require('pg');
-  const _ddlHost = envVars.PG_HOST || process.env.PG_HOST || 'onely-postgres';
+  const _ddlHost = envVars.PG_HOST || process.env.PG_HOST || 'localhost';
   const _ddlPort = parseInt(envVars.PG_PORT || process.env.PG_PORT || '5432');
   const _ddlDb = envVars.PG_DATABASE || process.env.PG_DATABASE || 'sc_erp';
-  const _ddlPool = new _PgPool({ host: _ddlHost, port: _ddlPort, user: 'onely', password: 'onely', database: _ddlDb, max: 2 });
+  const _ddlPool = new _PgPool({ host: _ddlHost, port: _ddlPort, user: _ddlAdminUser, password: _ddlAdminPass, database: _ddlDb, max: 2 });
   let _ddlOk = 0;
   for (const tbl of _entityTables) {
     try {
@@ -2112,13 +2121,13 @@ try {
       if (!chk.rows.length) {
         await _ddlPool.query(`ALTER TABLE ${tbl} ADD COLUMN legal_entity TEXT DEFAULT 'barunson'`);
         _ddlOk++;
-        console.log(`[DDL/onely] ${tbl}.legal_entity 컬럼 추가 완료`);
+        console.log(`[DDL/admin] ${tbl}.legal_entity 컬럼 추가 완료`);
       }
     } catch(e) { /* 테이블 없거나 이미 존재 */ }
   }
-  if (_ddlOk) console.log(`[DDL/onely] ${_ddlOk}개 테이블에 legal_entity 컬럼 추가`);
+  if (_ddlOk) console.log(`[DDL/admin] ${_ddlOk}개 테이블에 legal_entity 컬럼 추가`);
 
-  // ── sync_log / inventory_snapshot 누락 컬럼 보강 (onely 권한으로) ──
+  // ── sync_log / inventory_snapshot 누락 컬럼 보강 (admin 권한으로) ──
   // 운영 PG 의 이 테이블들이 구 스키마로 만들어져 있으면 INSERT 실패 → snapshot_disabled → "live 리프레시 중" 루프.
   // sc_erp 계정이 ALTER 권한 없어서 이전 보강 코드(db.exec)가 silent-fail 하던 문제 해결.
   const _criticalCols = [
@@ -2143,17 +2152,18 @@ try {
       if (!chk.rows.length) {
         await _ddlPool.query(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${type}`);
         _criticalOk++;
-        console.log(`[DDL/onely] ${tbl}.${col} 컬럼 추가 완료`);
+        console.log(`[DDL/admin] ${tbl}.${col} 컬럼 추가 완료`);
       }
     } catch(e) { /* 테이블 자체가 없거나 이미 존재 — 초기 CREATE 단계가 처리 */ }
   }
-  if (_criticalOk) console.log(`[DDL/onely] sync_log/inventory_snapshot 누락 컬럼 ${_criticalOk}개 보강 완료`);
+  if (_criticalOk) console.log(`[DDL/admin] sync_log/inventory_snapshot 누락 컬럼 ${_criticalOk}개 보강 완료`);
 
   // GRANT 권한도 부여 (sc_erp 계정이 읽기/쓰기 가능하도록)
   try { await _ddlPool.query("GRANT ALL ON ALL TABLES IN SCHEMA public TO sc_erp"); } catch(e) {}
   // 시퀀스도 GRANT (AUTOINCREMENT/SERIAL 쓰는 테이블 INSERT 시 nextval 권한 필요)
   try { await _ddlPool.query("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sc_erp"); } catch(e) {}
   await _ddlPool.end();
+  }
 }
 
 // ── 컬럼 존재 여부 점검 (PG 권한 부족으로 ALTER 실패한 테이블 대응) ──

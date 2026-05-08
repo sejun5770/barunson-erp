@@ -277,10 +277,10 @@ let _usingSqlite = false;
 async function connect(config) {
   try {
     pool = new Pool({
-      host: config.host || process.env.PG_HOST || 'onely-postgres',
+      host: config.host || process.env.PG_HOST || 'localhost',
       port: parseInt(config.port || process.env.PG_PORT || '5432'),
-      user: config.user || process.env.PG_USER || 'onely',
-      password: config.password || process.env.PG_PASSWORD || 'onely',
+      user: config.user || process.env.PG_USER || 'postgres',
+      password: config.password || process.env.PG_PASSWORD || 'postgres',
       database: config.database || process.env.PG_DATABASE || 'sc_erp',
       max: 10,
       idleTimeoutMillis: 30000,
