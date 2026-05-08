@@ -3517,6 +3517,161 @@ await _autoImportPostProcessHistory(
   '코리아패키지'
 ).catch(e => console.warn('[seed] 코리아패키지 import 오류:', e.message));
 
+// 4) 운영 ERP 엑셀 export 스냅샷 (snapshots/*.json) 자동 import
+//    운영 PG 접근 불가한 본인 환경에서 운영 데이터 베이스라인 확보용.
+//    매 부팅 시 멱등 적용 — 신규는 INSERT, 기존은 skip / inventory 는 UPSERT.
+async function _autoImportPOSnapshot() {
+  const filePath = path.join(__dirname, 'snapshots', 'po_status_snapshot.json');
+  if (!fs.existsSync(filePath)) return;
+  let rows;
+  try {
+    rows = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (e) {
+    console.warn('[seed/po-snapshot] 파싱 실패:', e.message);
+    return;
+  }
+  if (!rows.length) return;
+  // 발주서 (po_header) 가 이미 있으면 skip
+  try {
+    const cnt = Number(
+      (await db.prepare('SELECT COUNT(*) AS c FROM po_header').get())?.c || 0
+    );
+    if (cnt > 0) {
+      console.log(`[seed/po-snapshot] po_header 이미 ${cnt}건 — 건너뜀`);
+      return;
+    }
+  } catch (_) {}
+
+  const byPo = {};
+  for (const r of rows) {
+    const num = r['발주번호'];
+    if (!num) continue;
+    if (!byPo[num]) byPo[num] = [];
+    byPo[num].push(r);
+  }
+
+  let headersIns = 0, itemsIns = 0;
+  for (const [poNum, items] of Object.entries(byPo)) {
+    const first = items[0];
+    const totalQty = items.reduce((s, r) => s + (Number(r['발주수량']) || 0), 0);
+    const headerNotes = items.map(r => r['비고']).filter(Boolean).join(' / ');
+    try {
+      await db.prepare(
+        `INSERT OR IGNORE INTO po_header
+           (po_number, po_type, vendor_name, po_date, status, expected_date,
+            total_qty, notes, os_number, origin, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 datetime('now','localtime'), datetime('now','localtime'))`
+      ).run(
+        poNum,
+        first['발주유형'] || '원재료',
+        first['거래처'] || '',
+        first['발주일'] || '',
+        first['상태'] || '대기',
+        first['입고예정일'] || '',
+        totalQty,
+        headerNotes,
+        first['OS번호'] || '',
+        first['생산지'] || ''
+      );
+    } catch (e) {
+      console.warn(`[seed/po-snapshot] header ${poNum} 실패:`, e.message);
+      continue;
+    }
+    const poRow = await db.prepare('SELECT po_id FROM po_header WHERE po_number = ?').get(poNum);
+    if (!poRow) continue;
+    headersIns++;
+    for (const r of items) {
+      try {
+        await db.prepare(
+          `INSERT OR IGNORE INTO po_items
+             (po_id, product_code, brand, process_type, ordered_qty, received_qty,
+              spec, notes, os_number)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          poRow.po_id,
+          r['제품코드'] || '',
+          r['브랜드'] || '',
+          r['공정'] || r['발주유형'] || '',
+          Number(r['발주수량']) || 0,
+          Number(r['입고수량']) || 0,
+          r['원재료용지명'] || '',
+          r['비고'] || '',
+          r['OS번호'] || ''
+        );
+        itemsIns++;
+      } catch (_) {}
+    }
+  }
+  console.log(`[seed/po-snapshot] po_header ${headersIns}건, po_items ${itemsIns}건 적재`);
+}
+
+async function _autoImportInventorySnapshot() {
+  const filePath = path.join(__dirname, 'snapshots', 'inventory_snapshot.json');
+  if (!fs.existsSync(filePath)) return;
+  let rows;
+  try {
+    rows = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (e) {
+    console.warn('[seed/inv-snapshot] 파싱 실패:', e.message);
+    return;
+  }
+  if (!rows.length) return;
+  // 이미 inventory_snapshot 에 충분한 데이터가 있으면 skip — XERP 동기화 결과 보존
+  try {
+    const cnt = Number(
+      (await db.prepare('SELECT COUNT(*) AS c FROM inventory_snapshot').get())?.c || 0
+    );
+    if (cnt >= 100) {
+      console.log(`[seed/inv-snapshot] inventory_snapshot 이미 ${cnt}건 — 건너뜀`);
+      return;
+    }
+  } catch (_) {}
+
+  const ENTITY_MAP = { '바른컴퍼니': 'barunson', '디디': 'dd', '디얼디어': 'dd' };
+  const SITE_MAP = { 'barunson': 'BK10', 'dd': 'BHC2' };
+
+  let inserted = 0, failed = 0;
+  for (const r of rows) {
+    const code = String(r['제품코드'] || '').trim();
+    if (!code) continue;
+    try {
+      const entity = ENTITY_MAP[r['법인']] || 'barunson';
+      const siteCode = SITE_MAP[entity] || 'BK10';
+      const monthly = Number(r['월출고']) || 0;
+      const daily = Number(r['일평균']) || 0;
+      const stock = Number(r['가용재고']) || 0;
+      await db.prepare(
+        `INSERT INTO inventory_snapshot
+           (product_code, legal_entity, site_code, current_stock, monthly_out,
+            daily_out, total_3m, item_name, synced_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+         ON CONFLICT(product_code) DO UPDATE SET
+           legal_entity = excluded.legal_entity,
+           site_code    = excluded.site_code,
+           current_stock = excluded.current_stock,
+           monthly_out  = excluded.monthly_out,
+           daily_out    = excluded.daily_out,
+           total_3m     = excluded.total_3m,
+           item_name    = excluded.item_name,
+           synced_at    = excluded.synced_at`
+      ).run(code, entity, siteCode, stock, monthly, daily, monthly * 3, String(r['품목명'] || '').trim());
+      inserted++;
+    } catch (e) {
+      failed++;
+      if (failed <= 2) console.warn(`[seed/inv-snapshot] ${code} 실패:`, e.message);
+    }
+  }
+  console.log(`[seed/inv-snapshot] inventory_snapshot ${inserted}건 처리 (실패 ${failed})`);
+}
+
+await _autoImportPOSnapshot().catch(e =>
+  console.warn('[seed] PO snapshot 오류:', e.message)
+);
+await _autoImportInventorySnapshot().catch(e =>
+  console.warn('[seed] inventory snapshot 오류:', e.message)
+);
+
 // ── 공지/게시판 테이블 ──
 await db.exec(`CREATE TABLE IF NOT EXISTS notices (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
