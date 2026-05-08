@@ -30,13 +30,13 @@ function apiCall(method, path, body) {
 (async () => {
   // Generate token
   const crypto = require('crypto');
-  const token = crypto.createHash('sha256').update('seungchan.back@barunn.net' + 'barun-company-portal-2026').digest('hex').slice(0, 16);
+  const token = crypto.createHash('sha256').update('sejun.song@barunn.net' + 'barun-company-portal-2026').digest('hex').slice(0, 16);
 
   // Step 4: 원재료 업체 발주 확인
   console.log('\n--- Step 4: 원재료 업체 발주 확인 ---');
   const confirmResult = await apiCall('PATCH', '/api/vendor-portal/po/6', {
     action: 'confirm',
-    email: 'seungchan.back@barunn.net',
+    email: 'sejun.song@barunn.net',
     token: token
   });
   console.log('Result:', JSON.stringify(confirmResult));
@@ -70,7 +70,7 @@ function apiCall(method, path, body) {
 
   const shipResult2 = await apiCall('PATCH', '/api/vendor-portal/po/6', {
     action: 'ship',
-    email: 'seungchan.back@barunn.net',
+    email: 'sejun.song@barunn.net',
     token: token
   });
   console.log('Result:', JSON.stringify(shipResult2));

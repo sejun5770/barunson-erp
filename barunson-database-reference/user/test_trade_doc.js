@@ -1,6 +1,6 @@
 const http = require('http');
 const crypto = require('crypto');
-const token = crypto.createHash('sha256').update('seungchan.back@barunn.net' + 'barun-company-portal-2026').digest('hex').slice(0,16);
+const token = crypto.createHash('sha256').update('sejun.song@barunn.net' + 'barun-company-portal-2026').digest('hex').slice(0,16);
 
 function api(method, path, body) {
   return new Promise((resolve, reject) => {
@@ -40,7 +40,7 @@ function api(method, path, body) {
 
   // 3. 업체 포털에서 거래명세서 조회
   console.log('\n--- 3. 업체 포털에서 거래명세서 조회 ---');
-  const tradeResp = await api('GET', `/api/vendor-portal/trade-doc?po_id=${poId}&email=seungchan.back@barunn.net&token=${token}`);
+  const tradeResp = await api('GET', `/api/vendor-portal/trade-doc?po_id=${poId}&email=sejun.song@barunn.net&token=${token}`);
   console.log(`  조회 결과: ${tradeResp.ok ? '성공' : '실패'}`);
   if (tradeResp.data) console.log(`  doc_id: ${tradeResp.data.id}, items: ${tradeResp.data.items?.length}개`);
 
@@ -48,7 +48,7 @@ function api(method, path, body) {
   console.log('\n--- 4. 업체 단가 수정 (0 → 1200) + 메모 ---');
   const updateResp = await api('POST', '/api/vendor-portal/update-trade-doc', {
     doc_id: doc.id,
-    email: 'seungchan.back@barunn.net',
+    email: 'sejun.song@barunn.net',
     token: token,
     modified_items: [{idx:0, unit_price:1200, qty:20000}],
     memo: '3월 단가 인상분 반영'

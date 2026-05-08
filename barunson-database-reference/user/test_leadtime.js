@@ -1,6 +1,6 @@
 const http = require('http');
 const crypto = require('crypto');
-const token = crypto.createHash('sha256').update('seungchan.back@barunn.net' + 'barun-company-portal-2026').digest('hex').slice(0,16);
+const token = crypto.createHash('sha256').update('sejun.song@barunn.net' + 'barun-company-portal-2026').digest('hex').slice(0,16);
 
 function api(method, path, body) {
   return new Promise((resolve, reject) => {
@@ -13,7 +13,7 @@ function api(method, path, body) {
 
 (async () => {
   const vn = encodeURIComponent('코리아패키지');
-  const em = encodeURIComponent('seungchan.back@barunn.net');
+  const em = encodeURIComponent('sejun.song@barunn.net');
 
   console.log('--- 1. GET lead time (initial) ---');
   const r1 = await api('GET', `/api/vendor-portal/lead-time?email=${em}&token=${token}&vendor_name=${vn}`);
@@ -22,7 +22,7 @@ function api(method, path, body) {
 
   console.log('\n--- 2. POST save lead times ---');
   const r2 = await api('POST', '/api/vendor-portal/lead-time', {
-    email:'seungchan.back@barunn.net', token, vendor_name:'코리아패키지',
+    email:'sejun.song@barunn.net', token, vendor_name:'코리아패키지',
     lead_times: [
       {process_type:'코팅', default_days:2, adjusted_days:3, adjusted_reason:'코팅기 수리중'},
       {process_type:'박', default_days:2, adjusted_days:4, adjusted_reason:'금박 특수처리'},

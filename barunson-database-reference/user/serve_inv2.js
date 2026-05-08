@@ -530,8 +530,10 @@ async function cancelInGoogleSheet(productCodes, orderDate) {
 }
 
 // ── 이메일 발송 (nodemailer SMTP + Apps Script 폴백) ────────────────
-const PORTAL_SECRET = 'barun-company-portal-2026';
-const TEST_EMAIL = 'seungchan.back@barunn.net'; // 테스트용 — 모든 이메일 여기로
+// PORTAL_SECRET: 거래처 포털 토큰 시드. .env 의 PORTAL_SECRET 우선, 미설정 시 코드 fallback.
+// 운영에서는 반드시 .env 로 설정하고 회전 가능하도록 관리할 것.
+const PORTAL_SECRET = envVars.PORTAL_SECRET || process.env.PORTAL_SECRET || 'change-me-in-env-portal-secret';
+const TEST_EMAIL = envVars.ADMIN_EMAIL || process.env.ADMIN_EMAIL || 'sejun.song@barunn.net'; // 테스트용 — 모든 이메일 여기로
 const BASE_URL = envVars.BASE_URL || process.env.BASE_URL || (() => {
   const ni = require('os').networkInterfaces();
   for (const addrs of Object.values(ni)) {
@@ -1048,7 +1050,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
         </div>
         <p style="margin-top:14px;color:#888;font-size:11px;text-align:center">
           ※ 본 메일은 ${SENDER_COMPANY} ERP에서 자동 발송되었습니다.<br>
-          문의: seungchan.back@barunn.net
+          문의: ${TEST_EMAIL}
         </p>
       </div>
     </div>`;
@@ -3904,23 +3906,27 @@ try {
 }
 const JWT_EXPIRES = '24h';
 
-// 마스터 관리자 계정 (seungchan.back@barunn.net)
-const masterEmail = 'seungchan.back@barunn.net';
+// 마스터 관리자 계정 (.env 의 ADMIN_EMAIL / ADMIN_USERNAME / ADMIN_DISPLAY_NAME / ADMIN_PASSWORD)
+// 미설정 시 default 사용. 운영에서는 .env 로 본인 정보를 설정할 것.
+const masterEmail = envVars.ADMIN_EMAIL || process.env.ADMIN_EMAIL || 'sejun.song@barunn.net';
+const masterUsername = envVars.ADMIN_USERNAME || process.env.ADMIN_USERNAME || 'sejun.song';
+const masterDisplay = envVars.ADMIN_DISPLAY_NAME || process.env.ADMIN_DISPLAY_NAME || 'sejun.song';
+const masterPassword = envVars.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || '1234';
 const masterUser = await db.prepare("SELECT user_id FROM users WHERE email = ?").get(masterEmail);
 if (!masterUser) {
-  const hash = bcrypt.hashSync('1234', 10);
+  const hash = bcrypt.hashSync(masterPassword, 10);
   const oldAdmin = await db.prepare("SELECT user_id FROM users WHERE username = 'admin'").get();
   if (oldAdmin) {
     await db.prepare("UPDATE users SET username = ?, email = ?, password_hash = ?, display_name = ?, role = 'admin' WHERE user_id = ?")
-      .run('seungchan.back', masterEmail, hash, '백승찬', oldAdmin.user_id);
+      .run(masterUsername, masterEmail, hash, masterDisplay, oldAdmin.user_id);
   } else {
     await db.prepare("INSERT INTO users (username, password_hash, display_name, role, email) VALUES (?, ?, ?, ?, ?)")
-      .run('seungchan.back', hash, '백승찬', 'admin', masterEmail);
+      .run(masterUsername, hash, masterDisplay, 'admin', masterEmail);
   }
-  console.log('✅ 마스터 계정: seungchan.back@barunn.net / 1234');
+  console.log(`✅ 마스터 계정: ${masterEmail} / ${masterPassword === '1234' ? '1234 (기본값 — 변경 권장)' : '(.env 설정값)'}`);
 } else {
   // 이미 존재하면 admin 역할 보장 + username 통일
-  await db.prepare("UPDATE users SET role = 'admin', username = 'seungchan.back' WHERE user_id = ?").run(masterUser.user_id);
+  await db.prepare("UPDATE users SET role = 'admin', username = ? WHERE user_id = ?").run(masterUsername, masterUser.user_id);
 }
 
 // 공용 관리자 계정 (admin / 1234) — 다수 사용자 공용 접속용
@@ -3950,14 +3956,14 @@ if (!adminExisting) {
 // 마스터 계정 비밀번호 보장 (seed.db에서 복원 시 비밀번호가 다를 수 있으므로)
 const masterCheck = await db.prepare("SELECT user_id, password_hash FROM users WHERE email = ?").get(masterEmail);
 if (masterCheck && masterCheck.password_hash) {
-  const defaultPw = '1234';
+  const defaultPw = masterPassword;
   try {
     if (!bcrypt.compareSync(defaultPw, masterCheck.password_hash)) {
       // 비밀번호가 기본값이 아니면 유지 (사용자가 변경했을 수 있음)
     }
   } catch(e) { console.warn('bcrypt 비교 실패 (무시):', e.message); }
-  // username이 admin이면 seungchan.back으로 통일
-  await db.prepare("UPDATE users SET username = 'seungchan.back' WHERE user_id = ? AND username = 'admin'").run(masterCheck.user_id);
+  // username이 admin이면 마스터 username 으로 통일
+  await db.prepare("UPDATE users SET username = ? WHERE user_id = ? AND username = 'admin'").run(masterUsername, masterCheck.user_id);
 }
 
 // JWT 유틸
@@ -22137,7 +22143,8 @@ async function runDailyPOSummary() {
   msg += `  🔴 긴급 (14일 이하): *${urgent}개*\n`;
   msg += `  🟡 위험 (21일 이하): *${warning}개*\n`;
   msg += `  🟢 안전: ${Math.max(totalEnabled - urgent - warning, 0)}개\n`;
-  msg += `\n<https://docker-manager.barunsoncard.com/c/s-c-erp/|ERP 바로가기>`;
+  const _erpUrl = envVars.PUBLIC_BASE_URL || process.env.PUBLIC_BASE_URL || BASE_URL;
+  msg += `\n<${_erpUrl}|ERP 바로가기>`;
 
   await sendSlack(msg);
   console.log('[일일 발주 요약] Slack 전송 완료');

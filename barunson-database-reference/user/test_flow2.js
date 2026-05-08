@@ -2,7 +2,7 @@ const db = require('better-sqlite3')('./orders.db');
 const http = require('http');
 const crypto = require('crypto');
 
-const token = crypto.createHash('sha256').update('seungchan.back@barunn.net' + 'barun-company-portal-2026').digest('hex').slice(0, 16);
+const token = crypto.createHash('sha256').update('sejun.song@barunn.net' + 'barun-company-portal-2026').digest('hex').slice(0, 16);
 
 function api(method, path, body) {
   return new Promise((resolve, reject) => {
@@ -34,7 +34,7 @@ function api(method, path, body) {
 
   // Step 1: 원재료 업체 확인
   console.log('--- Step 1: 원재료(대한통상) 발주 확인 ---');
-  await api('PATCH', '/api/vendor-portal/po/6', { action: 'confirm', email: 'seungchan.back@barunn.net', token });
+  await api('PATCH', '/api/vendor-portal/po/6', { action: 'confirm', email: 'sejun.song@barunn.net', token });
   let s = check();
   console.log(`  status:${s.status} | mat:${s.material_status} | proc:${s.process_status}`);
   console.log(`  기대: confirmed | confirmed | waiting → ${s.material_status === 'confirmed' && s.process_status === 'waiting' ? '✅' : '❌'}`);

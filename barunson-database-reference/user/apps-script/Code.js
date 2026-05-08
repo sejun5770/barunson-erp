@@ -206,7 +206,7 @@ function doGet(e) {
 // 권한 승인용 테스트 함수 — 이 함수를 실행하면 메일 권한 팝업이 뜹니다
 function testMailAuth() {
   MailApp.sendEmail({
-    to: "seungchan.back@barunn.net",
+    to: "sejun.song@barunn.net",
     subject: "[테스트] 바른컴퍼니 발주시스템 메일 권한 확인",
     htmlBody: "<h2>메일 발송 권한이 정상 승인되었습니다!</h2><p>이 메일이 수신되면 발주 이메일 발송 기능이 정상 작동합니다.</p>"
   });

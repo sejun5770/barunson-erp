@@ -38,7 +38,7 @@
 
 ### 1.3 접속 주소
 
-- **운영**: https://docker-manager.barunsoncard.com/c/s-c-erp/
+- **운영**: 별도 배포 환경 — `.env` 의 `PUBLIC_BASE_URL` 참조
 - **브라우저**: Chrome, Edge 권장 (Safari, Firefox도 가능)
 
 ---
@@ -50,7 +50,7 @@
 | 계정 | 비밀번호 | 용도 |
 |------|----------|------|
 | `admin` | `1234` | 공용 관리자 (팀 전체 공유) |
-| `seungchan.back` | `1234` | 시스템 마스터 (백승찬) |
+| `sejun.song` | `1234` | 시스템 마스터 (sejun.song@barunn.net) |
 | 개인 Google 계정 | - | Google 로그인 |
 
 ### 2.2 로그인 방법
@@ -364,7 +364,7 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
 
 1. 우측 상단 🔔 알림 → 연결 상태 확인
 2. F12 → Console 탭 → 에러 메시지 확인
-3. 관리자(백승찬)에게 문의
+3. 관리자(sejun.song@barunn.net)에게 문의
 
 ### 12.2 데이터가 이상할 때
 
@@ -378,7 +378,7 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
 
 ### 12.4 긴급 문의
 
-- 시스템 담당: **백승찬** (`seungchan.back@barunn.net`)
+- 시스템 담당: `sejun.song@barunn.net`
 - 서버 에러 시 Slack `#erp-alerts` 채널에 자동 알림 (설정 시)
 
 ---
@@ -397,5 +397,5 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
 
 ---
 
-**📧 문의**: seungchan.back@barunn.net
+**📧 문의**: sejun.song@barunn.net
 **🔗 버전 이력**: [CHANGELOG.md](CHANGELOG.md)
