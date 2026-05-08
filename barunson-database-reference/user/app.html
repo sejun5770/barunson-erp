@@ -2406,7 +2406,8 @@ function closeMegaMenu() { /* no-op */ }
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <div style="font-weight:700;font-size:13px;color:#0f172a">📦 데이터 적재 (관리자 전용)</div>
       <div style="flex:1"></div>
-      <button class="btn btn-sm" onclick="inv2Backfill()" style="background:#dc2626;color:#fff;font-size:12px">전체 재적재 (2022~어제)</button>
+      <button class="btn btn-sm" onclick="inv2BackfillRecent()" style="background:#16a34a;color:#fff;font-size:12px" title="첫 테스트용 — 최근 1개월만 적재해서 동작 확인">최근 1개월만 적재 (테스트)</button>
+      <button class="btn btn-sm" onclick="inv2Backfill()" style="background:#dc2626;color:#fff;font-size:12px" title="2022-01-01 부터 어제까지 — 수십 분 ~ 수 시간 소요">전체 재적재 (2022~어제)</button>
       <button class="btn btn-sm" onclick="inv2Sync()" style="background:#2563eb;color:#fff;font-size:12px">증분 동기화</button>
       <button class="btn btn-sm" onclick="inv2RefreshJobs()" style="background:#64748b;color:#fff;font-size:12px">작업 새로고침</button>
     </div>
@@ -28360,7 +28361,7 @@ function renderInv2() {
 }
 
 async function inv2Backfill() {
-  if (!confirm('2022-01-01 부터 어제까지의 XERP 데이터를 우리 DB에 전체 재적재합니다.\n\n• 입출고/매출 수백만 행을 월 단위로 백그라운드 처리합니다.\n• 진행 중에도 다른 작업은 가능합니다.\n• 같은 데이터는 멱등성으로 중복되지 않습니다.\n\n진행하시겠습니까?')) return;
+  if (!confirm('2022-01-01 부터 어제까지의 XERP 데이터를 우리 DB에 전체 재적재합니다.\n\n• 입출고/매출 수백만 행을 월 단위로 백그라운드 처리합니다.\n• 수십 분 ~ 수 시간 걸릴 수 있습니다.\n• 진행 중에도 다른 작업은 가능합니다.\n• 같은 데이터는 멱등성으로 중복되지 않습니다.\n\n진행하시겠습니까?')) return;
   try {
     var r = await authFetch('/api/inv2/backfill', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({}) });
     var json = await r.json();
@@ -28368,6 +28369,26 @@ async function inv2Backfill() {
     whToast('백필 작업 ' + (json.data.jobs||[]).length + '건 등록됨');
     inv2StartJobsPolling();
   } catch (e) { whToast('백필 등록 실패: ' + e.message, 'error'); }
+}
+
+// 첫 테스트용 — 최근 1개월만 적재 (수 분 내 완료)
+async function inv2BackfillRecent() {
+  if (!confirm('첫 테스트용으로 최근 1개월 (지난 30일) XERP 데이터만 우리 DB에 적재합니다.\n\n• 빠르게 동작 확인 후, 정상이면 전체 재적재를 실행하세요.\n• 발주 입고처리 → 재고현황2 반영 흐름은 1개월 데이터로도 충분히 테스트 가능합니다.\n\n진행하시겠습니까?')) return;
+  var today = new Date();
+  var yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
+  var monthAgo = new Date(today); monthAgo.setMonth(monthAgo.getMonth() - 1);
+  function ymd(d){ return d.getFullYear() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0'); }
+  try {
+    var r = await authFetch('/api/inv2/backfill', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ start: ymd(monthAgo), end: ymd(yesterday) })
+    });
+    var json = await r.json();
+    if (!json.ok) throw new Error(json.error || '백필 등록 실패');
+    whToast('테스트 백필 ' + (json.data.jobs||[]).length + '건 등록됨 (' + ymd(monthAgo) + '~' + ymd(yesterday) + ')');
+    inv2StartJobsPolling();
+  } catch (e) { whToast('테스트 백필 실패: ' + e.message, 'error'); }
 }
 
 async function inv2Sync() {
