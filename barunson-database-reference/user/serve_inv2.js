@@ -955,7 +955,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <th style="${thStyle}">원재료명</th>
       <th style="${thStyle}">용지 규격</th>
       <th style="${thStyle};color:#c2410c">다음 입고처</th>
-      <th style="${thStyle}">발주수량(R)</th>
+      <th style="${thStyle}">발주수량(낱개)</th>
       <th style="${thStyle}">절</th>
     </tr>`;
     tableRows = enrichedItems.map(it => `<tr>
@@ -964,7 +964,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <td style="${tdStyle}">${it.material_name || ''}</td>
       <td style="${tdStyle}">${it.spec || ''}</td>
       <td style="${tdStyle};color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
-      <td style="${tdStyle};font-weight:700;font-size:15px">${it.ream_qty || 0}R</td>
+      <td style="${tdStyle};font-weight:700;font-size:15px">${(it.ordered_qty || 0).toLocaleString()}매</td>
       <td style="${tdStyle}">${it.cut_spec || ''}</td>
     </tr>`).join('');
   } else {
@@ -1133,7 +1133,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th>원재료명${isChinaVendor ? '<br><span style="font-weight:400;color:#999">材料名称</span>' : ''}</th>
           <th>용지 규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">纸张规格</span>' : ''}</th>
           <th style="color:#c2410c">다음 입고처${isChinaVendor ? '<br><span style="font-weight:400;color:#999">下一入库处</span>' : ''}</th>
-          <th class="right">발주수량(R)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
+          <th class="right">발주수량(낱개)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
           <th class="center">절</th>
         </tr>` : `<tr>
           <th style="width:30px">#</th>
@@ -1157,7 +1157,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td>${it.material_name || ''}</td>
               <td>${it.spec || ''}</td>
               <td style="color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
-              <td class="right bold" style="font-size:14px">${it.ream_qty || 0}R</td>
+              <td class="right bold" style="font-size:14px">${(it.ordered_qty || 0).toLocaleString()}매</td>
               <td class="center">${it.cut_spec || ''}</td>
             </tr>`).join('');
           }
@@ -1201,7 +1201,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
         <tr class="total-row">
           <td colspan="${isRawMaterial ? 6 : 5}" style="text-align:right;border:1px solid #ccc">합계 ${isChinaVendor ? '/ 合计' : ''}</td>
           ${isRawMaterial ? `
-            <td class="right" style="border:1px solid #ccc;font-size:14px">${totalReams % 1 === 0 ? totalReams : totalReams.toFixed(1)}R</td>
+            <td class="right" style="border:1px solid #ccc;font-size:14px">${totalQty.toLocaleString()}매</td>
             <td style="border:1px solid #ccc"></td>
           ` : `
             <td class="right" style="border:1px solid #ccc">${totalReams % 1 === 0 ? totalReams : totalReams.toFixed(1)}R</td>
@@ -1272,7 +1272,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     aoa.push([]);
     // 품목 헤더 + 데이터 (이메일 본문 표와 동일 컬럼 구성)
     if (isRawMaterial) {
-      aoa.push(['#', '제품코드', '원재료코드', '원재료명', '용지 규격', '다음 입고처', '발주수량(R)', '절']);
+      aoa.push(['#', '제품코드', '원재료코드', '원재료명', '용지 규격', '다음 입고처', '발주수량(낱개)', '절']);
       enrichedItems.forEach((it, i) => {
         aoa.push([
           i + 1,
@@ -1281,7 +1281,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           it.material_name || '',
           it.spec || '',
           it.item_chain || '',
-          (it.ream_qty != null ? it.ream_qty : 0) + 'R',
+          it.ordered_qty || 0,
           it.cut_spec || ''
         ]);
       });
