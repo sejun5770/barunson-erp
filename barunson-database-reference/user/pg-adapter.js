@@ -296,8 +296,26 @@ async function connect(config) {
     console.log('[pg-adapter] SQLite 폴백 모드로 전환 (orders.db)');
     try { if (pool) await pool.end(); } catch(_) {}
     const path = require('path');
+    const fs = require('fs');
     const Database = require('better-sqlite3');
-    const dbPath = path.join(__dirname, 'orders.db');
+    // DATA_DIR 우선 (Docker 영속 볼륨), 없으면 __dirname 사용
+    const dataDir = process.env.DATA_DIR || __dirname;
+    try { fs.mkdirSync(dataDir, { recursive: true }); } catch(_) {}
+    const dbPath = path.join(dataDir, 'orders.db');
+    // 첫 부팅 시 seed.db 가 있으면 복사 (거래처/품목/사용자 시드 데이터)
+    if (!fs.existsSync(dbPath)) {
+      const seedPath = path.join(__dirname, 'seed.db');
+      if (fs.existsSync(seedPath)) {
+        try {
+          fs.copyFileSync(seedPath, dbPath);
+          console.log(`[pg-adapter] seed.db → ${dbPath} 복사 완료 (시드 데이터 포함)`);
+        } catch (copyErr) {
+          console.warn('[pg-adapter] seed.db 복사 실패 (빈 DB 로 시작):', copyErr.message);
+        }
+      } else {
+        console.log('[pg-adapter] seed.db 없음 — 빈 SQLite DB 로 시작');
+      }
+    }
     const sqliteDb = new Database(dbPath);
     sqliteDb.pragma('journal_mode = WAL');
     sqliteDb.pragma('busy_timeout = 5000');

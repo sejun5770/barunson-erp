@@ -2056,10 +2056,16 @@ const _entityTables = [
 ];
 // 1st pass: 이 시점에 이미 존재하는 테이블만 대상.
 // trade_document/defects/batch_master/work_orders 는 뒤에서 CREATE 되므로 skip — 뒤의 2nd pass 에서 처리.
-// 존재 체크 없이 ALTER 하면 pg-adapter 가 "relation does not exist" 를 ERROR 레벨로 로그해 노이즈.
+// PG: information_schema 사용. SQLite: sqlite_master 사용.
+const _hasInfoSchema = !db.usingSqlite;
 for (const tbl of _entityTables) {
   try {
-    const exists = await db.prepare("SELECT 1 AS x FROM information_schema.tables WHERE table_name=?").get(tbl);
+    let exists;
+    if (_hasInfoSchema) {
+      exists = await db.prepare("SELECT 1 AS x FROM information_schema.tables WHERE table_name=?").get(tbl);
+    } else {
+      exists = await db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type='table' AND name=?").get(tbl);
+    }
     if (!exists) continue;
     await db.exec(`ALTER TABLE ${tbl} ADD COLUMN legal_entity TEXT DEFAULT 'barunson'`);
   } catch(_) {}
