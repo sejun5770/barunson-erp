@@ -1,42 +1,9 @@
-FROM node:20-slim
-
-# Python + MSSQL 드라이버 + Chromium (PDF 생성용) 설치
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
-    freetds-dev gcc g++ \
-    chromium \
-    fonts-noto-cjk \
-    && rm -rf /var/lib/apt/lists/*
-
-# Chromium 경로 설정 (puppeteer-core용)
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV PUPPETEER_SKIP_DOWNLOAD=true
-
+FROM node:20-alpine
 WORKDIR /app
-
-# Python 패키지 설치
-COPY barunson-database-reference/user/requirements.txt ./
-RUN pip3 install --break-system-packages --no-cache-dir -r requirements.txt
-
-# Node 의존성 설치
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
-
-# 캐시 무효화 (빌드마다 다른 값)
-ARG CACHE_BUST=20260424-dd-resync-v2-creddiag
-
-# 앱 파일 복사
-RUN echo "build:$CACHE_BUST" > /app/.buildstamp
+COPY package*.json ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY . .
-
-# 데이터/업로드 디렉토리 생성
-RUN mkdir -p /app/data /app/uploads/invoices
-
-# 환경변수 기본값
-ENV PORT=12026
-ENV DATA_DIR=/app/data
-ENV UPLOAD_DIR=/app/uploads
-
-EXPOSE 12026
-
-CMD ["npm", "start"]
+RUN npx prisma generate 2>/dev/null || true
+RUN npm run build --if-present
+EXPOSE 3000
+CMD if [ -f prisma/schema.prisma ]; then DB_URL="${DATABASE_URL:-file:/app/data/database.db}"; sed -i '/^\s*url\s*=/d' prisma/schema.prisma; npx prisma db push --url "$DB_URL" --accept-data-loss 2>/dev/null || true; if [ -f prisma/seed.sql ]; then apk add --no-cache sqlite 2>/dev/null; sqlite3 "$(echo $DB_URL | sed s/file://)" < prisma/seed.sql 2>/dev/null || true; fi; fi && npm start
