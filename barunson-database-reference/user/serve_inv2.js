@@ -3917,6 +3917,8 @@ const ALL_PAGES = [
   { id: 'inventory', name: '재고현황', group: '재고' },
   { id: 'warehouse', name: '창고별 재고', group: '재고' },
   { id: 'shipments', name: '입출고 현황', group: '재고' },
+  { id: 'shipment-status', name: '출고현황', group: '재고' },
+  { id: 'sales-status', name: '판매현황', group: '판매' },
   // 생산
   { id: 'production-req', name: '생산요청', group: '생산' },
   { id: 'production-stock', name: '생산재고', group: '생산' },
@@ -3985,23 +3987,23 @@ const ALL_PAGES = [
 // 역할 기본 권한 맵 (개별 permissions가 없을 때 fallback)
 const ROLE_PERMISSIONS = {
   admin: ['*'],  // 모든 권한
-  purchase: ['dashboard', 'inventory', 'warehouse', 'shipments', 'inventory-ledger', 'auto-order', 'create-po', 'po-list', 'os-register',
+  purchase: ['dashboard', 'inventory', 'warehouse', 'shipments', 'shipment-status', 'inventory-ledger', 'auto-order', 'create-po', 'po-list', 'os-register',
     'delivery-schedule', 'receipts', 'invoices', 'notes', 'product-mgmt', 'bom', 'mrp', 'post-process', 'defects',
-    'closing', 'report', 'po-mgmt', 'china-shipment', 'mat-purchase', 'tasks', 'meeting-log', 'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'cost-mgmt', 'board', 'audit-log', 'exec-dashboard', 'customer-orders', 'shipping',
+    'closing', 'report', 'po-mgmt', 'china-shipment', 'mat-purchase', 'tasks', 'meeting-log', 'sales', 'sales-status', 'sales-barun', 'sales-dd', 'sales-gift', 'cost-mgmt', 'board', 'audit-log', 'exec-dashboard', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'work-order', 'lot-tracking',
     'approval', 'sales-order', 'budget', 'notification', 'safety-stock', 'cycle-count', 'mfg-cost', 'procurement', 'vendor-performance'],
   production: ['dashboard', 'inventory', 'warehouse', 'shipments', 'inventory-ledger', 'production-req', 'mrp', 'bom', 'post-process', 'defects', 'product-mgmt', 'notes', 'production-stock', 'tasks', 'approval', 'lot-tracking',
     'process-routing', 'equipment', 'mfg-cost', 'safety-stock', 'work-order'],
-  logistics: ['dashboard', 'inventory', 'warehouse', 'shipments', 'inventory-ledger', 'receipts', 'delivery-schedule', 'shipping', 'lot-tracking',
+  logistics: ['dashboard', 'inventory', 'warehouse', 'shipments', 'shipment-status', 'inventory-ledger', 'receipts', 'delivery-schedule', 'shipping', 'lot-tracking',
     'safety-stock', 'cycle-count', 'barcode', 'tasks', 'notes', 'board', 'notification', 'customer-orders'],
-  sales_team: ['dashboard', 'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'sales-order', 'customer-orders', 'shipping',
-    'inventory', 'warehouse', 'shipments', 'ar-ap', 'invoices', 'tasks', 'notes', 'board', 'notification', 'exec-dashboard', 'analytics', 'report'],
+  sales_team: ['dashboard', 'sales', 'sales-status', 'sales-barun', 'sales-dd', 'sales-gift', 'sales-order', 'customer-orders', 'shipping',
+    'inventory', 'warehouse', 'shipments', 'shipment-status', 'ar-ap', 'invoices', 'tasks', 'notes', 'board', 'notification', 'exec-dashboard', 'analytics', 'report'],
   accounting: ['dashboard', 'invoices', 'mat-purchase', 'cost-mgmt', 'closing', 'chart-of-accounts', 'journal', 'general-ledger',
     'trial-balance', 'financial-statements', 'ar-ap', 'tax-invoice', 'budget', 'mfg-cost', 'vat-report', 'journal-auto',
-    'sales', 'sales-barun', 'sales-dd', 'sales-gift', 'tasks', 'notes', 'board', 'notification', 'approval', 'exec-dashboard'],
+    'sales', 'sales-status', 'sales-barun', 'sales-dd', 'sales-gift', 'tasks', 'notes', 'board', 'notification', 'approval', 'exec-dashboard'],
   packaging: ['dashboard', 'inventory', 'warehouse', 'shipments', 'production-req', 'production-stock', 'work-order', 'bom',
     'post-process', 'lot-tracking', 'receipts', 'tasks', 'notes', 'board', 'notification'],
-  viewer: ['dashboard', 'inventory', 'warehouse', 'shipments', 'po-list', 'notes', 'sales', 'sales-barun', 'sales-gift', 'cost-mgmt', 'board', 'customer-orders', 'shipping',
+  viewer: ['dashboard', 'inventory', 'warehouse', 'shipments', 'shipment-status', 'po-list', 'notes', 'sales', 'sales-status', 'sales-barun', 'sales-gift', 'cost-mgmt', 'board', 'customer-orders', 'shipping',
     'chart-of-accounts', 'journal', 'general-ledger', 'trial-balance', 'financial-statements', 'ar-ap'],
 };
 
@@ -16933,6 +16935,308 @@ async function handleRequest(req, res) {
     }
     result.period = { start: startParam, end: endParam };
     ok(res, result); return;
+  }
+
+  // ── GET /api/sales/pivot ─ 판매현황 대시보드 (연도×월×제품 피벗) ──
+  // 쿼리: years=2024,2025,2026 (기본: 최근 3년) / source=all|xerp|dd|gift / limit=100 / search=
+  if (pathname === '/api/sales/pivot' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
+    const now = new Date();
+    const yearsParam = (parsed.searchParams.get('years') || '').trim();
+    let years = yearsParam ? yearsParam.split(',').map(s => parseInt(s.trim(), 10)).filter(y => y >= 2000 && y <= 2100) : null;
+    if (!years || years.length === 0) {
+      const cy = now.getFullYear(); years = [cy - 2, cy - 1, cy];
+    }
+    years = [...new Set(years)].sort();
+    const source = parsed.searchParams.get('source') || 'all';
+    const limit = Math.min(parseInt(parsed.searchParams.get('limit') || '100', 10) || 100, 500);
+    const search = (parsed.searchParams.get('search') || '').trim().toLowerCase();
+    const yMin = years[0], yMax = years[years.length - 1];
+    const startYMD = String(yMin) + '0101';
+    const endYMD = String(yMax) + '1231';
+
+    const productMap = {}; // code -> { code, name, brand, source, monthly: { 'YYYY-MM': {qty, sales} } }
+    const monthlyTotals = {}; // 'YYYY-MM' -> {qty, sales}
+    const sources = {};
+    const xerpCodes = new Set();
+
+    function addRow(code, qty, sales, ym, src) {
+      if (!code) return;
+      if (!productMap[code]) productMap[code] = { code, name: code, brand: '', source: src, monthly: {} };
+      const m = productMap[code].monthly;
+      if (!m[ym]) m[ym] = { qty: 0, sales: 0 };
+      m[ym].qty += Number(qty || 0);
+      m[ym].sales += Number(sales || 0);
+      if (!monthlyTotals[ym]) monthlyTotals[ym] = { qty: 0, sales: 0 };
+      monthlyTotals[ym].qty += Number(qty || 0);
+      monthlyTotals[ym].sales += Number(sales || 0);
+    }
+
+    // XERP (ERP_SalesData) — 바른손/더기프트 모두 포함
+    if (source === 'all' || source === 'xerp' || source === 'gift') {
+      try {
+        const pool = await ensureXerpPool();
+        if (!pool) throw new Error('XERP pool unavailable');
+        const chunks = getMonthChunks(startYMD, endYMD);
+        for (const chunk of chunks) {
+          const r = await pool.request()
+            .input('s', sql.NVarChar(16), chunk.start)
+            .input('e', sql.NVarChar(16), chunk.end)
+            .query(`SELECT LEFT(h_date,6) AS ym, RTRIM(b_goodCode) AS code,
+                           ISNULL(SUM(b_OrderNum),0) AS qty,
+                           ISNULL(SUM(b_sumPrice),0) AS sales
+                    FROM ERP_SalesData WITH (NOLOCK)
+                    WHERE h_date >= @s AND h_date <= @e
+                      AND b_goodCode IS NOT NULL AND LTRIM(RTRIM(b_goodCode)) != ''
+                    GROUP BY LEFT(h_date,6), RTRIM(b_goodCode)`);
+          for (const row of r.recordset) {
+            const ym0 = (row.ym || '').trim();
+            if (!ym0 || ym0.length < 6) continue;
+            const ym = ym0.slice(0,4) + '-' + ym0.slice(4,6);
+            const code = (row.code || '').trim();
+            xerpCodes.add(code);
+            addRow(code, row.qty, row.sales, ym, 'xerp');
+          }
+        }
+        sources.xerp = 'connected';
+      } catch (e) {
+        console.error('Sales pivot XERP error:', e.message);
+        sources.xerp = (e.message.includes('permission') || e.message.includes('denied')) ? 'access_denied' : 'error';
+      }
+    }
+
+    // DD (MySQL)
+    if (source === 'all' || source === 'dd') {
+      try {
+        const pool = await ensureDdPool();
+        if (!pool) throw new Error('DD pool unavailable');
+        const startISO = String(yMin) + '-01-01';
+        const endISO = String(yMax + 1) + '-01-01';
+        const [rows] = await pool.query(
+          `SELECT DATE_FORMAT(o.created_at, '%Y-%m') AS ym, oi.product_code AS code,
+                  MAX(oi.product_name) AS name, IFNULL(SUM(oi.qty),0) AS qty,
+                  IFNULL(SUM(oi.total_money),0) AS sales
+           FROM order_items oi INNER JOIN orders o ON oi.order_id = o.id
+           WHERE o.created_at >= ? AND o.created_at < ? AND o.order_state != 'C'
+             AND oi.product_code IS NOT NULL AND oi.product_code != ''
+           GROUP BY DATE_FORMAT(o.created_at, '%Y-%m'), oi.product_code`, [startISO, endISO]);
+        for (const row of rows) {
+          const code = (row.code || '').trim();
+          if (!productMap[code]) productMap[code] = { code, name: row.name || code, brand: 'DD', source: 'dd', monthly: {} };
+          else if (!productMap[code].name || productMap[code].name === code) productMap[code].name = row.name || code;
+          addRow(code, row.qty, row.sales, row.ym, 'dd');
+        }
+        sources.dd = 'connected';
+      } catch (e) {
+        console.error('Sales pivot DD error:', e.message);
+        sources.dd = 'error';
+      }
+    }
+
+    // bar_shop1에서 XERP 품목명/브랜드 매핑
+    if (xerpCodes.size > 0) {
+      try {
+        await withBarShop1Pool(async (bar1) => {
+          const codes = [...xerpCodes];
+          for (let i = 0; i < codes.length; i += 500) {
+            const batch = codes.slice(i, i + 500).filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
+            if (!batch.length) continue;
+            const safe = batch.map(c => "'" + c + "'").join(',');
+            const nr = await bar1.request().query(
+              `SELECT RTRIM(Card_Code) AS Card_Code, Card_Name, RTRIM(CardBrand) AS CardBrand
+               FROM S2_Card WHERE RTRIM(Card_Code) IN (${safe})`);
+            nr.recordset.forEach(n => {
+              const c = (n.Card_Code || '').trim();
+              if (productMap[c]) {
+                productMap[c].name = (n.Card_Name || '').trim() || c;
+                productMap[c].brand = BRAND_LABELS[(n.CardBrand || '').trim()] || (n.CardBrand || '').trim() || '';
+              }
+            });
+          }
+        });
+        sources.bar_shop1 = 'connected';
+      } catch (e) {
+        sources.bar_shop1 = 'error';
+      }
+    }
+
+    // 정렬/필터/제한
+    let products = Object.values(productMap);
+    if (search) products = products.filter(p =>
+      (p.code || '').toLowerCase().includes(search) ||
+      (p.name || '').toLowerCase().includes(search) ||
+      (p.brand || '').toLowerCase().includes(search));
+    products.forEach(p => {
+      let qty = 0, sales = 0;
+      const yearTotals = {};
+      for (const y of years) yearTotals[y] = { qty: 0, sales: 0 };
+      for (const ym of Object.keys(p.monthly)) {
+        const y = parseInt(ym.slice(0, 4), 10);
+        const cell = p.monthly[ym];
+        qty += cell.qty; sales += cell.sales;
+        if (yearTotals[y]) { yearTotals[y].qty += cell.qty; yearTotals[y].sales += cell.sales; }
+      }
+      p.totals = { qty, sales };
+      p.yearTotals = yearTotals;
+    });
+    products.sort((a, b) => b.totals.sales - a.totals.sales);
+    const truncated = products.length > limit;
+    products = products.slice(0, limit).map((p, i) => ({ ...p, rank: i + 1 }));
+
+    const grandTotals = { qty: 0, sales: 0, byYear: {}, byYM: monthlyTotals };
+    for (const y of years) grandTotals.byYear[y] = { qty: 0, sales: 0 };
+    for (const ym of Object.keys(monthlyTotals)) {
+      const y = parseInt(ym.slice(0, 4), 10);
+      grandTotals.qty += monthlyTotals[ym].qty;
+      grandTotals.sales += monthlyTotals[ym].sales;
+      if (grandTotals.byYear[y]) {
+        grandTotals.byYear[y].qty += monthlyTotals[ym].qty;
+        grandTotals.byYear[y].sales += monthlyTotals[ym].sales;
+      }
+    }
+
+    ok(res, { years, months: [1,2,3,4,5,6,7,8,9,10,11,12], products, grandTotals, truncated, totalProducts: Object.keys(productMap).length, sources });
+    return;
+  }
+
+  // ── GET /api/shipments/pivot ─ 출고현황 대시보드 (연도×월×제품 피벗) ──
+  // 쿼리: years=2024,2025,2026 (기본: 최근 3년) / gubun=SO|MO|SI|MI (기본 SO) / limit=100 / search=
+  if (pathname === '/api/shipments/pivot' && method === 'GET') {
+    const token = extractToken(req); const decoded = token ? verifyToken(token) : null;
+    if (!decoded) { fail(res, 401, '인증이 필요합니다'); return; }
+    if (!await ensureXerpPool()) { fail(res, 503, 'XERP 데이터베이스 미연결'); return; }
+    const now = new Date();
+    const yearsParam = (parsed.searchParams.get('years') || '').trim();
+    let years = yearsParam ? yearsParam.split(',').map(s => parseInt(s.trim(), 10)).filter(y => y >= 2000 && y <= 2100) : null;
+    if (!years || years.length === 0) {
+      const cy = now.getFullYear(); years = [cy - 2, cy - 1, cy];
+    }
+    years = [...new Set(years)].sort();
+    const qGubun = parsed.searchParams.get('gubun') || 'SO';
+    const gubunList = qGubun.split(',').map(g => g.trim()).filter(g => ['SO','MO','SI','MI'].includes(g));
+    if (gubunList.length === 0) gubunList.push('SO');
+    const limit = Math.min(parseInt(parsed.searchParams.get('limit') || '100', 10) || 100, 500);
+    const search = (parsed.searchParams.get('search') || '').trim().toLowerCase();
+    const startYMD = String(years[0]) + '0101';
+    const endYMD = String(years[years.length - 1] + 1) + '0101'; // exclusive
+
+    const productMap = {};
+    const monthlyTotals = {};
+    const sources = {};
+    const codeSet = new Set();
+
+    function addRow(code, qty, amnt, ym, name) {
+      if (!code) return;
+      if (!productMap[code]) productMap[code] = { code, name: name || code, brand: '', monthly: {} };
+      else if ((!productMap[code].name || productMap[code].name === code) && name) productMap[code].name = name;
+      const m = productMap[code].monthly;
+      if (!m[ym]) m[ym] = { qty: 0, sales: 0 };
+      m[ym].qty += Number(qty || 0);
+      m[ym].sales += Number(amnt || 0);
+      if (!monthlyTotals[ym]) monthlyTotals[ym] = { qty: 0, sales: 0 };
+      monthlyTotals[ym].qty += Number(qty || 0);
+      monthlyTotals[ym].sales += Number(amnt || 0);
+    }
+
+    try {
+      const req2 = xerpPool.request()
+        .input('s', sql.NChar(16), startYMD)
+        .input('e', sql.NChar(16), endYMD);
+      gubunList.forEach((g, i) => req2.input('gb' + i, sql.VarChar(4), g));
+      const ph = gubunList.map((_, i) => '@gb' + i).join(',');
+      const r = await req2.query(`
+        SELECT LEFT(RTRIM(InoutDate),6) AS ym,
+               RTRIM(ItemCode) AS code,
+               MAX(RTRIM(ItemName)) AS name,
+               ISNULL(SUM(InoutQty),0) AS qty,
+               ISNULL(SUM(InoutAmnt),0) AS amnt
+        FROM mmInoutItem WITH (NOLOCK)
+        WHERE SiteCode = '${XERP_SITE_CODE}'
+          AND InoutGubun IN (${ph})
+          AND InoutDate >= @s AND InoutDate < @e
+        GROUP BY LEFT(RTRIM(InoutDate),6), RTRIM(ItemCode)
+      `);
+      for (const row of r.recordset) {
+        const ym0 = (row.ym || '').trim();
+        if (!ym0 || ym0.length < 6) continue;
+        const ym = ym0.slice(0, 4) + '-' + ym0.slice(4, 6);
+        const code = (row.code || '').trim();
+        codeSet.add(code);
+        addRow(code, row.qty, row.amnt, ym, (row.name || '').trim());
+      }
+      sources.xerp = 'connected';
+    } catch (e) {
+      console.error('Shipments pivot XERP error:', e.message);
+      sources.xerp = 'error';
+      fail(res, 500, '출고현황 피벗 조회 오류: ' + e.message);
+      return;
+    }
+
+    // bar_shop1 품목명/브랜드 매핑 (이름이 비어있는 품목 위주로 보강)
+    if (codeSet.size > 0) {
+      try {
+        await withBarShop1Pool(async (bar1) => {
+          const codes = [...codeSet];
+          for (let i = 0; i < codes.length; i += 500) {
+            const batch = codes.slice(i, i + 500).filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
+            if (!batch.length) continue;
+            const safe = batch.map(c => "'" + c + "'").join(',');
+            const nr = await bar1.request().query(
+              `SELECT RTRIM(Card_Code) AS Card_Code, Card_Name, RTRIM(CardBrand) AS CardBrand
+               FROM S2_Card WHERE RTRIM(Card_Code) IN (${safe})`);
+            nr.recordset.forEach(n => {
+              const c = (n.Card_Code || '').trim();
+              if (productMap[c]) {
+                const nm = (n.Card_Name || '').trim();
+                if (nm) productMap[c].name = nm;
+                productMap[c].brand = BRAND_LABELS[(n.CardBrand || '').trim()] || (n.CardBrand || '').trim() || '';
+              }
+            });
+          }
+        });
+        sources.bar_shop1 = 'connected';
+      } catch (e) {
+        sources.bar_shop1 = 'error';
+      }
+    }
+
+    let products = Object.values(productMap);
+    if (search) products = products.filter(p =>
+      (p.code || '').toLowerCase().includes(search) ||
+      (p.name || '').toLowerCase().includes(search) ||
+      (p.brand || '').toLowerCase().includes(search));
+    products.forEach(p => {
+      let qty = 0, sales = 0;
+      const yearTotals = {};
+      for (const y of years) yearTotals[y] = { qty: 0, sales: 0 };
+      for (const ym of Object.keys(p.monthly)) {
+        const y = parseInt(ym.slice(0, 4), 10);
+        const cell = p.monthly[ym];
+        qty += cell.qty; sales += cell.sales;
+        if (yearTotals[y]) { yearTotals[y].qty += cell.qty; yearTotals[y].sales += cell.sales; }
+      }
+      p.totals = { qty, sales };
+      p.yearTotals = yearTotals;
+    });
+    products.sort((a, b) => b.totals.qty - a.totals.qty);
+    const truncated = products.length > limit;
+    products = products.slice(0, limit).map((p, i) => ({ ...p, rank: i + 1 }));
+
+    const grandTotals = { qty: 0, sales: 0, byYear: {}, byYM: monthlyTotals };
+    for (const y of years) grandTotals.byYear[y] = { qty: 0, sales: 0 };
+    for (const ym of Object.keys(monthlyTotals)) {
+      const y = parseInt(ym.slice(0, 4), 10);
+      grandTotals.qty += monthlyTotals[ym].qty;
+      grandTotals.sales += monthlyTotals[ym].sales;
+      if (grandTotals.byYear[y]) {
+        grandTotals.byYear[y].qty += monthlyTotals[ym].qty;
+        grandTotals.byYear[y].sales += monthlyTotals[ym].sales;
+      }
+    }
+
+    ok(res, { years, months: [1,2,3,4,5,6,7,8,9,10,11,12], gubun: gubunList, products, grandTotals, truncated, totalProducts: Object.keys(productMap).length, sources });
+    return;
   }
 
   // ── POST /api/sales/cache/refresh ──
