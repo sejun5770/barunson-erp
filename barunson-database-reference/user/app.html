@@ -2468,6 +2468,27 @@ function closeMegaMenu() { /* no-op */ }
   </div>
 </div>
 
+<!-- 데이터 진단 모달 — ERP_SalesData vs mmInoutItem 비교 -->
+<div id="diagModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1100;align-items:center;justify-content:center" onclick="if(event.target===this)closeDiagModal()">
+  <div style="background:#fff;border-radius:10px;padding:20px;max-width:1100px;width:95%;max-height:90vh;overflow:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div style="font-size:16px;font-weight:700;color:#0f172a">🔬 데이터 진단 — ERP_SalesData vs mmInoutItem</div>
+      <button onclick="closeDiagModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#64748b">×</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:10px 12px;background:#f8fafc;border-radius:6px">
+      <label style="font-size:12px;font-weight:600;color:#334155">제품코드</label>
+      <input type="text" id="diagCode" value="BE004" style="padding:5px 10px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;width:140px;text-transform:uppercase">
+      <label style="font-size:12px;font-weight:600;color:#334155;margin-left:8px">월(YYYYMM)</label>
+      <input type="text" id="diagYM" value="202605" maxlength="6" style="padding:5px 10px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;width:90px">
+      <button class="btn btn-sm" onclick="runDiag()" style="background:#dc2626;color:#fff;font-size:12px;padding:5px 14px;border-radius:5px;font-weight:600">진단 실행</button>
+      <span style="font-size:11px;color:#64748b;margin-left:8px">두 테이블의 합계·일별 분포·샘플 행을 직접 비교합니다</span>
+    </div>
+    <div id="diagResult" style="font-size:12px;min-height:200px;color:#334155">
+      <div style="text-align:center;padding:40px;color:#94a3b8">제품코드와 월을 입력 후 [진단 실행]</div>
+    </div>
+  </div>
+</div>
+
 <!-- 재고현황2 입고처리 모달 (발주현황 페이지 등 어디서든 호출 가능) -->
 <div id="inv2ReceiveModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1100;align-items:center;justify-content:center" onclick="if(event.target===this)closeInv2ReceiveModal()">
   <div style="background:#fff;border-radius:10px;padding:20px;max-width:760px;width:92%;max-height:84vh;overflow:auto">
@@ -6325,6 +6346,7 @@ function closeMegaMenu() { /* no-op */ }
     </label>
     <button class="btn btn-sm" onclick="loadSalesStatusPage()" style="background:#2563eb;color:#fff;border-radius:6px;padding:4px 16px;font-size:12px">🔍 조회</button>
     <button class="btn btn-sm" onclick="exportSalesStatusExcel()" style="background:#7c3aed;color:#fff;border-radius:6px;padding:4px 12px;font-size:12px">📥 엑셀</button>
+    <button class="btn btn-sm" onclick="openDiagModal()" style="background:#dc2626;color:#fff;border-radius:6px;padding:4px 12px;font-size:12px" title="ERP_SalesData(매출) vs mmInoutItem(출고) 두 테이블의 raw 데이터 비교">🔬 데이터 진단</button>
   </div>
   <div id="ssKpiArea" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:14px"></div>
   <div id="ssYearMonthChart" style="margin-bottom:14px"></div>
@@ -28145,6 +28167,109 @@ function renderSalesStatus() {
 function exportSalesStatusExcel() {
   if (!_ssData) { whToast('먼저 [조회]를 실행하세요'); return; }
   _exportPivotExcel(_ssData, (document.getElementById('ssMetric')||{}).value || 'sales', '판매현황', 'sales-status');
+}
+
+// ─── 데이터 진단 모달 ───
+function openDiagModal() {
+  document.getElementById('diagModal').style.display = 'flex';
+}
+function closeDiagModal() {
+  document.getElementById('diagModal').style.display = 'none';
+}
+async function runDiag() {
+  var code = (document.getElementById('diagCode').value || '').trim().toUpperCase();
+  var ym = (document.getElementById('diagYM').value || '').trim();
+  if (!code) { whToast('제품코드를 입력하세요'); return; }
+  if (!/^\d{6}$/.test(ym)) { whToast('월은 YYYYMM 형식 (예: 202605)'); return; }
+  document.getElementById('diagCode').value = code;
+  var area = document.getElementById('diagResult');
+  area.innerHTML = '<div style="text-align:center;padding:40px;color:#94a3b8">조회 중... (XERP 두 테이블 동시 조회)</div>';
+  try {
+    var r = await authFetch('/api/diag/item-monthly?code=' + encodeURIComponent(code) + '&ym=' + ym);
+    var json = await r.json();
+    if (!json.ok) throw new Error(json.error || '조회 실패');
+    renderDiagResult(json.data);
+  } catch (e) {
+    area.innerHTML = '<div style="text-align:center;padding:40px;color:#ef4444">진단 실패: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderDiagResult(d) {
+  var sales = d.sources.erp_sales_data || {};
+  var inout = d.sources.mm_inout_item || {};
+  var cmp = d.comparison || {};
+  var byG = inout.by_gubun || {};
+
+  var h = '';
+
+  // 비교 요약 (가장 위)
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px">';
+  h += '<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px"><div style="font-size:11px;color:#1d4ed8;font-weight:600">📊 ERP_SalesData (매출)</div><div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:4px">'+Number(cmp.erp_sales_qty||0).toLocaleString()+'</div><div style="font-size:11px;color:#64748b">SUM(b_OrderNum) · '+Number(sales.row_count||0).toLocaleString()+'행</div></div>';
+  h += '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px"><div style="font-size:11px;color:#dc2626;font-weight:600">📦 mmInoutItem (출고/SO)</div><div style="font-size:22px;font-weight:700;color:#0f172a;margin-top:4px">'+Number(cmp.mm_so_qty||0).toLocaleString()+'</div><div style="font-size:11px;color:#64748b">SUM(InoutQty) · '+Number((byG.SO||{}).row_count||0).toLocaleString()+'행</div></div>';
+  var diffColor = cmp.diff > 0 ? '#dc2626' : (cmp.diff < 0 ? '#2563eb' : '#16a34a');
+  h += '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px"><div style="font-size:11px;color:#a16207;font-weight:600">⚖️ 차이 (출고 - 매출)</div><div style="font-size:22px;font-weight:700;color:'+diffColor+';margin-top:4px">'+(cmp.diff>=0?'+':'')+Number(cmp.diff||0).toLocaleString()+(cmp.diff_pct!=null?' ('+cmp.diff_pct+'%)':'')+'</div><div style="font-size:11px;color:#64748b">'+esc(cmp.hint||'')+'</div></div>';
+  h += '</div>';
+
+  // mmInoutItem 구분별 합계
+  h += '<div style="margin-bottom:14px"><div style="font-weight:700;color:#0f172a;font-size:13px;margin-bottom:6px">mmInoutItem 구분별 합계</div>';
+  h += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#f8fafc"><th style="padding:6px 10px;text-align:left;border:1px solid #e2e8f0">구분</th><th style="padding:6px 10px;text-align:left;border:1px solid #e2e8f0">의미</th><th style="padding:6px 10px;text-align:right;border:1px solid #e2e8f0">행수</th><th style="padding:6px 10px;text-align:right;border:1px solid #e2e8f0">수량</th><th style="padding:6px 10px;text-align:right;border:1px solid #e2e8f0">금액</th></tr></thead><tbody>';
+  ['SO','MO','SI','MI'].forEach(function(g){
+    var v = byG[g] || {};
+    var label = (inout.gubun_label || {})[g] || g;
+    h += '<tr><td style="padding:6px 10px;border:1px solid #f1f5f9;font-family:monospace;font-weight:600">'+g+'</td><td style="padding:6px 10px;border:1px solid #f1f5f9">'+label+'</td><td style="padding:6px 10px;border:1px solid #f1f5f9;text-align:right">'+Number(v.row_count||0).toLocaleString()+'</td><td style="padding:6px 10px;border:1px solid #f1f5f9;text-align:right;font-weight:600">'+Number(v.sum_qty||0).toLocaleString()+'</td><td style="padding:6px 10px;border:1px solid #f1f5f9;text-align:right">'+Number(v.sum_amnt||0).toLocaleString()+'</td></tr>';
+  });
+  h += '</tbody></table></div>';
+
+  // 일별 비교 (병렬)
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">';
+  // ERP_SalesData 일별
+  h += '<div><div style="font-weight:700;color:#1d4ed8;font-size:13px;margin-bottom:6px">📊 ERP_SalesData 일별</div>';
+  h += '<div style="max-height:240px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead style="position:sticky;top:0"><tr style="background:#f8fafc"><th style="padding:5px 8px;text-align:left">날짜</th><th style="padding:5px 8px;text-align:right">행</th><th style="padding:5px 8px;text-align:right">수량</th><th style="padding:5px 8px;text-align:right">금액</th></tr></thead><tbody>';
+  (sales.daily||[]).forEach(function(r){
+    var d = r.date && r.date.length === 8 ? r.date.slice(0,4)+'-'+r.date.slice(4,6)+'-'+r.date.slice(6,8) : r.date;
+    h += '<tr style="border-top:1px solid #f1f5f9"><td style="padding:4px 8px">'+esc(d)+'</td><td style="padding:4px 8px;text-align:right">'+Number(r.rows||0).toLocaleString()+'</td><td style="padding:4px 8px;text-align:right;font-weight:600">'+Number(r.qty||0).toLocaleString()+'</td><td style="padding:4px 8px;text-align:right">'+Number(r.price||0).toLocaleString()+'</td></tr>';
+  });
+  if (!(sales.daily||[]).length) h += '<tr><td colspan="4" style="padding:20px;text-align:center;color:#94a3b8">데이터 없음</td></tr>';
+  h += '</tbody></table></div></div>';
+
+  // mmInoutItem 일별 (구분별)
+  h += '<div><div style="font-weight:700;color:#dc2626;font-size:13px;margin-bottom:6px">📦 mmInoutItem 일별 (구분별)</div>';
+  h += '<div style="max-height:240px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead style="position:sticky;top:0"><tr style="background:#f8fafc"><th style="padding:5px 8px;text-align:left">날짜</th><th style="padding:5px 8px;text-align:left">구분</th><th style="padding:5px 8px;text-align:right">행</th><th style="padding:5px 8px;text-align:right">수량</th><th style="padding:5px 8px;text-align:right">금액</th></tr></thead><tbody>';
+  (inout.daily||[]).forEach(function(r){
+    var d = r.date && r.date.length === 8 ? r.date.slice(0,4)+'-'+r.date.slice(4,6)+'-'+r.date.slice(6,8) : r.date;
+    var gColor = r.gubun==='SO'?'#dc2626':r.gubun==='MO'?'#ea580c':r.gubun==='SI'?'#16a34a':'#7c3aed';
+    h += '<tr style="border-top:1px solid #f1f5f9"><td style="padding:4px 8px">'+esc(d)+'</td><td style="padding:4px 8px;color:'+gColor+';font-weight:700">'+esc(r.gubun)+'</td><td style="padding:4px 8px;text-align:right">'+Number(r.rows||0).toLocaleString()+'</td><td style="padding:4px 8px;text-align:right;font-weight:600">'+Number(r.qty||0).toLocaleString()+'</td><td style="padding:4px 8px;text-align:right">'+Number(r.amnt||0).toLocaleString()+'</td></tr>';
+  });
+  if (!(inout.daily||[]).length) h += '<tr><td colspan="5" style="padding:20px;text-align:center;color:#94a3b8">데이터 없음</td></tr>';
+  h += '</tbody></table></div></div>';
+  h += '</div>';
+
+  // 샘플 행 (raw 데이터)
+  h += '<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:700;color:#64748b;font-size:12px;padding:6px 0">🔍 raw 샘플 행 보기 (각 테이블 최대 10~15건)</summary>';
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:8px">';
+  h += '<div><div style="font-weight:600;color:#1d4ed8;font-size:11px;margin-bottom:4px">ERP_SalesData</div><div style="max-height:220px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;font-size:10px"><table style="width:100%;border-collapse:collapse"><thead><tr style="background:#f8fafc"><th style="padding:4px 6px">h_date</th><th style="padding:4px 6px">orderid</th><th style="padding:4px 6px">seq</th><th style="padding:4px 6px;text-align:right">qty</th><th style="padding:4px 6px;text-align:right">price</th><th style="padding:4px 6px">Dept</th></tr></thead><tbody>';
+  (sales.sample||[]).forEach(function(r){
+    h += '<tr style="border-top:1px solid #f1f5f9"><td style="padding:3px 6px;font-family:monospace">'+esc(r.h_date)+'</td><td style="padding:3px 6px;font-family:monospace">'+esc(r.h_orderid)+'</td><td style="padding:3px 6px;text-align:right">'+r.b_seq+'</td><td style="padding:3px 6px;text-align:right;font-weight:600">'+Number(r.qty||0).toLocaleString()+'</td><td style="padding:3px 6px;text-align:right">'+Number(r.price||0).toLocaleString()+'</td><td style="padding:3px 6px">'+esc(r.DeptGubun||'')+'</td></tr>';
+  });
+  if (!(sales.sample||[]).length) h += '<tr><td colspan="6" style="padding:14px;text-align:center;color:#94a3b8">없음</td></tr>';
+  h += '</tbody></table></div></div>';
+  h += '<div><div style="font-weight:600;color:#dc2626;font-size:11px;margin-bottom:4px">mmInoutItem</div><div style="max-height:220px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;font-size:10px"><table style="width:100%;border-collapse:collapse"><thead><tr style="background:#f8fafc"><th style="padding:4px 6px">date</th><th style="padding:4px 6px">No</th><th style="padding:4px 6px">seq</th><th style="padding:4px 6px">구분</th><th style="padding:4px 6px">창고</th><th style="padding:4px 6px;text-align:right">qty</th><th style="padding:4px 6px;text-align:right">amnt</th></tr></thead><tbody>';
+  (inout.sample||[]).forEach(function(r){
+    var gColor = r.InoutGubun==='SO'?'#dc2626':r.InoutGubun==='MO'?'#ea580c':r.InoutGubun==='SI'?'#16a34a':'#7c3aed';
+    h += '<tr style="border-top:1px solid #f1f5f9"><td style="padding:3px 6px;font-family:monospace">'+esc(r.InoutDate)+'</td><td style="padding:3px 6px;font-family:monospace">'+esc(r.InoutNo)+'</td><td style="padding:3px 6px;text-align:right">'+r.InoutSeq+'</td><td style="padding:3px 6px;color:'+gColor+';font-weight:700">'+esc(r.InoutGubun)+'</td><td style="padding:3px 6px">'+esc(r.WhCode)+'</td><td style="padding:3px 6px;text-align:right;font-weight:600">'+Number(r.InoutQty||0).toLocaleString()+'</td><td style="padding:3px 6px;text-align:right">'+Number(r.InoutAmnt||0).toLocaleString()+'</td></tr>';
+  });
+  if (!(inout.sample||[]).length) h += '<tr><td colspan="7" style="padding:14px;text-align:center;color:#94a3b8">없음</td></tr>';
+  h += '</tbody></table></div></div>';
+  h += '</div></details>';
+
+  // 메타
+  h += '<div style="margin-top:12px;padding:8px 12px;background:#f8fafc;border-radius:6px;font-size:11px;color:#64748b;line-height:1.6">';
+  h += '<b>제품:</b> '+esc(d.code)+' · <b>기간:</b> '+esc(d.period.start)+' ~ '+esc(d.period.end);
+  h += '<br><b>ERP_SalesData:</b> WHERE h_date >= '+esc(d.period.start)+' AND h_date <= '+esc(d.period.end)+' AND RTRIM(b_goodCode) = \''+esc(d.code)+'\'';
+  h += '<br><b>mmInoutItem:</b> WHERE SiteCode = \''+esc(inout.site||'')+'\' AND InoutDate >= '+esc(d.period.start)+' AND InoutDate < '+esc(d.period.endExclusive)+' AND RTRIM(ItemCode) = \''+esc(d.code)+'\'';
+  h += '</div>';
+
+  document.getElementById('diagResult').innerHTML = h;
 }
 
 // ───── 출고현황 ─────
