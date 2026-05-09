@@ -3665,6 +3665,55 @@ async function _autoImportInventorySnapshot() {
   console.log(`[seed/inv-snapshot] inventory_snapshot ${inserted}건 처리 (실패 ${failed})`);
 }
 
+async function _autoImportVendorsSnapshot() {
+  const filePath = path.join(__dirname, 'snapshots', 'vendors_snapshot.json');
+  if (!fs.existsSync(filePath)) return;
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (e) {
+    console.warn('[seed/vendors-snapshot] 파싱 실패:', e.message);
+    return;
+  }
+  const rows = raw.data || (Array.isArray(raw) ? raw : []);
+  if (!rows.length) return;
+  // vendors 가 이미 있으면 skip — 사용자 편집 보존
+  try {
+    const cnt = Number(
+      (await db.prepare('SELECT COUNT(*) AS c FROM vendors').get())?.c || 0
+    );
+    if (cnt > 0) {
+      console.log(`[seed/vendors-snapshot] vendors 이미 ${cnt}건 — 건너뜀`);
+      return;
+    }
+  } catch (_) {}
+
+  let inserted = 0, failed = 0;
+  for (const v of rows) {
+    try {
+      await db.prepare(
+        `INSERT INTO vendors
+           (name, type, contact, phone, email, kakao, memo, vendor_code, email_cc, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        v.name || '', v.type || '', v.contact || '', v.phone || '',
+        v.email || '', v.kakao || '', v.memo || '',
+        v.vendor_code || '', v.email_cc || '',
+        v.created_at || new Date().toISOString(),
+        v.updated_at || new Date().toISOString()
+      );
+      inserted++;
+    } catch (e) {
+      failed++;
+      if (failed <= 2) console.warn(`[seed/vendors-snapshot] ${v.name} 실패:`, e.message);
+    }
+  }
+  console.log(`[seed/vendors-snapshot] vendors 신규 ${inserted}건 (실패 ${failed})`);
+}
+
+await _autoImportVendorsSnapshot().catch(e =>
+  console.warn('[seed] vendors snapshot 오류:', e.message)
+);
 await _autoImportPOSnapshot().catch(e =>
   console.warn('[seed] PO snapshot 오류:', e.message)
 );
