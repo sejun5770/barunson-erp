@@ -1,14 +1,41 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${PG_USER:-onely}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-onely}
+      POSTGRES_DB: ${PG_DATABASE:-sc_erp}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-onely} -d ${PG_DATABASE:-sc_erp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   app:
     build: .
     ports:
       - "12026:12026"
     env_file:
-      - barunson-database-reference/.env
+      # 외부 DB(MSSQL/MySQL) 등 운영 시크릿 — 신규/dev 환경에선 없어도 PG 자체 동반으로 부팅 가능.
+      - path: barunson-database-reference/.env
+        required: false
     environment:
       - PORT=12026
       - DATA_DIR=/app/data
       - UPLOAD_DIR=/app/uploads
+      # PG: docker-compose 안에서는 항상 동반된 postgres 서비스로 향한다.
+      # env_file 의 PG_HOST 보다 우선하므로, 외부 PG 로 붙이려면 이 블록을 비우거나 override 한다.
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_USER=${PG_USER:-onely}
+      - PG_PASSWORD=${PG_PASSWORD:-onely}
+      - PG_DATABASE=${PG_DATABASE:-sc_erp}
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - app-data:/app/data
       - app-uploads:/app/uploads
@@ -17,3 +44,4 @@ services:
 volumes:
   app-data:
   app-uploads:
+  postgres-data:
