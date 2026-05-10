@@ -131,11 +131,26 @@ function convertSql(sql) {
   return convertSqliteFunctions(convertPlaceholders(sql));
 }
 
+// PG → SQLite 역변환 (SQLite 폴백 모드에서 PG 전용 문법 처리)
+function convertPgToSqlite(sql) {
+  let s = sql;
+  // STRING_AGG(DISTINCT col, ',') → GROUP_CONCAT(DISTINCT col)
+  s = s.replace(/\bSTRING_AGG\s*\(\s*DISTINCT\s+([^,)]+?)(?:\s*::\s*TEXT)?\s*,\s*'[^']*'\s*(?:ORDER\s+BY[^)]+)?\)/gi,
+    'GROUP_CONCAT(DISTINCT $1)');
+  // STRING_AGG(col, ',') / STRING_AGG(col::TEXT, ',') → GROUP_CONCAT(col)
+  s = s.replace(/\bSTRING_AGG\s*\(\s*([^,)]+?)(?:\s*::\s*TEXT)?\s*,\s*'[^']*'\s*(?:ORDER\s+BY[^)]+)?\)/gi,
+    'GROUP_CONCAT($1)');
+  // ::TEXT 잔여 cast 제거 (SQLite 는 lenient)
+  s = s.replace(/::\s*TEXT\b/gi, '');
+  // CAST(x AS TEXT) 는 SQLite 도 지원 — 그대로
+  return s;
+}
+
 // Statement 객체 — prepare()의 반환값
 class Statement {
   constructor(sql) {
     this._originalSql = sql;
-    this._sql = _usingSqlite ? sql : convertSql(sql);
+    this._sql = _usingSqlite ? convertPgToSqlite(sql) : convertSql(sql);
   }
 
   async get(...params) {
