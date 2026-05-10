@@ -2047,6 +2047,13 @@ try { await db.exec("ALTER TABLE po_header ADD COLUMN defect_number TEXT DEFAULT
 // ── 생산지(origin) 컬럼 추가 (한국/중국/더기프트 분리) ──
 try { await db.exec("ALTER TABLE po_header ADD COLUMN origin TEXT DEFAULT ''"); } catch(_) {}
 
+// ── 입고예정일(due_date) 컬럼 보강 ──
+// CREATE TABLE 정의에는 있으나 (라인 1542), seed.db / 기존 SQLite 환경의 po_header 가
+// 옛 schema (expected_date 만 존재) 로 만들어져 있으면 IF NOT EXISTS 가 컬럼을 추가하지 않음.
+// 결과: /api/inventory/pending-orders 의 MIN(h.due_date) 쿼리가 "no such column" 으로 실패 →
+// 응답 빈 객체 → 재고현황 화면의 미입고 컬럼이 모두 비어 보임.
+try { await db.exec("ALTER TABLE po_header ADD COLUMN due_date TEXT DEFAULT ''"); } catch(_) {}
+
 // ============================================================
 // 법인(legal_entity) 컬럼 일괄 추가 — 바른컴퍼니(barunson) / 디디(dd) 분리
 // ============================================================
