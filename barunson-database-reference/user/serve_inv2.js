@@ -3677,38 +3677,76 @@ async function _autoImportVendorsSnapshot() {
   }
   const rows = raw.data || (Array.isArray(raw) ? raw : []);
   if (!rows.length) return;
-  // vendors 가 이미 있으면 skip — 사용자 편집 보존
+
+  // 명백한 테스트 데이터 자동 정리 (seed.db 잔재)
+  // - FT- 접두어 (load test)
+  // - 테스트인쇄소 (수동 테스트)
+  // - 인코딩 깨진 vendor (이름에 비정상 ASCII 포함)
   try {
-    const cnt = Number(
-      (await db.prepare('SELECT COUNT(*) AS c FROM vendors').get())?.c || 0
-    );
-    if (cnt > 0) {
-      console.log(`[seed/vendors-snapshot] vendors 이미 ${cnt}건 — 건너뜀`);
-      return;
+    const _delTest = await db.prepare(
+      `DELETE FROM vendors WHERE
+         name LIKE 'FT-%' OR
+         name LIKE 'FT_%' OR
+         name = '테스트인쇄소' OR
+         name LIKE 'FT_%'`
+    ).run();
+    if (_delTest.changes > 0) console.log(`[seed/vendors-snapshot] 테스트 데이터 ${_delTest.changes}건 삭제`);
+  } catch (_) {}
+  // 인코딩 깨진 데이터: 이름에 한글/영문/숫자 외 비정상 문자 다수 포함된 행 정리
+  try {
+    const allVendors = await db.prepare('SELECT vendor_id, name FROM vendors').all();
+    let badCount = 0;
+    for (const v of allVendors) {
+      // 한글, 영문, 숫자, 공백, ()_-./& 외 ASCII 제어/비정상 문자만 다수 포함이면 삭제
+      const badChars = (v.name || '').match(/[\x00-\x1F\x7F-\x9F]/g);
+      if (badChars && badChars.length >= 2) {
+        await db.prepare('DELETE FROM vendors WHERE vendor_id = ?').run(v.vendor_id);
+        badCount++;
+      }
     }
+    if (badCount > 0) console.log(`[seed/vendors-snapshot] 인코딩 깨진 ${badCount}건 삭제`);
   } catch (_) {}
 
-  let inserted = 0, failed = 0;
+  // snapshot 의 각 거래처 — name 기준 UPSERT
+  // (vendors.name 에 UNIQUE 없어서 수동 매칭)
+  let inserted = 0, updated = 0, failed = 0;
   for (const v of rows) {
     try {
-      await db.prepare(
-        `INSERT INTO vendors
-           (name, type, contact, phone, email, kakao, memo, vendor_code, email_cc, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        v.name || '', v.type || '', v.contact || '', v.phone || '',
-        v.email || '', v.kakao || '', v.memo || '',
-        v.vendor_code || '', v.email_cc || '',
-        v.created_at || new Date().toISOString(),
-        v.updated_at || new Date().toISOString()
-      );
-      inserted++;
+      const existing = await db.prepare('SELECT vendor_id FROM vendors WHERE name = ?').get(v.name);
+      if (existing) {
+        await db.prepare(
+          `UPDATE vendors SET
+             type=?, contact=?, phone=?, email=?, kakao=?, memo=?,
+             vendor_code=?, email_cc=?, updated_at=?
+           WHERE vendor_id=?`
+        ).run(
+          v.type || '', v.contact || '', v.phone || '',
+          v.email || '', v.kakao || '', v.memo || '',
+          v.vendor_code || '', v.email_cc || '',
+          v.updated_at || new Date().toISOString(),
+          existing.vendor_id
+        );
+        updated++;
+      } else {
+        await db.prepare(
+          `INSERT INTO vendors
+             (name, type, contact, phone, email, kakao, memo, vendor_code, email_cc, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          v.name || '', v.type || '', v.contact || '', v.phone || '',
+          v.email || '', v.kakao || '', v.memo || '',
+          v.vendor_code || '', v.email_cc || '',
+          v.created_at || new Date().toISOString(),
+          v.updated_at || new Date().toISOString()
+        );
+        inserted++;
+      }
     } catch (e) {
       failed++;
       if (failed <= 2) console.warn(`[seed/vendors-snapshot] ${v.name} 실패:`, e.message);
     }
   }
-  console.log(`[seed/vendors-snapshot] vendors 신규 ${inserted}건 (실패 ${failed})`);
+  console.log(`[seed/vendors-snapshot] vendors 신규 ${inserted}건 / 갱신 ${updated}건 (실패 ${failed})`);
 }
 
 await _autoImportVendorsSnapshot().catch(e =>
