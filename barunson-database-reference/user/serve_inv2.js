@@ -3756,6 +3756,82 @@ async function _autoImportVendorsSnapshot() {
   console.log(`[seed/vendors-snapshot] vendors 신규 ${inserted}건 / 갱신 ${updated}건 (실패 ${failed})`);
 }
 
+async function _autoImportProductsSnapshot() {
+  const filePath = path.join(__dirname, 'snapshots', 'products_snapshot.json');
+  if (!fs.existsSync(filePath)) return;
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (e) {
+    console.warn('[seed/products-snapshot] 파싱 실패:', e.message);
+    return;
+  }
+  const rows = raw.data || (Array.isArray(raw) ? raw : []);
+  if (!rows.length) return;
+
+  // products 는 ERP 동기화로 자동 갱신되지만 시드는 부팅 환경 데이터 부족 시 의미.
+  // 처리 규칙:
+  //   - INSERT: berp 에 없는 product_code 만 신규 (brand/origin/category 등 모두 적용)
+  //   - UPDATE: berp 의 product_name/brand/origin 중 빈 필드만 snapshot 값으로 보강
+  //   - berp 에만 있고 snapshot 에 없는 품목은 보존 (사용자 추가분)
+  // 메모리 map 으로 SELECT 한 번만 실행 (성능)
+  const allProds = await db.prepare('SELECT product_code, product_name, brand, origin FROM products').all();
+  const prodMap = {};
+  for (const p of allProds) prodMap[p.product_code] = p;
+
+  let inserted = 0, nameUpdated = 0, brandUpdated = 0, originUpdated = 0, failed = 0;
+  for (const p of rows) {
+    const code = String(p.product_code || '').trim();
+    if (!code) continue;
+    try {
+      const existing = prodMap[code];
+      if (!existing) {
+        // 핵심 컬럼만 INSERT (pg-adapter 자동 id 추가 분기 안정성 위해 컬럼 수 최소화)
+        await db.prepare(`INSERT OR IGNORE INTO products (product_code, product_name, brand, origin, category, status, legal_entity, unit, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'))`).run(
+          code,
+          p.product_name || '',
+          p.brand || '',
+          p.origin || '',
+          p.category || '',
+          p.status || 'active',
+          p.legal_entity || 'barunson',
+          p.unit || 'EA'
+        );
+        // 부수 필드는 별도 UPDATE (있을 때만)
+        const sub = [];
+        const subParams = [];
+        if (p.material_code) { sub.push('material_code = ?'); subParams.push(p.material_code); }
+        if (p.material_name) { sub.push('material_name = ?'); subParams.push(p.material_name); }
+        if (p.spec) { sub.push('spec = ?'); subParams.push(p.spec); }
+        if (p.memo) { sub.push('memo = ?'); subParams.push(p.memo); }
+        if (Number(p.lead_time_days)) { sub.push('lead_time_days = ?'); subParams.push(Number(p.lead_time_days)); }
+        if (sub.length) {
+          subParams.push(code);
+          await db.prepare(`UPDATE products SET ${sub.join(', ')} WHERE product_code = ?`).run(...subParams);
+        }
+        inserted++;
+      } else {
+        if (!existing.product_name && p.product_name) {
+          await db.prepare(`UPDATE products SET product_name = ?, updated_at = datetime('now','localtime') WHERE product_code = ? AND (product_name IS NULL OR product_name = '')`).run(p.product_name, code);
+          nameUpdated++;
+        }
+        if (!existing.brand && p.brand) {
+          await db.prepare(`UPDATE products SET brand = ?, updated_at = datetime('now','localtime') WHERE product_code = ? AND (brand IS NULL OR brand = '')`).run(p.brand, code);
+          brandUpdated++;
+        }
+        if (!existing.origin && p.origin) {
+          await db.prepare(`UPDATE products SET origin = ?, updated_at = datetime('now','localtime') WHERE product_code = ? AND (origin IS NULL OR origin = '')`).run(p.origin, code);
+          originUpdated++;
+        }
+      }
+    } catch (e) {
+      failed++;
+      if (failed <= 2) console.warn(`[seed/products-snapshot] ${code} 실패:`, e.message);
+    }
+  }
+  console.log(`[seed/products-snapshot] products 신규 ${inserted}건 / name 보강 ${nameUpdated} / brand 보강 ${brandUpdated} / origin 보강 ${originUpdated} (실패 ${failed})`);
+}
+
 await _autoImportVendorsSnapshot().catch(e =>
   console.warn('[seed] vendors snapshot 오류:', e.message)
 );
@@ -3764,6 +3840,9 @@ await _autoImportPOSnapshot().catch(e =>
 );
 await _autoImportInventorySnapshot().catch(e =>
   console.warn('[seed] inventory snapshot 오류:', e.message)
+);
+await _autoImportProductsSnapshot().catch(e =>
+  console.warn('[seed] products snapshot 오류:', e.message)
 );
 
 // ── 공지/게시판 테이블 ──
