@@ -2056,16 +2056,9 @@ const _entityTables = [
 ];
 // 1st pass: 이 시점에 이미 존재하는 테이블만 대상.
 // trade_document/defects/batch_master/work_orders 는 뒤에서 CREATE 되므로 skip — 뒤의 2nd pass 에서 처리.
-// PG: information_schema 사용. SQLite: sqlite_master 사용.
-const _hasInfoSchema = !db.usingSqlite;
 for (const tbl of _entityTables) {
   try {
-    let exists;
-    if (_hasInfoSchema) {
-      exists = await db.prepare("SELECT 1 AS x FROM information_schema.tables WHERE table_name=?").get(tbl);
-    } else {
-      exists = await db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type='table' AND name=?").get(tbl);
-    }
+    const exists = await db.prepare("SELECT 1 AS x FROM information_schema.tables WHERE table_name=?").get(tbl);
     if (!exists) continue;
     await db.exec(`ALTER TABLE ${tbl} ADD COLUMN legal_entity TEXT DEFAULT 'barunson'`);
   } catch(_) {}
@@ -3400,18 +3393,13 @@ async function _autoImportJson(fileName, tableName, options = {}) {
     }
   }
 
-  // 실제 테이블 컬럼 조회 (PG / SQLite 양쪽 호환)
+  // 실제 테이블 컬럼 조회 (PG information_schema)
   let validCols;
   try {
-    if (db.usingSqlite) {
-      const info = await db.prepare(`PRAGMA table_info(${tableName})`).all();
-      validCols = new Set(info.map(c => c.name));
-    } else {
-      const info = await db.prepare(
-        `SELECT column_name FROM information_schema.columns WHERE table_name=$1`
-      ).all(tableName);
-      validCols = new Set(info.map(c => c.column_name));
-    }
+    const info = await db.prepare(
+      `SELECT column_name FROM information_schema.columns WHERE table_name=$1`
+    ).all(tableName);
+    validCols = new Set(info.map(c => c.column_name));
   } catch (e) {
     console.warn(`[seed] ${tableName} 컬럼 조회 실패 — 전체 컬럼 시도:`, e.message);
     validCols = null;
@@ -5105,7 +5093,7 @@ async function handleRequest(req, res) {
   // GET /api/health — 시스템 헬스체크 (최상위 배치 — Docker 배포 안정성)
   if ((pathname === '/api/health' || pathname === '/health') && method === 'GET') {
     const health = { status: 'ok', timestamp: new Date().toISOString(), checks: {} };
-    try { await db.prepare('SELECT 1').get(); health.checks[db.usingSqlite ? 'sqlite' : 'postgresql'] = 'ok'; }
+    try { await db.prepare('SELECT 1').get(); health.checks.postgresql = 'ok'; }
     catch (e) { health.checks.postgresql = 'error: ' + e.message; health.status = 'degraded'; }
     try {
       if (xerpPool && xerpPool.connected) { health.checks.xerp = 'ok'; }

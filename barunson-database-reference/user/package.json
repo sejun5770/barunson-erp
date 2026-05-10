@@ -12,7 +12,6 @@
   "type": "commonjs",
   "dependencies": {
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^12.8.0",
     "docx": "^9.6.1",
     "googleapis": "^171.4.0",
     "jsonwebtoken": "^9.0.3",
