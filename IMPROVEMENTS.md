@@ -38,22 +38,16 @@
 - 옵션: 신규만 등록 / 전부 반영(덮어쓰기) / 취소
 - API: `POST /api/products/bulk/preview` (저장 없이 분석만)
 
-### 5. PostgreSQL 완전 전환 (2026-05-10)
-- **Phase 1** — `docker-compose.yml` 에 `postgres:16-alpine` 동반 (healthcheck + named volume).
-  앱은 `service_healthy` 후 시작. `env_file required: false` 로 `.env` 부재 환경에서도 부팅.
-  → 신규 환경에서도 self-contained 부팅 보장.
-- **Phase 2** — SQLite 폴백 코드 일괄 제거 (`pg-adapter.js` 의 `_usingSqlite` 분기 + `convertPgToSqlite()` +
-  `connect()` SQLite catch 블록 + `serve_inv2.js` 의 `db.usingSqlite` 분기 3곳).
-  의존성 `better-sqlite3` 제거, `seed.db` (1.5MB) / `init_db.js` 삭제.
-  PG 연결 실패는 fail-fast (compose 의 healthy 보장으로 정상 환경에선 실패 X).
-  순효과: 약 715라인 감소.
-- 시작 시 권한/스키마 자동 복구는 그대로 유지 (`PG_ADMIN_USER` 설정 시 활성).
-- 신규/dev 환경: `docker compose up` 한 번이면 PG + 시드 import + 앱 자동 부팅.
+### 5. PostgreSQL 마이그레이션 (진행 중)
+- SQLite → PostgreSQL 전환을 위한 `pg-adapter.js` 어댑터 도입
+- `scripts/migrate-to-pg.js` 마이그레이션 스크립트
+- 시작 시 권한/스키마 자동 복구 (admin onely 계정 사용)
 
 ## 남은 TODO
 
 - **모놀리스 분할**: `serve_inv2.js` 20K줄 → 모듈별 분리 (현재 `routes/` 일부만 분리됨)
 - **외래키 제약 도입**: 모든 DB에 FK 없음 → 데이터 정합성을 코드에서만 보장
+- **PG 완전 전환**: SQLite 폴백 분기 제거, schema 일관성 (legal_entity 등 컬럼 부재 이슈 해결)
 - **테스트 자동화**: 현재 수동 검증 중심 → API 단위/통합 테스트 도입
 - **PII 마스킹 일괄 적용**: 화면/API 응답의 이름·이메일·전화·계좌 마스킹 누락 영역 점검
 - **인덱스 미사용 쿼리 점검**: `LIKE '%...'`, 컬럼 함수 적용 등 Full Scan 유발 쿼리 색출
@@ -70,14 +64,9 @@
   - `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` — Gmail SMTP (메일 발송)
   - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — Google 로그인
   - `PORT` (기본 12026), `DATA_DIR`, `UPLOAD_DIR`
-- **빌드/실행**: `docker compose up --build` — `postgres:16` 자동 동반 부팅
-  - `.env` 가 없어도 PG default(`onely/onely/sc_erp`)로 시작. 외부 DB(MSSQL/MySQL) 시크릿이 필요하면
-    `barunson-database-reference/.env` 에 추가
-  - 외부 PG 로 붙이려면 `docker-compose.yml` 의 `app.environment` 의 `PG_HOST` 블록을 override
-- **로컬 실행**: `npm start` (= `node barunson-database-reference/user/serve_inv2.js`,
-  로컬 PG 가 별도로 떠 있어야 함 — `PG_HOST`/`PG_USER`/`PG_PASSWORD` 환경변수)
+- **빌드**: `docker compose up --build`
+- **실행**: `npm start` (= `node barunson-database-reference/user/serve_inv2.js`)
 - **헬스체크**: `GET /api/health`
 - **버전 확인**: `GET /api/version`
-- **시드 데이터**: 부팅 시 `barunson-database-reference/user/snapshots/*.json` 자동 import
-  (po_status / inventory / vendors). 테이블/컬럼은 부팅 시점 DDL 로 자동 생성
+- **시드 데이터**: `barunson-database-reference/user/seed.db` (없으면 `init_db.js` 실행)
 - **민감정보 주의**: `.env`, `*.db` 는 `.gitignore` 처리됨. 커밋 전 점검 필수
