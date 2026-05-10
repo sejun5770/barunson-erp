@@ -7994,6 +7994,96 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ════════════════════════════════════════════════════════════════════
+  //  POST /api/sync/xerp-products
+  //  inventory_snapshot (XERP 동기화 결과) 의 ItemCode/ItemName 을
+  //  berp products 마스터로 sync. inventory_snapshot 자체가 매시 정각
+  //  XERP /api/sync/xerp-inventory 로 갱신되므로 여기선 별도 외부 호출 없음.
+  //
+  //  처리 규칙 (안전 위주):
+  //    1) INSERT — berp 에 없는 product_code 만 신규 추가 (status='active')
+  //    2) UPDATE name — berp 의 product_name 이 비어있고 snapshot 에 값 있는 경우만
+  //       (사용자가 의도적으로 비운 값 덮어쓰기 방지)
+  //    3) berp 에만 있고 snapshot 에 없는 품목은 보존
+  //    4) brand/category/origin 등 비즈니스 필드는 XERP 에 없으므로 sync 없음
+  //
+  //  Body: { "dry_run": true }  → 카운트만 반환, 변경 없음 (기본 false = apply)
+  // ════════════════════════════════════════════════════════════════════
+  if (pathname === '/api/sync/xerp-products' && method === 'POST') {
+    const body = await readJSON(req).catch(() => ({}));
+    const dryRun = !!body?.dry_run;
+    try {
+      const snap = await db.prepare(`
+        SELECT product_code,
+               MAX(item_name) AS item_name,
+               MAX(legal_entity) AS legal_entity,
+               MAX(site_code) AS site_code
+        FROM inventory_snapshot
+        WHERE product_code IS NOT NULL AND product_code != ''
+        GROUP BY product_code
+      `).all();
+
+      const prods = await db.prepare('SELECT product_code, product_name FROM products').all();
+      const prodMap = {};
+      prods.forEach(p => { prodMap[p.product_code] = p; });
+
+      let inserted = 0, nameUpdated = 0, skipped = 0, failed = 0;
+
+      for (const r of snap) {
+        const code = r.product_code;
+        const name = (r.item_name || '').trim();
+        const entity = r.legal_entity || 'barunson';
+        const existing = prodMap[code];
+        try {
+          if (!existing) {
+            if (!dryRun) {
+              await db.prepare(`
+                INSERT OR IGNORE INTO products
+                  (product_code, product_name, legal_entity, status,
+                   origin, brand, category, unit,
+                   created_at, updated_at)
+                VALUES (?, ?, ?, 'active', '', '', '', 'EA',
+                        datetime('now','localtime'), datetime('now','localtime'))
+              `).run(code, name, entity);
+            }
+            inserted++;
+          } else if (!existing.product_name && name) {
+            if (!dryRun) {
+              await db.prepare(`
+                UPDATE products
+                  SET product_name = ?,
+                      updated_at = datetime('now','localtime')
+                WHERE product_code = ?
+                  AND (product_name IS NULL OR product_name = '')
+              `).run(name, code);
+            }
+            nameUpdated++;
+          } else {
+            skipped++;
+          }
+        } catch (e) {
+          failed++;
+          if (failed <= 3) console.warn(`[xerp-products sync] ${code}:`, e.message);
+        }
+      }
+
+      const total = (await db.prepare('SELECT COUNT(*) AS c FROM products').get())?.c || 0;
+      ok(res, {
+        dry_run: dryRun,
+        snapshot_distinct_codes: snap.length,
+        products_total: total,
+        inserted,
+        name_updated: nameUpdated,
+        skipped,
+        failed
+      });
+    } catch (e) {
+      console.error('[xerp-products sync] error:', e.message);
+      fail(res, 500, 'xerp-products sync 실패: ' + e.message);
+    }
+    return;
+  }
+
   // wedged 풀 강제 재초기화. 프로세스 재시작 없이 connectXERP() 를 깨끗한 상태에서 다시 시도.
   if (pathname === '/api/admin/xerp/reconnect' && method === 'POST') {
     const t0 = Date.now();
