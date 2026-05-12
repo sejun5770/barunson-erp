@@ -957,7 +957,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <th style="${thStyle}">원재료명</th>
       <th style="${thStyle}">용지 규격</th>
       <th style="${thStyle};color:#c2410c">다음 입고처</th>
-      <th style="${thStyle}">발주수량(낱개)</th>
+      <th style="${thStyle}">발주수량(R)</th>
       <th style="${thStyle}">절</th>
     </tr>`;
     tableRows = enrichedItems.map(it => `<tr>
@@ -966,7 +966,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <td style="${tdStyle}">${it.material_name || ''}</td>
       <td style="${tdStyle}">${it.spec || ''}</td>
       <td style="${tdStyle};color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
-      <td style="${tdStyle};font-weight:700;font-size:15px">${(it.ordered_qty || 0).toLocaleString()}매</td>
+      <td style="${tdStyle};font-weight:700;font-size:15px">${it.ream_qty || '-'}R</td>
       <td style="${tdStyle}">${it.cut_spec || ''}</td>
     </tr>`).join('');
   } else {
@@ -979,13 +979,12 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     }
     const sectionOrder = Object.keys(byProc).sort();
     // 단일 공정일 때는 섹션 헤더 생략하고 기존 테이블 유지
-    // 후공정 발주서 헤더: 제품코드 / 공정 / 원재료코드 / 원재료명 / 입고수량(R) / 생산수량(낱개) / 규격 / 입고처
+    // 후공정 발주서 헤더: 제품코드 / 공정 / 원재료코드 / 원재료명 / 생산수량(낱개) / 규격 / 입고처
     const postHeaderHtml = `<tr>
         <th style="${thStyle}">제품코드</th>
         <th style="${thStyle}">공정</th>
         <th style="${thStyle}">원재료코드</th>
         <th style="${thStyle}">원재료명</th>
-        <th style="${thStyle}">입고수량(R)</th>
         <th style="${thStyle}">생산수량(낱개)</th>
         <th style="${thStyle}">규격</th>
         <th style="${thStyle}">입고처</th>
@@ -995,8 +994,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <td style="${tdStyle}">${it.process_type || ''}</td>
           <td style="${tdStyle};color:#0369a1">${it.material_code || ''}</td>
           <td style="${tdStyle}">${it.material_name || ''}</td>
-          <td style="${tdStyle};font-weight:700">${it.ream_qty || '-'}R</td>
-          <td style="${tdStyle};font-weight:600">${(it.ordered_qty || 0).toLocaleString()}</td>
+          <td style="${tdStyle};font-weight:700;font-size:15px">${(it.ordered_qty || 0).toLocaleString()}</td>
           <td style="${tdStyle}">${it.spec || ''}</td>
           <td style="${tdStyle};color:#7c2d12;font-weight:600">${it.next_vendor || '바른손'}</td>
         </tr>`;
@@ -1012,7 +1010,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
         const assigneeLabel = ppl.length
           ? ppl.map(a => a.name + (a.email ? ` &lt;${a.email}&gt;` : '')).join(', ')
           : '담당자 미등록';
-        const sectionHdr = `<tr><td colspan="8" style="padding:10px 8px;background:#fff7ed;border:1px solid #fdba74;color:#7c2d12;font-weight:700;font-size:13px">
+        const sectionHdr = `<tr><td colspan="7" style="padding:10px 8px;background:#fff7ed;border:1px solid #fdba74;color:#7c2d12;font-weight:700;font-size:13px">
           ▸ ${proc} <span style="font-weight:400;font-size:11px;color:#9a3412;margin-left:10px">담당: ${assigneeLabel}</span>
         </td></tr>`;
         const body = list.map(postRowHtml).join('');
@@ -1135,7 +1133,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th>원재료명${isChinaVendor ? '<br><span style="font-weight:400;color:#999">材料名称</span>' : ''}</th>
           <th>용지 규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">纸张规格</span>' : ''}</th>
           <th style="color:#c2410c">다음 입고처${isChinaVendor ? '<br><span style="font-weight:400;color:#999">下一入库处</span>' : ''}</th>
-          <th class="right">발주수량(낱개)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
+          <th class="right">발주수량(R)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
           <th class="center">절</th>
         </tr>` : `<tr>
           <th style="width:30px">#</th>
@@ -1143,8 +1141,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th>공정</th>
           <th>원재료코드</th>
           <th>원재료명</th>
-          <th class="right">입고수량(R)</th>
-          <th class="right">생산수량</th>
+          <th class="right">생산수량(낱개)</th>
           <th>규격</th>
           <th>입고처</th>
         </tr>`}
@@ -1159,7 +1156,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td>${it.material_name || ''}</td>
               <td>${it.spec || ''}</td>
               <td style="color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
-              <td class="right bold" style="font-size:14px">${(it.ordered_qty || 0).toLocaleString()}매</td>
+              <td class="right bold" style="font-size:14px">${it.ream_qty || '-'}R</td>
               <td class="center">${it.cut_spec || ''}</td>
             </tr>`).join('');
           }
@@ -1171,15 +1168,14 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
             byProc[p].push(it);
           }
           const procs = Object.keys(byProc).sort();
-          // 후공정 PDF 행: # / 제품코드 / 공정 / 원재료코드 / 원재료명 / 입고수량(R) / 생산수량 / 규격 / 입고처
+          // 후공정 PDF 행: # / 제품코드 / 공정 / 원재료코드 / 원재료명 / 생산수량(낱개) / 규격 / 입고처
           const postPdfRow = (it, n) => `<tr>
               <td class="center" style="color:#999">${n}</td>
               <td class="bold">${it.product_code || ''}</td>
               <td>${it.process_type || ''}</td>
               <td>${it.material_code || ''}</td>
               <td>${it.material_name || ''}</td>
-              <td class="right bold">${it.ream_qty || '-'}R</td>
-              <td class="right">${(it.ordered_qty || 0).toLocaleString()}</td>
+              <td class="right bold" style="font-size:14px">${(it.ordered_qty || 0).toLocaleString()}</td>
               <td>${it.spec || ''}</td>
               <td style="color:#7c2d12;font-weight:600">${it.next_vendor || '바른손'}</td>
             </tr>`;
@@ -1193,7 +1189,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
             const assigneeLabel = ppl.length
               ? ppl.map(a => a.name + (a.email ? ` &lt;${a.email}&gt;` : '')).join(', ')
               : '담당자 미등록';
-            const hdr = `<tr><td colspan="9" style="padding:8px 10px;background:#fff7ed;border:1px solid #fdba74;color:#7c2d12;font-weight:700;font-size:12px">
+            const hdr = `<tr><td colspan="8" style="padding:8px 10px;background:#fff7ed;border:1px solid #fdba74;color:#7c2d12;font-weight:700;font-size:12px">
               ▸ ${proc} <span style="font-weight:400;font-size:10px;color:#9a3412;margin-left:8px">담당: ${assigneeLabel}</span>
             </td></tr>`;
             const body = list.map(it => { idx++; return postPdfRow(it, idx); }).join('');
@@ -1203,11 +1199,10 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
         <tr class="total-row">
           <td colspan="${isRawMaterial ? 6 : 5}" style="text-align:right;border:1px solid #ccc">합계 ${isChinaVendor ? '/ 合计' : ''}</td>
           ${isRawMaterial ? `
-            <td class="right" style="border:1px solid #ccc;font-size:14px">${totalQty.toLocaleString()}매</td>
+            <td class="right" style="border:1px solid #ccc;font-size:14px">${totalReams % 1 === 0 ? totalReams : totalReams.toFixed(1)}R</td>
             <td style="border:1px solid #ccc"></td>
           ` : `
-            <td class="right" style="border:1px solid #ccc">${totalReams % 1 === 0 ? totalReams : totalReams.toFixed(1)}R</td>
-            <td class="right" style="border:1px solid #ccc">${totalQty.toLocaleString()}</td>
+            <td class="right" style="border:1px solid #ccc;font-size:14px">${totalQty.toLocaleString()}</td>
             <td style="border:1px solid #ccc"></td>
             <td style="border:1px solid #ccc"></td>
           `}
@@ -1274,7 +1269,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     aoa.push([]);
     // 품목 헤더 + 데이터 (이메일 본문 표와 동일 컬럼 구성)
     if (isRawMaterial) {
-      aoa.push(['#', '제품코드', '원재료코드', '원재료명', '용지 규격', '다음 입고처', '발주수량(낱개)', '절']);
+      aoa.push(['#', '제품코드', '원재료코드', '원재료명', '용지 규격', '다음 입고처', '발주수량(R)', '절']);
       enrichedItems.forEach((it, i) => {
         aoa.push([
           i + 1,
@@ -1283,12 +1278,12 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           it.material_name || '',
           it.spec || '',
           it.item_chain || '',
-          it.ordered_qty || 0,
+          (it.ream_qty != null && it.ream_qty !== '' ? it.ream_qty : '-') + 'R',
           it.cut_spec || ''
         ]);
       });
     } else {
-      aoa.push(['#', '제품코드', '공정', '원재료코드', '원재료명', '입고수량(R)', '생산수량(낱개)', '규격', '입고처']);
+      aoa.push(['#', '제품코드', '공정', '원재료코드', '원재료명', '생산수량(낱개)', '규격', '입고처']);
       enrichedItems.forEach((it, i) => {
         aoa.push([
           i + 1,
@@ -1296,7 +1291,6 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           it.process_type || '',
           it.material_code || '',
           it.material_name || '',
-          (it.ream_qty != null && it.ream_qty !== '' ? it.ream_qty : '-') + 'R',
           it.ordered_qty || 0,
           it.spec || '',
           it.next_vendor || '바른손'
