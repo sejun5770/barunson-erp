@@ -3145,7 +3145,9 @@ function closeMegaMenu() { /* no-op */ }
       <input type="text" id="poClosingVendor" list="poClosingVendorList" placeholder="매입처(전체)" oninput="renderPOList()" style="padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;color:#475569;width:120px" title="매입처 부분일치 검색 — 비우면 전체. 입력하면 PO 카드도 즉시 필터링.">
       <datalist id="poClosingVendorList"></datalist>
       <button class="btn btn-sm" onclick="downloadRawMaterialClosing()" style="white-space:nowrap;background:#fef3c7;border:1px solid #fbbf24;color:#92400e" title="원재료 PO 마감용 — 매입처/제품/OS등록여부 포함 (XERP 등록 + 거래처 원장 대조)">📊 원재료 마감 엑셀</button>
-      <button class="btn btn-sm" onclick="downloadPOExcel()" style="white-space:nowrap">엑셀 다운로드</button>
+      <span id="poSelectionInfo" style="font-size:11px;color:#475569;padding:4px 8px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;display:none" title="체크된 PO 만 엑셀 다운로드에 포함됩니다. 0건이면 필터된 전체가 출력됩니다.">선택: <b id="poSelectionCount" style="color:#2563eb">0</b>건</span>
+      <button id="poSelectionClearBtn" class="btn btn-sm" onclick="clearPOSelection()" style="white-space:nowrap;background:#fff;border:1px solid #cbd5e1;color:#475569;font-size:11px;display:none" title="선택 모두 해제">선택해제</button>
+      <button class="btn btn-sm" onclick="downloadPOExcel()" style="white-space:nowrap" title="선택된 PO 가 있으면 그것만, 없으면 필터된 전체를 엑셀로 다운로드">엑셀 다운로드</button>
     </div>
   </div>
 
@@ -7705,6 +7707,9 @@ let poList=[];
 let receiptHistory=[];
 let invoicesList=[];
 let poStatusFilter='all';
+// 발주현황 PO 선택 상태 (체크박스로 토글) — 선택된 게 있으면 엑셀 다운로드 시 그것만 출력.
+// 비어있으면 기존 동작 (필터된 전체) 그대로.
+const poSelected = new Set();
 let currentOriginContext = null; // 한국/중국/더기프트 origin 필터 컨텍스트
 
 // 발주 가이드 설정값 (한국/중국 분리)
@@ -17033,6 +17038,8 @@ function renderPOList(){
     const pOpts = postNames.map(n => '<option value="'+esc(n)+'">').join('');
     container.querySelectorAll('datalist[id^="poPostVendorDL_"]').forEach(dl => { dl.innerHTML = pOpts; });
   }
+  // 선택 상태 UI 갱신 (재렌더 후 카운트/버튼 표시 유지)
+  if (typeof updatePOSelectionUI === 'function') updatePOSelectionUI();
 }
 
 // 발주생성 페이지에서 저장 전 현재 목록 엑셀 다운로드
@@ -17111,9 +17118,35 @@ function downloadCreatePOExcel(){
   XLSX.writeFile(wb,`발주대상_${origin}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
+// ===== 발주현황 PO 선택 (체크박스) =====
+function togglePOSelection(poId, checked) {
+  if (checked) poSelected.add(poId);
+  else poSelected.delete(poId);
+  updatePOSelectionUI();
+}
+function clearPOSelection() {
+  poSelected.clear();
+  document.querySelectorAll('.poChk').forEach(cb => { cb.checked = false; });
+  updatePOSelectionUI();
+}
+function updatePOSelectionUI() {
+  const info = document.getElementById('poSelectionInfo');
+  const cnt = document.getElementById('poSelectionCount');
+  const btn = document.getElementById('poSelectionClearBtn');
+  const has = poSelected.size > 0;
+  if (cnt) cnt.textContent = poSelected.size;
+  if (info) info.style.display = has ? 'inline-block' : 'none';
+  if (btn) btn.style.display = has ? 'inline-block' : 'none';
+}
+
 function downloadPOExcel(){
   let data=poList||[];
   if(poStatusFilter!=='all') data=data.filter(po=>po.status===poStatusFilter);
+  // 체크박스로 선택된 PO 가 있으면 그것만 (없으면 필터된 전체 — 기존 동작)
+  if (poSelected.size > 0) {
+    data = data.filter(po => poSelected.has(po.po_id));
+    if(!data.length){alert('선택된 PO 가 현재 상태 필터와 일치하지 않습니다. 필터를 "전체" 로 바꿔보세요.');return;}
+  }
   if(!data.length){alert('다운로드할 발주 내역이 없습니다.');return;}
 
   const isChinaContext = currentOriginContext==='중국';
@@ -17166,7 +17199,8 @@ function downloadPOExcel(){
   XLSX.utils.book_append_sheet(wb,ws,isChinaContext?'중국발주서':'발주현황');
   const origin=currentOriginContext||'전체';
   const status=poStatusFilter!=='all'?('_'+poStatusFilter):'';
-  XLSX.writeFile(wb,`발주현황_${origin}${status}_${new Date().toISOString().slice(0,10)}.xlsx`);
+  const selSuffix = poSelected.size > 0 ? `_선택${data.length}건` : '';
+  XLSX.writeFile(wb,`발주현황_${origin}${status}${selSuffix}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 // 원재료 PO 마감 엑셀 다운로드 — 헤더의 #poClosingFrom{suffix} / To / Vendor input 값 사용.
@@ -17415,6 +17449,7 @@ function renderPOSubCard(po, idx, steps, icon) {
     return `<div style="margin:8px 12px;padding:12px;border:1px solid ${typeBorder};border-radius:8px;border-left:4px solid ${typeColor};background:${typeBg}">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-bottom:8px">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <input type="checkbox" class="poChk" data-poid="${po.po_id}" onclick="event.stopPropagation();togglePOSelection(${po.po_id}, this.checked)" ${poSelected.has(po.po_id) ? 'checked' : ''} style="margin:0;cursor:pointer;width:15px;height:15px" title="이 PO 선택 — 엑셀 다운로드 시 선택된 것만 출력">
           <span style="font-size:14px">${icon}</span>
           <span style="font-weight:700;font-size:13px">${esc(po.po_number||'')}</span>
           ${defectBadge}
