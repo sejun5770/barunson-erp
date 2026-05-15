@@ -752,8 +752,9 @@ function scheduleProductInfoReload() {
   _productInfoReloadScheduled = true;
   setTimeout(async () => {
     _productInfoReloadScheduled = false;
-    // 최근 5초 안에 이미 재로드했으면 스킵 — bulk 흐름에서 중복 스캔 방지
-    if (Date.now() - _lastProductInfoReloadAt < 5000) return;
+    // 디바운스(1.5s) 자체가 이미 burst 흡수 역할. 추가 쿨다운(이전 5초)을 두면
+    // bulk 흐름 직후 사용자 단일 수정이 캐시에 영구 반영 안 되는 버그가 발생함
+    // (품목관리에서 원재료용지명 수정 → 발주서/재고현황 옛 값 표시) — 그래서 쿨다운 제거.
     await reloadProductInfoFromDB();
     _lastProductInfoReloadAt = Date.now();
   }, 1500);
