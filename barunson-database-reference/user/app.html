@@ -18845,6 +18845,7 @@ function renderPODrafts(drafts){
         <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
           <div style="font-size:15px;font-weight:800;color:#0f172a">${fN(d.total_amount)}원</div>
           <button class="btn btn-sm" onclick="viewPODraft(${d.id})" style="font-size:11px;padding:3px 10px">보기/인쇄</button>
+          <button class="btn btn-sm" onclick="editPODraft(${d.id})" style="font-size:11px;padding:3px 10px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" title="발주서 수정 (완료된 건은 관리자만)">✏️ 수정</button>
           ${!isCompleted?`<button class="btn btn-sm" onclick="markPODraftComplete(${d.id})" style="font-size:11px;padding:3px 10px;background:#16a34a;color:#fff;border-color:#16a34a">✅ 완료</button>`:'<button class="btn btn-sm" onclick="markPODraftComplete(${d.id},true)" style="font-size:11px;padding:3px 10px;background:#f59e0b;color:#fff;border-color:#f59e0b">↩ 복원</button>'}
           <button class="btn btn-sm" onclick="quickEmailPO(${d.id},'${(d.vendor_email||'').replace(/'/g,'')}')" style="font-size:11px;padding:3px 10px;background:#059669;color:#fff;border-color:#059669">✉️ 이메일</button>
           <button onclick="deletePODraft(${d.id})" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:18px;padding:0 4px" title="삭제">×</button>
@@ -19267,19 +19268,42 @@ async function savePODraft(){
     legal_entity: (typeof _poCurrentEntity !== 'undefined' && _poCurrentEntity) || 'barunson'
   };
 
-  const resp = await fetch('/api/po-drafts', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()).catch(()=>null);
-  const savedId = resp?.data?.id || resp?.id;
-  if(savedId){
+  // poDraftEditId 가 있으면 PUT (수정), 없으면 POST (신규)
+  const url = poDraftEditId ? `/api/po-drafts/${poDraftEditId}` : '/api/po-drafts';
+  const httpMethod = poDraftEditId ? 'PUT' : 'POST';
+  const resp = await fetch(url, {method:httpMethod,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()).catch(()=>null);
+  const savedId = resp?.data?.id || resp?.id || poDraftEditId;
+  if(resp?.ok !== false && savedId){
+    const wasEdit = !!poDraftEditId;
     poDraftEditId = savedId;
     loadPODrafts();
     // 저장 완료 — 이메일 버튼 표시, 저장 버튼 숨김
     document.getElementById('btnPoSave').style.display = 'none';
     document.getElementById('btnPoEmail').style.display = '';
-    document.getElementById('poFormModalTitle').textContent = '발주서 저장됨 — 이메일 발송하시겠습니까?';
+    document.getElementById('poFormModalTitle').textContent = wasEdit
+      ? '발주서 수정됨 — 이메일 재발송하시겠습니까?'
+      : '발주서 저장됨 — 이메일 발송하시겠습니까?';
     openEmailCompose();
   } else {
-    alert('저장 실패');
+    alert((resp && resp.error) || '저장 실패');
   }
+}
+
+// 발주서 수정 진입 — viewPODraft 와 동일하게 모달 채우되 저장 버튼 활성화
+async function editPODraft(id){
+  const resp = await fetch('/api/po-drafts').then(r=>r.json()).catch(()=>null);
+  const drafts = resp?.data||resp||[];
+  const d = drafts.find(x=>x.id===id);
+  if(!d) return;
+  const isCompleted = d.status === 'completed' || !!d.completed_at;
+  if (isCompleted) {
+    if (!confirm('완료된 발주서입니다. 관리자 권한이 있는 경우에만 수정 가능합니다.\n계속할까요?')) return;
+  }
+  await viewPODraft(id);
+  // viewPODraft 가 저장 버튼을 숨겨놨으므로 다시 활성화 + 제목 변경
+  document.getElementById('poFormModalTitle').textContent = `✏️ 발주서 수정 — ${d.po_number}`;
+  document.getElementById('btnPoSave').style.display = '';
+  document.getElementById('btnPoEmail').style.display = 'none';
 }
 
 // ── 보기 ──

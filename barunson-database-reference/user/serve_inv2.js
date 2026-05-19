@@ -13756,6 +13756,43 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // PUT /api/po-drafts/:id — 발주서 수정 (po_number 변경은 금지, 그 외 모든 필드 갱신)
+  // 완료된(status='completed') 발주서는 admin 만 수정 허용 (관리자 외 거부)
+  const _draftPutMatch = pathname.match(/^\/api\/po-drafts\/(\d+)$/);
+  if (_draftPutMatch && method === 'PUT') {
+    const id = parseInt(_draftPutMatch[1]);
+    const existing = await db.prepare('SELECT id, status, completed_at FROM po_drafts WHERE id=?').get(id);
+    if (!existing) { fail(res, 404, '발주서 없음'); return; }
+    const isAdmin = currentUser && currentUser.role === 'admin';
+    const isCompleted = existing.status === 'completed' || !!existing.completed_at;
+    if (isCompleted && !isAdmin) {
+      fail(res, 403, '완료된 발주서는 관리자만 수정 가능합니다');
+      return;
+    }
+    const body = await readJSON(req);
+    const { po_number, po_date, due_date, vendor_id, vendor_name, vendor_contact, vendor_phone, vendor_email,
+            issuer_name, issuer_contact, issuer_phone, issuer_email, payment_terms, remark,
+            items, total_supply, total_tax, total_amount } = body;
+    const legal_entity = (body.legal_entity === 'dd') ? 'dd' : 'barunson';
+    await db.prepare(`UPDATE po_drafts SET
+      po_number=?, po_date=?, due_date=?, vendor_id=?, vendor_name=?, vendor_contact=?, vendor_phone=?, vendor_email=?,
+      issuer_name=?, issuer_contact=?, issuer_phone=?, issuer_email=?, payment_terms=?, remark=?,
+      items=?, total_supply=?, total_tax=?, total_amount=?, legal_entity=?,
+      updated_at=datetime('now','localtime')
+      WHERE id=?`).run(
+      po_number||'', po_date||'', due_date||'', vendor_id||0, vendor_name||'',
+      vendor_contact||'', vendor_phone||'', vendor_email||'',
+      issuer_name||'바른컴퍼니', issuer_contact||'', issuer_phone||'', issuer_email||'',
+      payment_terms||'', remark||'',
+      typeof items === 'string' ? items : JSON.stringify(items||[]),
+      total_supply||0, total_tax||0, total_amount||0, legal_entity,
+      id
+    );
+    if (currentUser) auditLog(currentUser.userId, currentUser.username, 'po_draft_update', 'po_drafts', String(id), `발주서 수정: ${po_number||''}`, clientIP);
+    ok(res, { id, updated: true });
+    return;
+  }
+
   // POST /api/po-drafts/:id/email — 발주서 이메일 발송
   if (pathname.match(/^\/api\/po-drafts\/\d+\/email$/) && method === 'POST') {
     const id = parseInt(pathname.split('/')[3]);
