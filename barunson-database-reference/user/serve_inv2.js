@@ -2922,8 +2922,17 @@ await db.exec(`CREATE TABLE IF NOT EXISTS po_drafts (
   total_tax INTEGER DEFAULT 0,
   total_amount INTEGER DEFAULT 0,
   status TEXT DEFAULT 'sent',
-  created_at TEXT DEFAULT (datetime('now','localtime'))
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime')),
+  completed_at TEXT DEFAULT ''
 )`);
+// 기존 운영 DB(특히 sc_erp 공유 PG) 에는 옛 schema 로 po_drafts 가 만들어져 있어
+// updated_at / completed_at / legal_entity 가 없으면 CREATE IF NOT EXISTS 가 추가하지 않음.
+// PUT /api/po-drafts/:id (수정) 의 UPDATE 쿼리에서 'updated_at does not exist' 로 실패하므로
+// ALTER 보강 (이미 있으면 catch).
+try { await db.exec("ALTER TABLE po_drafts ADD COLUMN updated_at TEXT DEFAULT (datetime('now','localtime'))"); } catch(_) {}
+try { await db.exec("ALTER TABLE po_drafts ADD COLUMN completed_at TEXT DEFAULT ''"); } catch(_) {}
+try { await db.exec("ALTER TABLE po_drafts ADD COLUMN legal_entity TEXT DEFAULT 'barunson'"); } catch(_) {}
 
 // 발주서 변경 이력 — PUT /api/po-drafts/:id 호출 시 변경된 필드별로 한 행 INSERT
 await db.exec(`CREATE TABLE IF NOT EXISTS po_draft_history (
