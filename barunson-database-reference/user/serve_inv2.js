@@ -2925,6 +2925,21 @@ await db.exec(`CREATE TABLE IF NOT EXISTS po_drafts (
   created_at TEXT DEFAULT (datetime('now','localtime'))
 )`);
 
+// 발주서 변경 이력 — PUT /api/po-drafts/:id 호출 시 변경된 필드별로 한 행 INSERT
+await db.exec(`CREATE TABLE IF NOT EXISTS po_draft_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  draft_id INTEGER NOT NULL,
+  field_name TEXT NOT NULL,
+  old_value TEXT DEFAULT '',
+  new_value TEXT DEFAULT '',
+  changed_by TEXT DEFAULT '',
+  changed_by_id INTEGER DEFAULT 0,
+  action TEXT DEFAULT 'update',
+  changed_at TEXT DEFAULT (datetime('now','localtime'))
+)`);
+try { await db.exec("CREATE INDEX IF NOT EXISTS idx_po_draft_history_draft ON po_draft_history(draft_id)"); } catch(_) {}
+try { await db.exec("CREATE INDEX IF NOT EXISTS idx_po_draft_history_at ON po_draft_history(changed_at)"); } catch(_) {}
+
 // v1.0.9: vendor_notes 테이블 (미팅일지) — CREATE 누락 수정
 await db.exec(`CREATE TABLE IF NOT EXISTS vendor_notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -13758,10 +13773,12 @@ async function handleRequest(req, res) {
 
   // PUT /api/po-drafts/:id — 발주서 수정 (po_number 변경은 금지, 그 외 모든 필드 갱신)
   // 완료된(status='completed') 발주서는 admin 만 수정 허용 (관리자 외 거부)
+  // 변경된 필드별로 po_draft_history 에 한 행씩 INSERT (이력 추적)
   const _draftPutMatch = pathname.match(/^\/api\/po-drafts\/(\d+)$/);
   if (_draftPutMatch && method === 'PUT') {
     const id = parseInt(_draftPutMatch[1]);
-    const existing = await db.prepare('SELECT id, status, completed_at FROM po_drafts WHERE id=?').get(id);
+    // 전체 row 로드 (이력 비교용)
+    const existing = await db.prepare('SELECT * FROM po_drafts WHERE id=?').get(id);
     if (!existing) { fail(res, 404, '발주서 없음'); return; }
     const isAdmin = currentUser && currentUser.role === 'admin';
     const isCompleted = existing.status === 'completed' || !!existing.completed_at;
@@ -13774,6 +13791,56 @@ async function handleRequest(req, res) {
             issuer_name, issuer_contact, issuer_phone, issuer_email, payment_terms, remark,
             items, total_supply, total_tax, total_amount } = body;
     const legal_entity = (body.legal_entity === 'dd') ? 'dd' : 'barunson';
+    const itemsStr = typeof items === 'string' ? items : JSON.stringify(items||[]);
+
+    // 변경 이력 기록 — 필드별 차이 INSERT
+    const _fields = [
+      ['po_number', po_number||''],
+      ['po_date', po_date||''],
+      ['due_date', due_date||''],
+      ['vendor_id', vendor_id||0],
+      ['vendor_name', vendor_name||''],
+      ['vendor_contact', vendor_contact||''],
+      ['vendor_phone', vendor_phone||''],
+      ['vendor_email', vendor_email||''],
+      ['issuer_name', issuer_name||'바른컴퍼니'],
+      ['issuer_contact', issuer_contact||''],
+      ['issuer_phone', issuer_phone||''],
+      ['issuer_email', issuer_email||''],
+      ['payment_terms', payment_terms||''],
+      ['remark', remark||''],
+      ['total_supply', total_supply||0],
+      ['total_tax', total_tax||0],
+      ['total_amount', total_amount||0],
+      ['legal_entity', legal_entity],
+    ];
+    const _changer = currentUser?.username || '';
+    const _changerId = currentUser?.userId || 0;
+    let _changedCount = 0;
+    for (const [fld, newVal] of _fields) {
+      const oldVal = existing[fld] != null ? String(existing[fld]) : '';
+      const newValStr = String(newVal);
+      if (oldVal !== newValStr) {
+        try {
+          await db.prepare(`INSERT INTO po_draft_history (draft_id, field_name, old_value, new_value, changed_by, changed_by_id, action) VALUES (?,?,?,?,?,?,?)`)
+            .run(id, fld, oldVal, newValStr, _changer, _changerId, 'update');
+          _changedCount++;
+        } catch(e) { console.warn('[po_draft_history] insert skip:', e.message); }
+      }
+    }
+    // items 는 JSON 이라 길이/raw 비교만 — 변경되면 요약 행 1건
+    const _oldItemsStr = existing.items || '[]';
+    if (_oldItemsStr !== itemsStr) {
+      let _oldCnt = 0, _newCnt = 0;
+      try { _oldCnt = (JSON.parse(_oldItemsStr)||[]).filter(x => x && x.name).length; } catch(_) {}
+      try { _newCnt = (JSON.parse(itemsStr)||[]).filter(x => x && x.name).length; } catch(_) {}
+      try {
+        await db.prepare(`INSERT INTO po_draft_history (draft_id, field_name, old_value, new_value, changed_by, changed_by_id, action) VALUES (?,?,?,?,?,?,?)`)
+          .run(id, 'items', `품목 ${_oldCnt}건`, `품목 ${_newCnt}건`, _changer, _changerId, 'update');
+        _changedCount++;
+      } catch(e) { console.warn('[po_draft_history] items insert skip:', e.message); }
+    }
+
     await db.prepare(`UPDATE po_drafts SET
       po_number=?, po_date=?, due_date=?, vendor_id=?, vendor_name=?, vendor_contact=?, vendor_phone=?, vendor_email=?,
       issuer_name=?, issuer_contact=?, issuer_phone=?, issuer_email=?, payment_terms=?, remark=?,
@@ -13784,12 +13851,29 @@ async function handleRequest(req, res) {
       vendor_contact||'', vendor_phone||'', vendor_email||'',
       issuer_name||'바른컴퍼니', issuer_contact||'', issuer_phone||'', issuer_email||'',
       payment_terms||'', remark||'',
-      typeof items === 'string' ? items : JSON.stringify(items||[]),
+      itemsStr,
       total_supply||0, total_tax||0, total_amount||0, legal_entity,
       id
     );
-    if (currentUser) auditLog(currentUser.userId, currentUser.username, 'po_draft_update', 'po_drafts', String(id), `발주서 수정: ${po_number||''}`, clientIP);
-    ok(res, { id, updated: true });
+    if (currentUser) auditLog(currentUser.userId, currentUser.username, 'po_draft_update', 'po_drafts', String(id), `발주서 수정: ${po_number||''} (변경필드 ${_changedCount}건)`, clientIP);
+    ok(res, { id, updated: true, changed_fields: _changedCount });
+    return;
+  }
+
+  // GET /api/po-drafts/:id/history — 발주서 변경 이력 조회 (최신순)
+  const _draftHistMatch = pathname.match(/^\/api\/po-drafts\/(\d+)\/history$/);
+  if (_draftHistMatch && method === 'GET') {
+    const id = parseInt(_draftHistMatch[1]);
+    try {
+      const rows = await db.prepare(
+        `SELECT id, draft_id, field_name, old_value, new_value, changed_by, changed_by_id, action, changed_at
+         FROM po_draft_history WHERE draft_id=? ORDER BY id DESC`
+      ).all(id);
+      ok(res, rows);
+    } catch (e) {
+      console.error('po-draft-history error:', e.message);
+      ok(res, []);
+    }
     return;
   }
 

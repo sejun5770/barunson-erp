@@ -18846,6 +18846,7 @@ function renderPODrafts(drafts){
           <div style="font-size:15px;font-weight:800;color:#0f172a">${fN(d.total_amount)}원</div>
           <button class="btn btn-sm" onclick="viewPODraft(${d.id})" style="font-size:11px;padding:3px 10px">보기/인쇄</button>
           <button class="btn btn-sm" onclick="editPODraft(${d.id})" style="font-size:11px;padding:3px 10px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" title="발주서 수정 (완료된 건은 관리자만)">✏️ 수정</button>
+          <button class="btn btn-sm" onclick="viewPODraftHistory(${d.id},'${esc(d.po_number||'')}')" style="font-size:11px;padding:3px 8px;background:#f8fafc;color:#475569;border:1px solid #cbd5e1" title="발주서 변경 이력 보기">📋</button>
           ${!isCompleted?`<button class="btn btn-sm" onclick="markPODraftComplete(${d.id})" style="font-size:11px;padding:3px 10px;background:#16a34a;color:#fff;border-color:#16a34a">✅ 완료</button>`:'<button class="btn btn-sm" onclick="markPODraftComplete(${d.id},true)" style="font-size:11px;padding:3px 10px;background:#f59e0b;color:#fff;border-color:#f59e0b">↩ 복원</button>'}
           <button class="btn btn-sm" onclick="quickEmailPO(${d.id},'${(d.vendor_email||'').replace(/'/g,'')}')" style="font-size:11px;padding:3px 10px;background:#059669;color:#fff;border-color:#059669">✉️ 이메일</button>
           <button onclick="deletePODraft(${d.id})" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:18px;padding:0 4px" title="삭제">×</button>
@@ -19287,6 +19288,55 @@ async function savePODraft(){
   } else {
     alert((resp && resp.error) || '저장 실패');
   }
+}
+
+// 발주서 변경 이력 모달 — 동적 생성 + 1회용 (닫으면 DOM 제거)
+async function viewPODraftHistory(id, poNumber){
+  const rows = await fetch(`/api/po-drafts/${id}/history`).then(r=>r.json()).then(j=>j.data||j||[]).catch(()=>[]);
+  // 모달 컨테이너
+  const dim = document.createElement('div');
+  dim.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.55);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px';
+  dim.onclick = e => { if (e.target === dim) dim.remove(); };
+  // 필드 라벨 한글 매핑
+  const labels = {
+    po_number:'발주번호', po_date:'발주일', due_date:'납기예정일',
+    vendor_id:'거래처ID', vendor_name:'거래처명', vendor_contact:'거래처 담당자',
+    vendor_phone:'거래처 연락처', vendor_email:'거래처 이메일',
+    issuer_name:'발주자', issuer_contact:'발주자 담당자', issuer_phone:'발주자 연락처', issuer_email:'발주자 이메일',
+    payment_terms:'결제조건', remark:'비고',
+    total_supply:'공급가액', total_tax:'세액', total_amount:'합계금액',
+    legal_entity:'법인', items:'품목'
+  };
+  const fmt = v => (v == null || v === '') ? '<span style="color:#cbd5e1">(빈값)</span>' : esc(String(v));
+  const body = rows.length === 0
+    ? '<div style="padding:40px;text-align:center;color:#94a3b8;font-size:13px">변경 이력이 없습니다.</div>'
+    : `<table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:#f1f5f9">
+          <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #e2e8f0;color:#475569;white-space:nowrap">변경시각</th>
+          <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #e2e8f0;color:#475569">필드</th>
+          <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #e2e8f0;color:#475569">이전</th>
+          <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #e2e8f0;color:#475569">변경 후</th>
+          <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #e2e8f0;color:#475569;white-space:nowrap">변경자</th>
+        </tr></thead>
+        <tbody>${rows.map(r => `
+          <tr style="border-bottom:1px solid #f1f5f9">
+            <td style="padding:7px 10px;color:#64748b;white-space:nowrap">${esc(r.changed_at||'')}</td>
+            <td style="padding:7px 10px;font-weight:600;color:#0f172a">${esc(labels[r.field_name]||r.field_name||'')}</td>
+            <td style="padding:7px 10px;color:#64748b;max-width:260px;word-break:break-all">${fmt(r.old_value)}</td>
+            <td style="padding:7px 10px;color:#0369a1;font-weight:600;max-width:260px;word-break:break-all">${fmt(r.new_value)}</td>
+            <td style="padding:7px 10px;color:#475569;white-space:nowrap">${esc(r.changed_by||'')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  dim.innerHTML = `<div style="background:#fff;border-radius:12px;width:100%;max-width:900px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.25)">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;background:#1e293b;color:#fff">
+      <div style="font-size:14px;font-weight:700">📋 발주서 변경 이력 — ${esc(poNumber||'')} <span style="font-size:11px;color:#94a3b8;margin-left:6px;font-weight:400">총 ${rows.length}건</span></div>
+      <button onclick="this.closest('[data-modal-host]').remove()" style="background:none;border:none;color:#94a3b8;font-size:22px;cursor:pointer;line-height:1">×</button>
+    </div>
+    <div style="overflow-y:auto;flex:1;padding:0">${body}</div>
+  </div>`;
+  dim.setAttribute('data-modal-host', '1');
+  document.body.appendChild(dim);
 }
 
 // 발주서 수정 진입 — viewPODraft 와 동일하게 모달 채우되 저장 버튼 활성화
