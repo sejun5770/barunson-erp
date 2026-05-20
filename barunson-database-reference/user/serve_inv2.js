@@ -11799,19 +11799,47 @@ async function handleRequest(req, res) {
     const osNumber = body.os_number || '';
     const itemOS = body.item_os || []; // [{item_id, os_number}]
 
-    // 자식(후공정) PO 들에 같은 OS번호 전파 — 부모 원재료 PO 의 세트에 속한 모든 후공정 PO 의
-    // po_header.os_number / po_items.os_number 를 동일 값으로 set. 한 세트는 같은 OS번호 공유.
-    async function _propagateOSToChildren(parentId, osValue) {
-      if (!osValue) return 0;
+    // 자식(후공정) PO 들에 OS번호 전파 — 제품코드 기준 매핑.
+    // 한 발주서에 여러 제품코드가 있고 제품별 OS번호가 다른 경우,
+    // 자식 po_items 의 각 item 은 같은 product_code 의 부모 OS번호를 받음.
+    //   1) 부모 po_items 에서 product_code → os_number 매핑 빌드
+    //   2) 자식 po_items 각 item 마다 product_code 매칭 → 그 OS번호 set
+    //   3) 자식 item.product_code 가 부모에 없으면 defaultOsValue (전체 모드 입력값) fallback
+    //   4) 자식 po_header.os_number 는 자식 item 중 첫 OS번호 (대표값)
+    async function _propagateOSToChildren(parentId, defaultOsValue) {
       try {
+        const parentItems = await db.prepare(
+          "SELECT product_code, os_number FROM po_items WHERE po_id = ? AND os_number IS NOT NULL AND os_number <> ''"
+        ).all(parentId);
+        const osByCode = {};
+        for (const r of parentItems) {
+          if (r.product_code && r.os_number && !osByCode[r.product_code]) {
+            osByCode[r.product_code] = r.os_number;
+          }
+        }
+        if (Object.keys(osByCode).length === 0 && !defaultOsValue) return 0;
+
         const _children = await db.prepare("SELECT po_id FROM po_header WHERE parent_po_id = ?").all(parentId);
+        if (!_children.length) return 0;
         let propagated = 0;
         for (const c of _children) {
           try {
-            await db.prepare("UPDATE po_header SET os_number = ?, updated_at = datetime('now','localtime') WHERE po_id = ?").run(osValue, c.po_id);
-            await db.prepare("UPDATE po_items SET os_number = ? WHERE po_id = ?").run(osValue, c.po_id);
-            try { logPOActivity(c.po_id, 'os_inherited', { actor_type: 'system', details: `부모 PO #${parentId} 로부터 OS번호 자동 전파: ${osValue}` }); } catch (_) {}
-            propagated++;
+            const childItems = await db.prepare("SELECT item_id, product_code FROM po_items WHERE po_id = ?").all(c.po_id);
+            let firstOS = '';
+            let updatedItems = 0;
+            for (const item of childItems) {
+              const os = (item.product_code && osByCode[item.product_code]) || defaultOsValue;
+              if (os) {
+                await db.prepare("UPDATE po_items SET os_number = ? WHERE item_id = ?").run(os, item.item_id);
+                if (!firstOS) firstOS = os;
+                updatedItems++;
+              }
+            }
+            if (firstOS) {
+              await db.prepare("UPDATE po_header SET os_number = ?, updated_at = datetime('now','localtime') WHERE po_id = ?").run(firstOS, c.po_id);
+              try { logPOActivity(c.po_id, 'os_inherited', { actor_type: 'system', details: `부모 PO #${parentId} 로부터 OS번호 자동 전파 (${updatedItems}개 item, 제품코드 매핑)` }); } catch (_) {}
+              propagated++;
+            }
           } catch (_) { /* 한 자식 실패해도 다른 자식 계속 */ }
         }
         return propagated;
