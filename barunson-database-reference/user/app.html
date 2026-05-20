@@ -17051,10 +17051,15 @@ function renderPOList(){
     });
 
     // ── 원재료 + 그에 속하는 후공정을 세트 단위로 인접 출력 ──
+    // 분류 조건: '같은 그룹 안의 부모 mat' 존재 여부 (matIdSet) — 색맵 _setColorByRoot 가
+    // postPOs forEach 에서도 미리 부여되므로 그것만으로는 같은 그룹 매칭 보장 X.
+    // (이전 버그: 부모가 다른 그룹에 있는데 _setColorByRoot[parent_po_id] 가 truthy 라
+    //  자식이 _postsByParent 에 분류 → matPOs 가 빈 그룹이라 render 안 됨 → 그룹 펼쳐도 카드 0건)
+    const _matIdSet = new Set(matPOs.map(m => m.po_id));
     const _postsByParent = {};
     const _orphanPosts = [];
     postPOs.forEach(po => {
-      if (po.parent_po_id && _setColorByRoot[po.parent_po_id]) {
+      if (po.parent_po_id && _matIdSet.has(po.parent_po_id)) {
         if (!_postsByParent[po.parent_po_id]) _postsByParent[po.parent_po_id] = [];
         _postsByParent[po.parent_po_id].push(po);
       } else {
