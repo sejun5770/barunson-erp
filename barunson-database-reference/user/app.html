@@ -17000,20 +17000,60 @@ function renderPOList(){
       </div>
       <div style="display:${defaultOpen?'block':'none'}">`;
 
-    // ── 원재료 섹션 ──
-    matPOs.forEach(po=>{
-      const idx=po._idx;
-      html += renderPOSubCard(po, idx, steps, '📦');
+    // ── 세트(원재료 + 그에 속하는 후공정) 별 인접 정렬 ──
+    // 세트 식별자: 원재료 PO 는 자기 po_id, 후공정 PO 는 parent_po_id (있으면) 또는 os_number
+    // 같은 세트 PO 끼리 같은 색 좌측 보더로 강조.
+    const _setIdOf = po => po.parent_po_id || po.po_id;
+    // 그룹 안의 각 세트마다 고유 색 부여 (회전 팔레트)
+    const _setColors = ['#7c3aed','#0891b2','#16a34a','#ea580c','#dc2626','#9333ea','#0284c7','#65a30d'];
+    const _setColorByRoot = {};
+    let _setColorIdx = 0;
+    // 원재료 PO 를 먼저 순회하며 세트 색 부여
+    matPOs.forEach(po => {
+      const rootId = po.po_id;
+      if (!(rootId in _setColorByRoot)) {
+        _setColorByRoot[rootId] = _setColors[_setColorIdx % _setColors.length];
+        _setColorIdx++;
+      }
+    });
+    // 후공정 PO 의 parent 가 원재료 PO 면 같은 색, 아니면 신규 색
+    postPOs.forEach(po => {
+      const setRoot = po.parent_po_id || po.po_id;
+      if (!(setRoot in _setColorByRoot)) {
+        _setColorByRoot[setRoot] = _setColors[_setColorIdx % _setColors.length];
+        _setColorIdx++;
+      }
     });
 
-    // ── 후공정 섹션 (업체별 묶기) ──
-    if(postPOs.length){
+    // ── 원재료 + 그에 속하는 후공정을 세트 단위로 인접 출력 ──
+    const _postsByParent = {};
+    const _orphanPosts = [];
+    postPOs.forEach(po => {
+      if (po.parent_po_id && _setColorByRoot[po.parent_po_id]) {
+        if (!_postsByParent[po.parent_po_id]) _postsByParent[po.parent_po_id] = [];
+        _postsByParent[po.parent_po_id].push(po);
+      } else {
+        _orphanPosts.push(po);
+      }
+    });
+
+    matPOs.forEach(mat => {
+      const setColor = _setColorByRoot[mat.po_id];
+      const setId = mat.po_id;
+      html += renderPOSubCard(mat, mat._idx, steps, '📦', { setColor, setId, setRole: 'root' });
+      const children = _postsByParent[mat.po_id] || [];
+      children.forEach(child => {
+        html += renderPOSubCard(child, child._idx, steps, '🔧', { setColor, setId, setRole: 'child' });
+      });
+    });
+
+    // ── 부모 없는 후공정 (orphan) — 업체별 묶기, 세트 강조 없음 ──
+    if (_orphanPosts.length) {
       const byVendor = {};
-      postPOs.forEach(po=>{ if(!byVendor[po.vendor_name]) byVendor[po.vendor_name]=[]; byVendor[po.vendor_name].push(po); });
+      _orphanPosts.forEach(po=>{ if(!byVendor[po.vendor_name]) byVendor[po.vendor_name]=[]; byVendor[po.vendor_name].push(po); });
       Object.entries(byVendor).forEach(([vname, vpos])=>{
         vpos.forEach(po=>{
-          const idx=po._idx;
-          html += renderPOSubCard(po, idx, steps, '🔧');
+          html += renderPOSubCard(po, po._idx, steps, '🔧');
         });
       });
     }
@@ -17272,7 +17312,11 @@ function setPoClosingDateDefaults() {
   }
 }
 
-function renderPOSubCard(po, idx, steps, icon) {
+function renderPOSubCard(po, idx, steps, icon, setOpts) {
+    // setOpts: { setColor, setId, setRole: 'root'|'child' } — 세트 묶음 시각화
+    const _setColor = setOpts && setOpts.setColor;
+    const _setRole  = setOpts && setOpts.setRole;
+    const _setId    = setOpts && setOpts.setId;
     const typeClass=po.po_type==='원재료'?'sb-safe':po.po_type==='후공정'?'sb-danger':'sb-nosale';
 
     // 액션 버튼
@@ -17446,12 +17490,23 @@ function renderPOSubCard(po, idx, steps, icon) {
     const typeBg = po.po_type === '원재료' ? '#f5f3ff' : '#fef2f2';
     const typeBorder = po.po_type === '원재료' ? '#c4b5fd' : '#fecaca';
 
-    return `<div style="margin:8px 12px;padding:12px;border:1px solid ${typeBorder};border-radius:8px;border-left:4px solid ${typeColor};background:${typeBg}">
+    // 세트 시각화 — 같은 세트 PO 끼리 같은 좌측 보더 색 (8px) + 자식은 들여쓰기
+    const _setBorderLeft = _setColor ? `8px solid ${_setColor}` : `4px solid ${typeColor}`;
+    const _setMarginLeft = _setRole === 'child' ? '36px' : '12px';
+    // 세트 뱃지: 자식이면 부모 PO 표시, 루트는 자식 수 표시
+    const _setBadge = _setColor ? (
+      _setRole === 'child'
+        ? `<span style="font-size:10px;padding:1px 7px;border-radius:10px;background:${_setColor}15;color:${_setColor};font-weight:700;border:1px solid ${_setColor}50;cursor:help" title="원재료 PO #${_setId} 의 후공정 — 같은 OS 세트">🔗 후공정</span>`
+        : `<span style="font-size:10px;padding:1px 7px;border-radius:10px;background:${_setColor}15;color:${_setColor};font-weight:700;border:1px solid ${_setColor}50;cursor:help" title="이 원재료 발주와 연결된 후공정 PO 가 같은 색으로 표시됨">📦 세트 #${_setId}</span>`
+    ) : '';
+
+    return `<div style="margin:8px 12px 8px ${_setMarginLeft};padding:12px;border:1px solid ${typeBorder};border-radius:8px;border-left:${_setBorderLeft};background:${typeBg}">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-bottom:8px">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <input type="checkbox" class="poChk" data-poid="${po.po_id}" onclick="event.stopPropagation();togglePOSelection(${po.po_id}, this.checked)" ${poSelected.has(po.po_id) ? 'checked' : ''} style="margin:0;cursor:pointer;width:15px;height:15px" title="이 PO 선택 — 엑셀 다운로드 시 선택된 것만 출력">
           <span style="font-size:14px">${icon}</span>
           <span style="font-weight:700;font-size:13px">${esc(po.po_number||'')}</span>
+          ${_setBadge}
           ${defectBadge}
           <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:${typeColor}15;color:${typeColor};font-weight:700;border:1px solid ${typeColor}30">${esc(po.po_type||'')}</span>
           <span style="font-size:13px;color:${typeColor};font-weight:600">${esc(po.vendor_name||'')}</span>
