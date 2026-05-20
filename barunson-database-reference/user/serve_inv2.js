@@ -11799,6 +11799,25 @@ async function handleRequest(req, res) {
     const osNumber = body.os_number || '';
     const itemOS = body.item_os || []; // [{item_id, os_number}]
 
+    // 자식(후공정) PO 들에 같은 OS번호 전파 — 부모 원재료 PO 의 세트에 속한 모든 후공정 PO 의
+    // po_header.os_number / po_items.os_number 를 동일 값으로 set. 한 세트는 같은 OS번호 공유.
+    async function _propagateOSToChildren(parentId, osValue) {
+      if (!osValue) return 0;
+      try {
+        const _children = await db.prepare("SELECT po_id FROM po_header WHERE parent_po_id = ?").all(parentId);
+        let propagated = 0;
+        for (const c of _children) {
+          try {
+            await db.prepare("UPDATE po_header SET os_number = ?, updated_at = datetime('now','localtime') WHERE po_id = ?").run(osValue, c.po_id);
+            await db.prepare("UPDATE po_items SET os_number = ? WHERE po_id = ?").run(osValue, c.po_id);
+            try { logPOActivity(c.po_id, 'os_inherited', { actor_type: 'system', details: `부모 PO #${parentId} 로부터 OS번호 자동 전파: ${osValue}` }); } catch (_) {}
+            propagated++;
+          } catch (_) { /* 한 자식 실패해도 다른 자식 계속 */ }
+        }
+        return propagated;
+      } catch (_) { return 0; }
+    }
+
     if (itemOS.length > 0) {
       // 제품별 OS번호 등록
       const stmt = db.prepare('UPDATE po_items SET os_number=? WHERE item_id=? AND po_id=?');
@@ -11814,7 +11833,9 @@ async function handleRequest(req, res) {
         await db.prepare(`UPDATE po_header SET os_number = ?, status = 'os_registered', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(firstOS, poId);
       }
       logPOActivity(poId, 'os_registered', { actor_type: 'admin', to_status: 'os_registered', details: `제품별 OS번호 등록 (${itemOS.filter(i=>i.os_number).length}건)` });
-      ok(res, { ok: true, po_id: poId, item_count: itemOS.filter(i=>i.os_number).length, status: 'os_registered' });
+      // 자식 PO 자동 전파
+      const _propagated = await _propagateOSToChildren(poId, firstOS);
+      ok(res, { ok: true, po_id: poId, item_count: itemOS.filter(i=>i.os_number).length, status: 'os_registered', propagated_to_children: _propagated });
     } else if (osNumber) {
       // PO 전체 OS번호 등록
       const curPO = await db.prepare('SELECT status FROM po_header WHERE po_id=?').get(poId);
@@ -11828,7 +11849,9 @@ async function handleRequest(req, res) {
       await db.prepare('UPDATE po_items SET os_number=? WHERE po_id=?').run(osNumber, poId);
       const newStatus = shouldChangeStatus ? 'os_registered' : (curPO?.status || 'unknown');
       logPOActivity(poId, 'os_saved', { actor_type: 'admin', details: `OS번호: ${osNumber}` });
-      ok(res, { ok: true, po_id: poId, os_number: osNumber, status: newStatus });
+      // 자식 PO 자동 전파
+      const _propagated = await _propagateOSToChildren(poId, osNumber);
+      ok(res, { ok: true, po_id: poId, os_number: osNumber, status: newStatus, propagated_to_children: _propagated });
     } else {
       fail(res, 400, 'os_number 또는 item_os 필수');
     }
