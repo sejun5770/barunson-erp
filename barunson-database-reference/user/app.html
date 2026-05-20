@@ -16977,8 +16977,21 @@ function renderPOList(){
   const steps=['대기','발송','확인','OS등록','완료'];
 
   // ── expected_date(입고예정일) 기준으로 그룹핑, 가까운 날짜 먼저 ──
+  // 자식 후공정 PO (parent_po_id 있음) 는 부모 그룹으로 합류 — 같은 세트가 다른 날짜로
+  // 분리되어 자식이 다른 곳에 표시되는 문제 방지 (예: 사후 추가 시 자식 po_date 가
+  // 오늘로 set 되면 부모 옛 발주일 그룹과 분리되어 사용자가 자식 카드를 못 보는 케이스).
   const groups = {};
-  data.forEach((po,idx)=>{ po._idx=idx; const d=po.expected_date||po.po_date||po.created_at?.slice(0,10)||'기타'; if(!groups[d]) groups[d]=[]; groups[d].push(po); });
+  const _poById = {};
+  data.forEach((po, idx) => { po._idx = idx; _poById[po.po_id] = po; });
+  const _groupKey = po => {
+    // 부모가 같은 데이터셋에 있으면 부모의 그룹 키 사용
+    if (po.parent_po_id && _poById[po.parent_po_id]) {
+      const parent = _poById[po.parent_po_id];
+      return parent.expected_date || parent.po_date || parent.created_at?.slice(0,10) || '기타';
+    }
+    return po.expected_date || po.po_date || po.created_at?.slice(0,10) || '기타';
+  };
+  data.forEach(po => { const d = _groupKey(po); if (!groups[d]) groups[d] = []; groups[d].push(po); });
 
   let html = '';
   Object.entries(groups).sort((a,b)=>b[0].localeCompare(a[0])).forEach(([date, poGroup])=>{

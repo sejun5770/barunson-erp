@@ -12978,12 +12978,18 @@ async function handleRequest(req, res) {
     } else {
       postPoNumber = await generatePoNumber();
       const totalQty = productCodes.reduce((s, c) => s + (qtyByCode[c] || 0), 0);
+      // 자식 후공정 PO 의 po_date / expected_date 를 부모 원재료 PO 와 동일하게 set —
+      // 발주현황 화면의 날짜별 그룹화에서 부모와 같은 그룹에 보이도록.
+      // (이전 버그: 자식 po_date = date('now','localtime') → 오늘 그룹으로 분리되어
+      //  부모(옛 발주일) 그룹에서 자식 카드가 안 보임 → "후공정 카드 생성 안 됨" 으로 인지)
+      const _parentPoDate = matPo.po_date || new Date().toISOString().slice(0,10);
       const info = await db.prepare(`INSERT INTO po_header
         (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
-         due_date, total_qty, notes, origin, po_date, process_step, parent_po_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?)`)
+         due_date, expected_date, total_qty, notes, origin, po_date, process_step, parent_po_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(postPoNumber, '후공정', postVendor, matPo.vendor_name || '', postVendor, 'draft',
-             matPo.due_date || '', totalQty, '사후추가: ' + processType, matPo.origin || '한국', 1, matPoId);
+             matPo.due_date || '', matPo.expected_date || matPo.due_date || '',
+             totalQty, '사후추가: ' + processType, matPo.origin || '한국', _parentPoDate, 1, matPoId);
       postPoId = info.lastInsertRowid;
       createdNew = true;
       try { await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(postPoId, 'created', currentUser?.username || 'system', `사후 추가: 후공정 PO (${postVendor}, ${processType}, 원재료 PO: ${matPo.po_number})`); } catch(_) {}
