@@ -2077,6 +2077,12 @@ try { await db.exec("ALTER TABLE po_header ADD COLUMN origin TEXT DEFAULT ''"); 
 // 응답 빈 객체 → 재고현황 화면의 미입고 컬럼이 모두 비어 보임.
 try { await db.exec("ALTER TABLE po_header ADD COLUMN due_date TEXT DEFAULT ''"); } catch(_) {}
 
+// ── updated_at 컬럼 보강 ──
+// 동일 패턴: CREATE 정의에는 있지만 옛 운영 schema 에는 누락된 경우가 있어
+// PATCH /api/po/:id, /api/po/:id/add-postprocess, /api/po/:id/os 등의 UPDATE 가
+// 실패할 수 있음 (try/catch 로 가려질 수도 있으나 부분 실패 유발).
+try { await db.exec("ALTER TABLE po_header ADD COLUMN updated_at TEXT DEFAULT (datetime('now','localtime'))"); } catch(_) {}
+
 // ============================================================
 // 법인(legal_entity) 컬럼 일괄 추가 — 바른컴퍼니(barunson) / 디디(dd) 분리
 // ============================================================
