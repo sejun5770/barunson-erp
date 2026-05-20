@@ -16847,6 +16847,15 @@ function renderPOStatusPipeline(po) {
     }).join('<span style="color:#d1d5db;font-size:10px;margin:0 2px;">→</span>');
   }
 
+  // 자식 후공정 PO 들 (parent_po_id 연결, backend _children 응답)
+  // 부모(원재료) 카드에서 자식 후공정의 진행 상태도 같은 영역에 통합 chain 표시.
+  const _children = po._children || [];
+  const _childProcLine = c => `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+        <span style="font-size:11px;font-weight:700;color:#7c3aed;min-width:52px;">후공정${c.step?` ${c.step}`:''}</span>
+        <span style="font-size:10px;color:#7c3aed;background:#ede9fe;padding:1px 6px;border-radius:4px;font-weight:600" title="${esc(c.po_number||'')}">${esc(c.process_type || c.vendor || '미지정')}${c.vendor && c.process_type ? ` · ${esc(c.vendor)}` : ''}</span>
+        <div style="display:flex;align-items:center;gap:2px;flex-wrap:wrap;">${renderSteps(procSteps, c.process_status || 'waiting', '#8b5cf6')}</div>
+      </div>`;
+
   return `
     <div style="margin-top:10px; padding:10px 12px; background:#f8fafc; border-radius:8px; border:1px solid #e2e8f0;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
@@ -16854,11 +16863,14 @@ function renderPOStatusPipeline(po) {
         ${po.po_type==='원재료'&&po.vendor_name?`<span style="font-size:10px;color:#1e40af;background:#dbeafe;padding:1px 6px;border-radius:4px;font-weight:600">${esc(po.vendor_name)}</span>`:``}
         <div style="display:flex;align-items:center;gap:2px;flex-wrap:wrap;">${renderSteps(matSteps, matStatus, '#3b82f6')}</div>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;">
+      ${_children.length
+        // 자식 후공정 PO 들이 있으면 각자 한 줄씩 chain 형태로 — 같은 OS 세트 묶음 시각화
+        ? _children.map(_childProcLine).join('')
+        // 자식 없을 때는 기존 단일 후공정 줄 (po 자체의 process_status / 아이템 _postVendor)
+        : `<div style="display:flex;align-items:center;gap:8px;">
         <span style="font-size:11px;font-weight:700;color:#7c3aed;min-width:52px;">후공정</span>
         ${(()=>{
           if(po.po_type==='후공정'&&po.vendor_name) return `<span style="font-size:10px;color:#7c3aed;background:#ede9fe;padding:1px 6px;border-radius:4px;font-weight:600">${esc(po.vendor_name)}</span>`;
-          // 아이템의 _후공정업체에서 수집
           const pvSet=new Set();
           (po.items||[]).forEach(it=>{
             const pv=it._postVendor||'';
@@ -16868,7 +16880,7 @@ function renderPOStatusPipeline(po) {
           return '<span style="font-size:10px;color:#9ca3af;cursor:pointer" title="아이템 테이블에서 후공정 업체를 지정하세요">미지정</span>';
         })()}
         <div style="display:flex;align-items:center;gap:2px;flex-wrap:wrap;">${renderSteps(procSteps, procStatus, '#8b5cf6')}</div>
-      </div>
+      </div>`}
     </div>`;
 }
 
@@ -17521,7 +17533,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
           <button onclick="event.stopPropagation();toggleActivityLog(${po.po_id})" style="padding:3px 8px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;cursor:pointer;font-size:11px;color:#475569">📋</button>
         </div>
       </div>
-      ${po.status!=='취소' ? renderPOStatusPipeline(po) : ''}
+      ${po.status!=='취소' && _setRole !== 'child' ? renderPOStatusPipeline(po) : ''}
       <div style="margin-top:8px">${itemsHtml}</div>
       <div id="activityLog_${po.po_id}" style="display:none;margin-top:8px;padding:8px;background:#f8fafc;border-radius:6px;border:1px solid #e2e8f0"></div>
     </div>`;

@@ -12433,17 +12433,41 @@ async function handleRequest(req, res) {
       if (rootIds.length) {
         const placeholders = rootIds.map(() => '?').join(',');
         const children = await db.prepare(
-          `SELECT po_id, parent_po_id, process_step, status, po_type, vendor_name, process_vendor_name, shipped_at FROM po_header WHERE parent_po_id IN (${placeholders}) ORDER BY process_step ASC, po_id ASC`
+          `SELECT po_id, parent_po_id, process_step, status, po_type, vendor_name, process_vendor_name, shipped_at, process_status, material_status, po_number FROM po_header WHERE parent_po_id IN (${placeholders}) ORDER BY process_step ASC, po_id ASC`
         ).all(...rootIds);
+        // 자식 PO 의 첫 item.process_type 도 함께 — 후공정 라벨 표시용
+        let _childProcessType = {};
+        if (children.length) {
+          const childIds = children.map(c => c.po_id);
+          const itemPh = childIds.map(() => '?').join(',');
+          try {
+            const _firstItems = await db.prepare(
+              `SELECT po_id, MIN(item_id) AS first_id FROM po_items WHERE po_id IN (${itemPh}) GROUP BY po_id`
+            ).all(...childIds);
+            const _firstIdSet = _firstItems.map(r => r.first_id).filter(Boolean);
+            if (_firstIdSet.length) {
+              const idPh = _firstIdSet.map(() => '?').join(',');
+              const _rows = await db.prepare(
+                `SELECT po_id, process_type FROM po_items WHERE item_id IN (${idPh})`
+              ).all(..._firstIdSet);
+              for (const r of _rows) _childProcessType[r.po_id] = r.process_type || '';
+            }
+          } catch (_) { /* 무시 — 라벨 없으면 vendor 만 표시 */ }
+        }
         for (const c of children) {
           if (!childrenByParent[c.parent_po_id]) childrenByParent[c.parent_po_id] = [];
           childrenByParent[c.parent_po_id].push({
             po_id: c.po_id,
+            po_number: c.po_number || '',
             step: c.process_step || 0,
             status: PO_STATUS_EN_TO_KO[c.status] || c.status,
             raw_status: c.status,
             vendor: c.process_vendor_name || c.vendor_name || '',
-            shipped_at: c.shipped_at || ''
+            shipped_at: c.shipped_at || '',
+            // 신규 — 부모 카드의 통합 pipeline 표시용
+            process_status: c.process_status || 'waiting',
+            material_status: c.material_status || 'sent',
+            process_type: _childProcessType[c.po_id] || ''
           });
         }
       }
