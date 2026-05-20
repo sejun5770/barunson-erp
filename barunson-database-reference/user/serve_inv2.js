@@ -845,8 +845,23 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
   };
   const enrichedItems = items.map(it => {
     const pi = pInfo[it.product_code] || {};
-    const cut = parseJeolServer(pi['절']) || 1;
-    const jopan = parseJeolServer(pi['조판']) || 1;
+    // 절/조판 fallback 체인 — 한 곳이 비어있어도 다른 곳에서 채움.
+    // (이전: pi 만 보고 둘 다 비면 1/1 → ream 24배 부풀음. 발주현황 toR 과 불일치 버그.)
+    //   1순위: backend product_info 캐시 (DB products.cut_spec/jopan)
+    //   2순위: po_items.spec / pi['제품사양'] 의 "N절 M조판" 텍스트 파싱
+    //   3순위: po_items.cut_spec / po_items.jopan
+    //   4순위: 1 (default — 결과적으로 ream = qty/500)
+    let cut = parseJeolServer(pi['절']);
+    let jopan = parseJeolServer(pi['조판']);
+    if (!cut || !jopan) {
+      const specStr = String(it.spec || pi['제품사양'] || '');
+      const cutM = specStr.match(/(\d+)\s*절/);
+      const jopM = specStr.match(/(\d+)\s*조판/);
+      if (!cut && cutM) cut = parseFloat(cutM[1]);
+      if (!jopan && jopM) jopan = parseFloat(jopM[1]);
+    }
+    if (!cut) cut = parseJeolServer(it.cut_spec) || 1;
+    if (!jopan) jopan = parseJeolServer(it.jopan) || 1;
     const qty = it.ordered_qty || 0;
     const reams = qty / 500 / cut / jopan;
     const reamsStr = reams % 1 === 0 ? String(reams) : reams.toFixed(1);
