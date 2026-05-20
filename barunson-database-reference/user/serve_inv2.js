@@ -843,18 +843,30 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     const m = String(val).match(/(\d+)/);
     return m ? parseFloat(m[1]) : 0;
   };
+  // DB products 직접 일괄 조회 — pi 캐시가 stale/빈값일 때 fallback.
+  // (이전: pi 만 보고 캐시 비면 원자재코드/원재료용지명/절/조판 전부 빈값으로 메일 발송됨)
+  const _codes = [...new Set(items.map(it => it.product_code).filter(Boolean))];
+  const _dbByCode = {};
+  if (_codes.length) {
+    try {
+      const ph = _codes.map(() => '?').join(',');
+      const rows = await db.prepare(
+        `SELECT product_code, material_code, material_name, cut_spec, jopan, product_spec, paper_maker
+         FROM products WHERE product_code IN (${ph})`
+      ).all(..._codes);
+      for (const r of rows) _dbByCode[r.product_code] = r;
+    } catch (e) { console.warn('[enrich/products fallback] 조회 실패:', e.message); }
+  }
   const enrichedItems = items.map(it => {
     const pi = pInfo[it.product_code] || {};
+    const dbp = _dbByCode[it.product_code] || {};
     // 절/조판 fallback 체인 — 한 곳이 비어있어도 다른 곳에서 채움.
     // (이전: pi 만 보고 둘 다 비면 1/1 → ream 24배 부풀음. 발주현황 toR 과 불일치 버그.)
-    //   1순위: backend product_info 캐시 (DB products.cut_spec/jopan)
-    //   2순위: po_items.spec / pi['제품사양'] 의 "N절 M조판" 텍스트 파싱
-    //   3순위: po_items.cut_spec / po_items.jopan
-    //   4순위: 1 (default — 결과적으로 ream = qty/500)
-    let cut = parseJeolServer(pi['절']);
-    let jopan = parseJeolServer(pi['조판']);
+    //   1순위: pi 캐시 → 2순위: DB 직접 조회 → 3순위: spec 텍스트 파싱 → 4순위: po_items 자체 컬럼 → 5순위: 1
+    let cut = parseJeolServer(pi['절']) || parseJeolServer(dbp.cut_spec);
+    let jopan = parseJeolServer(pi['조판']) || parseJeolServer(dbp.jopan);
     if (!cut || !jopan) {
-      const specStr = String(it.spec || pi['제품사양'] || '');
+      const specStr = String(it.spec || pi['제품사양'] || dbp.product_spec || '');
       const cutM = specStr.match(/(\d+)\s*절/);
       const jopM = specStr.match(/(\d+)\s*조판/);
       if (!cut && cutM) cut = parseFloat(cutM[1]);
@@ -904,10 +916,11 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     }
     return {
       ...it,
-      material_code: pi['원자재코드'] || '',
-      // 원재료명: 규격 컬럼이 별도로 존재하므로 it.spec fallback 제거 (중복 표시 방지)
-      material_name: pi['원재료용지명'] || '',
-      cut_spec: pi['절'] || '',
+      // pi 캐시 우선 → 캐시 빈값이면 DB 직접 조회값 (dbp) → 마지막으로 po_items 자체 컬럼
+      material_code: pi['원자재코드'] || dbp.material_code || it.material_code || '',
+      // 원재료명: 규격 컬럼이 별도로 존재하므로 it.spec fallback 은 의도적 제외 (중복 표시 방지)
+      material_name: pi['원재료용지명'] || dbp.material_name || it.material_name || '',
+      cut_spec: pi['절'] || dbp.cut_spec || it.cut_spec || '',
       ream_qty: reamsStr,
       item_chain: itemChainText,
       spec_display: specText,
