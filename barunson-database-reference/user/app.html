@@ -17373,6 +17373,12 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
     // ─ 재고현황2 입고처리 (재고현황2 전용 — 우리 DB 의 inv2_adjustments 에 +수량 기록) ─
     actions+=` <button class="btn btn-sm" style="background:#ecfeff;color:#0e7490;border:1px solid #67e8f9;margin-left:4px;font-weight:600" onclick="event.stopPropagation();openInv2ReceiveModal(${po.po_id})" title="발주 입고를 재고현황2 에 반영 (원본 재고현황은 영향 없음)">📥 재고2 입고처리</button>`;
 
+    // 부모(원재료) 미연결 후공정 PO — 수동 매칭 버튼 (Phase C)
+    // 옛 발주건 (OS번호 없음 등) 으로 자동 백필이 안 된 케이스를 사용자가 직접 매칭
+    if (po.po_type === '후공정' && !po.parent_po_id) {
+      actions += ` <button class="btn btn-sm" style="background:#f5f3ff;color:#6d28d9;border:1px solid #c4b5fd;margin-left:4px;font-weight:600" onclick="event.stopPropagation();openParentMatchModal(${po.po_id},'${esc(po.po_number||'')}')" title="이 후공정 PO 의 부모 원재료 PO 를 직접 지정해 세트로 묶기">🔗 부모 매칭</button>`;
+    }
+
     // 품목 테이블
     const items=po.items||[];
     const totalOrdered=items.reduce((s,it)=>s+(it.ordered_qty||0),0);
@@ -19354,6 +19360,76 @@ async function savePODraft(){
     openEmailCompose();
   } else {
     alert((resp && resp.error) || '저장 실패');
+  }
+}
+
+// 후공정 PO 의 부모(원재료 PO) 수동 매칭 모달 — 옛 발주건의 세트 보정용 (Phase C)
+async function openParentMatchModal(childId, childPoNumber) {
+  let rows = [];
+  try {
+    const j = await fetch(`/api/po/parent-candidates?child=${childId}`).then(r=>r.json());
+    rows = j.data || j || [];
+  } catch (e) { alert('후보 조회 실패: ' + e.message); return; }
+  if (!Array.isArray(rows)) rows = [];
+
+  const dim = document.createElement('div');
+  dim.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.55);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px';
+  dim.onclick = e => { if (e.target === dim) dim.remove(); };
+  const fmtQty = n => (n||0).toLocaleString();
+
+  const body = rows.length === 0
+    ? '<div style="padding:40px;text-align:center;color:#94a3b8;font-size:13px">후보 원재료 PO 가 없습니다 (같은 시기 ± 14일 범위에 매칭 PO 없음).</div>'
+    : `<table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:#f1f5f9">
+          <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #e2e8f0;color:#475569">PO 번호</th>
+          <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #e2e8f0;color:#475569">발주일</th>
+          <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #e2e8f0;color:#475569">거래처</th>
+          <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #e2e8f0;color:#475569">OS번호</th>
+          <th style="padding:8px 10px;text-align:right;border-bottom:1px solid #e2e8f0;color:#475569">수량</th>
+          <th style="padding:8px 10px;border-bottom:1px solid #e2e8f0"></th>
+        </tr></thead>
+        <tbody>${rows.map(r => `
+          <tr style="border-bottom:1px solid #f1f5f9">
+            <td style="padding:7px 10px;font-weight:600;color:#0f172a">${esc(r.po_number||'')}</td>
+            <td style="padding:7px 10px;color:#64748b">${esc((r.po_date||'').slice(0,10))}</td>
+            <td style="padding:7px 10px;color:#475569">${esc(r.vendor_name||'')}</td>
+            <td style="padding:7px 10px;color:#7c2d12;font-weight:600">${esc(r.os_number||'')}</td>
+            <td style="padding:7px 10px;text-align:right;color:#64748b">${fmtQty(r.total_qty)}</td>
+            <td style="padding:7px 10px;text-align:right">
+              <button onclick="savePOParent(${childId},${r.po_id},'${esc(r.po_number||'')}',this)" style="padding:4px 12px;background:#7c3aed;color:#fff;border:none;border-radius:5px;font-size:11px;cursor:pointer;font-weight:600">매칭</button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+  dim.innerHTML = `<div data-modal-host="1" style="background:#fff;border-radius:12px;width:100%;max-width:900px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.25)">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;background:#1e293b;color:#fff">
+      <div style="font-size:14px;font-weight:700">🔗 부모 원재료 PO 매칭 — 후공정 ${esc(childPoNumber||'')}</div>
+      <button onclick="this.closest('[data-modal-host]').parentElement.remove()" style="background:none;border:none;color:#94a3b8;font-size:22px;cursor:pointer;line-height:1">×</button>
+    </div>
+    <div style="padding:10px 16px;background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;font-size:11px">
+      ± 14일 범위의 원재료 PO 중 같은 OS번호 / 같은 거래처 우선 정렬. 정확한 한 건을 [매칭] 버튼으로 선택하세요.
+    </div>
+    <div style="overflow-y:auto;flex:1;padding:0">${body}</div>
+  </div>`;
+  document.body.appendChild(dim);
+}
+
+async function savePOParent(childId, parentId, parentPoNumber, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '저장중...'; }
+  try {
+    const resp = await fetch(`/api/po/${childId}/parent`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ parent_po_id: parentId })
+    }).then(r => r.json());
+    if (resp.ok === false) throw new Error(resp.error || '매칭 실패');
+    // 모달 닫고 발주현황 새로고침
+    document.querySelectorAll('[data-modal-host]').forEach(el => el.parentElement.remove());
+    if (typeof loadPOList === 'function') loadPOList();
+    alert(`매칭 완료: 후공정 PO #${childId} → 원재료 ${parentPoNumber}`);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '매칭'; }
+    alert('매칭 실패: ' + e.message);
   }
 }
 

@@ -6449,6 +6449,158 @@ async function handleRequest(req, res) {
   //    2) 각 그룹에서 MAX(id) 제외한 나머지 id 들 수집
   //    3) dry_run=false 면 DELETE. dry_run=true 면 목록만 반환
   // ════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════
+  //  POST /api/admin/po-backfill-set
+  //  옛 발주건 (parent_po_id IS NULL) 후공정 PO 를 같은 OS번호 원재료 PO 와
+  //  자동 연결하는 일회성 백필 endpoint. 발주현황 화면의 세트 묶음 시각화
+  //  (Phase B/A.1) 가 옛 데이터에도 적용되도록.
+  //
+  //  매칭 기준 (엄격):
+  //    - child.parent_po_id IS NULL  AND  child.po_type='후공정'
+  //    - child.os_number 와 동일한 os_number 를 가진 mat.po_type='원재료' 1건 존재
+  //    - 여러 원재료 매칭 시 가장 오래된(po_id MIN) 것 선택
+  //
+  //  Body: { "dry_run": true }  → 매칭 후보만 카운트, 변경 없음
+  // ════════════════════════════════════════════════════════════════════
+  if (pathname === '/api/admin/po-backfill-set' && method === 'POST') {
+    const body = await readJSON(req).catch(() => ({}));
+    const dryRun = !!body?.dry_run;
+    try {
+      // parent_po_id 가 없고 OS번호가 있는 후공정 PO 후보 추출
+      const candidates = await db.prepare(`
+        SELECT po_id, po_number, os_number, vendor_name, po_date
+        FROM po_header
+        WHERE parent_po_id IS NULL
+          AND po_type = '후공정'
+          AND os_number IS NOT NULL
+          AND os_number <> ''
+      `).all();
+
+      let matched = 0, alreadyHas = 0, noMatch = 0, failed = 0;
+      const samples = []; // 첫 5건 샘플
+      for (const c of candidates) {
+        // 같은 OS번호의 원재료 PO 중 가장 오래된 것
+        const mat = await db.prepare(`
+          SELECT po_id, po_number FROM po_header
+          WHERE po_type = '원재료' AND os_number = ?
+          ORDER BY po_id ASC LIMIT 1
+        `).get(c.os_number);
+        if (!mat) { noMatch++; continue; }
+        if (mat.po_id === c.po_id) { failed++; continue; } // 자기 자신 방어
+        if (!dryRun) {
+          try {
+            await db.prepare("UPDATE po_header SET parent_po_id = ?, updated_at = datetime('now','localtime') WHERE po_id = ?")
+              .run(mat.po_id, c.po_id);
+          } catch (e) {
+            failed++;
+            continue;
+          }
+        }
+        matched++;
+        if (samples.length < 5) samples.push({
+          child_po: c.po_number, child_id: c.po_id,
+          parent_po: mat.po_number, parent_id: mat.po_id,
+          os_number: c.os_number
+        });
+      }
+
+      // OS번호 없는 후공정 PO 도 별도 카운트 (수동 매칭 대상)
+      const noOsCount = (await db.prepare(`
+        SELECT COUNT(*) AS c FROM po_header
+        WHERE parent_po_id IS NULL AND po_type='후공정'
+          AND (os_number IS NULL OR os_number = '')
+      `).get())?.c || 0;
+
+      if (currentUser && !dryRun) auditLog(currentUser.userId, currentUser.username, 'po_backfill_set', 'po_header', '', `세트 백필: 매칭 ${matched}건 / OS없음 ${noOsCount}건 잔여`, clientIP);
+      ok(res, {
+        dry_run: dryRun,
+        scanned: candidates.length,
+        matched,
+        already_has: alreadyHas,
+        no_match: noMatch,
+        failed,
+        unmatched_no_os_number: noOsCount,  // 수동 매칭 (Phase C) 대상 카운트
+        samples
+      });
+    } catch (e) {
+      console.error('[po-backfill-set] error:', e.message);
+      fail(res, 500, 'po-backfill-set 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  PATCH /api/po/:id/parent
+  //  수동 매칭 — OS번호가 없어 자동 백필이 안 된 후공정 PO 의 parent_po_id 를
+  //  사용자가 직접 지정. body: { parent_po_id: N } 또는 { parent_po_id: null } (해제)
+  // ════════════════════════════════════════════════════════════════════
+  const _poParentMatch = pathname.match(/^\/api\/po\/(\d+)\/parent$/);
+  if (_poParentMatch && method === 'PATCH') {
+    const childId = parseInt(_poParentMatch[1]);
+    const body = await readJSON(req).catch(() => ({}));
+    const parentId = body && body.parent_po_id != null ? parseInt(body.parent_po_id) : null;
+    try {
+      const child = await db.prepare('SELECT po_id, po_type, po_number FROM po_header WHERE po_id=?').get(childId);
+      if (!child) { fail(res, 404, '후공정 PO 없음'); return; }
+      if (parentId) {
+        if (parentId === childId) { fail(res, 400, '자기 자신은 부모로 지정 불가'); return; }
+        const parent = await db.prepare('SELECT po_id, po_type, po_number FROM po_header WHERE po_id=?').get(parentId);
+        if (!parent) { fail(res, 404, '원재료 PO 없음'); return; }
+        if (parent.po_type !== '원재료') { fail(res, 400, `parent_po_id 는 원재료 PO 여야 합니다 (현재: ${parent.po_type})`); return; }
+      }
+      await db.prepare("UPDATE po_header SET parent_po_id = ?, updated_at = datetime('now','localtime') WHERE po_id = ?")
+        .run(parentId, childId);
+      if (currentUser) auditLog(currentUser.userId, currentUser.username, 'po_set_parent', 'po_header', String(childId), `세트 매칭: ${child.po_number} → parent ${parentId || '(해제)'}`, clientIP);
+      ok(res, { po_id: childId, parent_po_id: parentId });
+    } catch (e) {
+      console.error('[po-set-parent] error:', e.message);
+      fail(res, 500, '부모 설정 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  GET /api/po/parent-candidates?child=N
+  //  수동 매칭 UI 의 후보 원재료 PO 목록 — 같은 날짜대 + 같은 거래처 우선 정렬
+  // ════════════════════════════════════════════════════════════════════
+  const _poCandMatch = pathname.match(/^\/api\/po\/parent-candidates$/);
+  if (_poCandMatch && method === 'GET') {
+    const childId = parseInt(parsed.searchParams.get('child') || '0');
+    if (!childId) { fail(res, 400, 'child query param required'); return; }
+    try {
+      const child = await db.prepare('SELECT po_id, po_date, vendor_name, os_number FROM po_header WHERE po_id=?').get(childId);
+      if (!child) { fail(res, 404, '후공정 PO 없음'); return; }
+      // 같은 날짜 ± 14일 범위의 원재료 PO 만 후보
+      // (같은 vendor 우선, 같은 OS번호 우선, 같은 po_date 우선)
+      // ± 14일 범위 (po_date 가 YYYY-MM-DD 텍스트라 문자열 비교 가능)
+      const _ms = child.po_date ? new Date(child.po_date).getTime() : Date.now();
+      const _from = new Date(_ms - 14*86400000).toISOString().slice(0,10);
+      const _to   = new Date(_ms + 14*86400000).toISOString().slice(0,10);
+      const candidates = await db.prepare(`
+        SELECT po_id, po_number, po_date, vendor_name, os_number, total_qty
+        FROM po_header
+        WHERE po_type = '원재료'
+          AND status NOT IN ('cancelled')
+          AND po_date BETWEEN ? AND ?
+        ORDER BY
+          CASE WHEN os_number = ? AND os_number <> '' THEN 0 ELSE 1 END,
+          CASE WHEN vendor_name = ? THEN 0 ELSE 1 END,
+          po_date DESC,
+          po_id DESC
+        LIMIT 30
+      `).all(
+        _from, _to,
+        child.os_number || '__NONE__',
+        child.vendor_name || '__NONE__'
+      );
+      ok(res, candidates);
+    } catch (e) {
+      console.error('[po-parent-candidates] error:', e.message);
+      ok(res, []);
+    }
+    return;
+  }
+
   if (pathname === '/api/admin/products/dedupe' && method === 'POST') {
     const body = await readJSON(req).catch(() => ({}));
     const dryRun = !!body?.dry_run;
