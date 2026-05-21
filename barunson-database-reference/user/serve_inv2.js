@@ -9787,27 +9787,42 @@ async function handleRequest(req, res) {
 
         materialPos.push({ po_id: matPoId, po_number: matPoNumber, vendor: matVendor, items: matItems.length, total_qty: matTotalQty });
 
-        // ─ 동일 원재료 그룹의 1단계 후가공을 (업체, 공정) 조합별로 수집 → 각 조합마다 별도 PO ─
-        // 같은 업체가 여러 공정을 맡아도 공정별로 발주서가 쪼개져 해당 공정 담당자에게만 CC 라우팅됨
-        const postStep1ByVendorProcess = {};
+        // ─ 동일 원재료 그룹의 모든 단계 후가공을 (step, 업체, 공정) 조합별로 수집 → 각 조합마다 별도 PO ─
+        // 이전: step 1 만 PO 생성, step 2+ 는 process_chain JSON 에만 → 발주현황에 1개 카드만 표시
+        // 변경: 모든 step 의 후가공 PO 즉시 생성, 모두 parent_po_id=matPoId (같은 세트)
+        //   - step 1: 원재료 입고 후 자동 메일 트리거
+        //   - step 2+: 이전 단계 완료 후 자동 메일 트리거 (기존 vendor-portal 로직)
+        //   - 모두 status='draft' 로 시작 (메일 미발송) — UI 에서 같은 색 세트로 표시
+        // 같은 업체가 여러 공정을 맡아도 공정/단계별로 발주서가 쪼개져 담당자별 CC 라우팅됨
+        const postByStepVendorProcess = {};
         for (const it of matItems) {
-          const step1 = it.process_chain[0];
-          if (!step1 || !step1.vendor || !step1.process) continue;
-          const key = step1.vendor + '||' + step1.process;
-          if (!postStep1ByVendorProcess[key]) postStep1ByVendorProcess[key] = { vendor: step1.vendor, process: step1.process, items: [] };
-          postStep1ByVendorProcess[key].items.push(it);
+          if (!Array.isArray(it.process_chain)) continue;
+          it.process_chain.forEach((stepEntry, idx) => {
+            if (!stepEntry || !stepEntry.vendor || !stepEntry.process) return;
+            const stepNum = Number(stepEntry.step) || (idx + 1);
+            const key = stepNum + '||' + stepEntry.vendor + '||' + stepEntry.process;
+            if (!postByStepVendorProcess[key]) {
+              postByStepVendorProcess[key] = { step: stepNum, vendor: stepEntry.vendor, process: stepEntry.process, items: [] };
+            }
+            postByStepVendorProcess[key].items.push(it);
+          });
         }
-        for (const info of Object.values(postStep1ByVendorProcess)) {
+        // step 오름차순 → 같은 step 내 vendor||process 순 — 일관된 PO 번호 부여 순서
+        const _sortedPosts = Object.values(postByStepVendorProcess).sort((a, b) => (a.step - b.step) || a.vendor.localeCompare(b.vendor) || a.process.localeCompare(b.process));
+        for (const info of _sortedPosts) {
           const postVendor = info.vendor;
           const postPoNumber = await generatePoNumber();
           const postTotalQty = info.items.reduce((s, i) => s + (Number(i.ordered_qty) || 0), 0);
+          const _notesText = info.step === 1
+            ? `후가공 1단계(${info.process}) 대기 - 원재료 입고 후 발송`
+            : `후가공 ${info.step}단계(${info.process}) 대기 - 이전 단계 완료 후 발송`;
           const postInfo = await db.prepare(`INSERT INTO po_header
             (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
              due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
             VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?,?)`)
             .run(postPoNumber, '후공정', postVendor, matVendor, postVendor, 'draft',
-                 expectedDate, postTotalQty, `후가공(${info.process}) 대기 - 원재료 입고 후 발송`, '한국', tolerancePct,
-                 JSON.stringify(info.items[0].process_chain || []), 1, matPoId);
+                 expectedDate, postTotalQty, _notesText, '한국', tolerancePct,
+                 JSON.stringify(info.items[0].process_chain || []), info.step, matPoId);
           const postPoId = postInfo.lastInsertRowid;
           for (const it of info.items) {
             await insItem.run(postPoId, it.product_code, it.brand || '', info.process,
@@ -9815,8 +9830,8 @@ async function handleRequest(req, res) {
               `원재료:${it.material_name || ''} / 전체체인:${JSON.stringify(it.process_chain)}`);
           }
           await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)")
-            .run(postPoId, 'created', actorName, `마법사 생성: 후가공 PO (${postVendor}, ${info.process}, 원재료 PO: ${matPoNumber})`);
-          processPos.push({ po_id: postPoId, po_number: postPoNumber, vendor: postVendor, process: info.process, items: info.items.length, total_qty: postTotalQty, parent_po_id: matPoId });
+            .run(postPoId, 'created', actorName, `마법사 생성: 후가공 PO step ${info.step} (${postVendor}, ${info.process}, 원재료 PO: ${matPoNumber})`);
+          processPos.push({ po_id: postPoId, po_number: postPoNumber, vendor: postVendor, process: info.process, step: info.step, items: info.items.length, total_qty: postTotalQty, parent_po_id: matPoId });
         }
       }
 
