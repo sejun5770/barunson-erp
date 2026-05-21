@@ -6552,9 +6552,11 @@ async function handleRequest(req, res) {
     const body = await readJSON(req).catch(() => ({}));
     const dryRun = !!body?.dry_run;
     try {
+      // legal_entity 컬럼이 있을 때만 SELECT — 옛 DB 스키마 호환
+      const _le = _hasEntity.po_header ? ', legal_entity' : '';
       const matPOs = await db.prepare(`
         SELECT po_id, po_number, vendor_name AS material_vendor, process_chain, due_date,
-               origin, tolerance_pct, po_date
+               origin, tolerance_pct, po_date${_le}
         FROM po_header
         WHERE po_type = '원재료'
           AND process_chain IS NOT NULL
@@ -6590,15 +6592,27 @@ async function handleRequest(req, res) {
             try {
               const postPoNumber = await generatePoNumber();
               const totalQty = matItems.reduce((s, it) => s + (Number(it.ordered_qty) || 0), 0);
-              const postInfo = await db.prepare(`INSERT INTO po_header
-                (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
-                 due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-                .run(postPoNumber, '후공정', stepEntry.vendor, mat.material_vendor, stepEntry.vendor, 'draft',
-                     mat.due_date || '', totalQty,
-                     `[백필] 후가공 ${stepNum}단계(${stepEntry.process}) — 원재료 PO: ${mat.po_number}`,
-                     mat.origin || '한국', mat.po_date || new Date().toISOString().slice(0,10),
-                     mat.tolerance_pct || 5.0, JSON.stringify(chain), stepNum, mat.po_id);
+              // 자식 legal_entity 는 부모와 동일 (mat.legal_entity), 컬럼 없을 시 기본값
+              const _backfillEntity = (mat.legal_entity === 'dd') ? 'dd' : 'barunson';
+              const postInfo = _hasEntity.po_header
+                ? await db.prepare(`INSERT INTO po_header
+                    (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+                     due_date, total_qty, notes, origin, legal_entity, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+                    .run(postPoNumber, '후공정', stepEntry.vendor, mat.material_vendor, stepEntry.vendor, 'draft',
+                         mat.due_date || '', totalQty,
+                         `[백필] 후가공 ${stepNum}단계(${stepEntry.process}) — 원재료 PO: ${mat.po_number}`,
+                         mat.origin || '한국', _backfillEntity, mat.po_date || new Date().toISOString().slice(0,10),
+                         mat.tolerance_pct || 5.0, JSON.stringify(chain), stepNum, mat.po_id)
+                : await db.prepare(`INSERT INTO po_header
+                    (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+                     due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+                    .run(postPoNumber, '후공정', stepEntry.vendor, mat.material_vendor, stepEntry.vendor, 'draft',
+                         mat.due_date || '', totalQty,
+                         `[백필] 후가공 ${stepNum}단계(${stepEntry.process}) — 원재료 PO: ${mat.po_number}`,
+                         mat.origin || '한국', mat.po_date || new Date().toISOString().slice(0,10),
+                         mat.tolerance_pct || 5.0, JSON.stringify(chain), stepNum, mat.po_id);
               const postPoId = postInfo.lastInsertRowid;
               for (const it of matItems) {
                 await db.prepare(`INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes)
@@ -6626,6 +6640,63 @@ async function handleRequest(req, res) {
     } catch (e) {
       console.error('[po-chain-backfill] error:', e.message);
       fail(res, 500, 'po-chain-backfill 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  POST /api/admin/po-entity-backfill
+  //  자식 후공정 PO 의 legal_entity 를 부모 원재료 PO 와 동일하게 맞추는 일회성 백필.
+  //  옛 데이터에서 부모는 'dd' 인데 자식은 'barunson' 으로 들어간 케이스 보정 —
+  //  발주현황 법인 토글 시 같은 세트가 분리되어 안 보이는 문제 해결.
+  //
+  //  Body: { "dry_run": true } → 영향 건수만 카운트, 변경 없음
+  // ════════════════════════════════════════════════════════════════════
+  if (pathname === '/api/admin/po-entity-backfill' && method === 'POST') {
+    const body = await readJSON(req).catch(() => ({}));
+    const dryRun = !!body?.dry_run;
+    if (!_hasEntity.po_header) { fail(res, 400, 'po_header.legal_entity 컬럼이 없는 DB — 백필 대상 아님'); return; }
+    try {
+      // 부모-자식 entity 불일치 자식 PO 검색
+      const mismatches = await db.prepare(`
+        SELECT c.po_id, c.po_number, c.legal_entity AS child_entity,
+               p.po_id AS parent_id, p.po_number AS parent_number, p.legal_entity AS parent_entity
+        FROM po_header c
+        JOIN po_header p ON p.po_id = c.parent_po_id
+        WHERE c.parent_po_id IS NOT NULL
+          AND COALESCE(c.legal_entity, '') <> COALESCE(p.legal_entity, '')
+      `).all();
+
+      let updated = 0, errors = 0;
+      const samples = mismatches.slice(0, 10).map(m => ({
+        child_po: m.po_number, child_entity: m.child_entity,
+        parent_po: m.parent_number, parent_entity: m.parent_entity
+      }));
+
+      if (!dryRun) {
+        for (const m of mismatches) {
+          try {
+            await db.prepare("UPDATE po_header SET legal_entity = ?, updated_at = datetime('now','localtime') WHERE po_id = ?")
+              .run(m.parent_entity || 'barunson', m.po_id);
+            updated++;
+          } catch (e) {
+            errors++;
+            console.warn('[po-entity-backfill] update fail:', m.po_number, e.message);
+          }
+        }
+      }
+
+      if (currentUser && !dryRun) auditLog(currentUser.userId, currentUser.username, 'po_entity_backfill', 'po_header', '', `법인 백필: ${updated}건 업데이트 / ${errors} 실패`, clientIP);
+      ok(res, {
+        dry_run: dryRun,
+        mismatch_count: mismatches.length,
+        updated: dryRun ? 0 : updated,
+        errors,
+        samples
+      });
+    } catch (e) {
+      console.error('[po-entity-backfill] error:', e.message);
+      fail(res, 500, 'po-entity-backfill 실패: ' + e.message);
     }
     return;
   }
@@ -9859,13 +9930,24 @@ async function handleRequest(req, res) {
         const matNotes = notes || `원재료 발주 (${matVendor})`;
         // 전체 공정 체인을 JSON으로 저장 (첫 품목 기준 대표값 — UI 참고용; 실제 품목별 체인은 po_items.notes에도 기록)
         const repChain = matItems[0].process_chain || [];
-        const matInfo = await db.prepare(`INSERT INTO po_header
-          (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
-           due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step)
-          VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?)`)
-          .run(matPoNumber, '원재료', matVendor, matVendor, '', 'sent',
-               expectedDate, matTotalQty, matNotes, '한국', tolerancePct,
-               JSON.stringify(repChain), 0);
+        // 법인 판정: body.legal_entity 우선, 없으면 품목 코드 prefix 로 추정 (DD% → 'dd')
+        //  korea-wizard 는 사용자가 entity 토글 후 호출하므로 body.legal_entity 가 명확. 미전송 시 안전 추정.
+        const _matEntity = (body.legal_entity === 'dd' || matItems.some(it => /^DD/.test(it.product_code || ''))) ? 'dd' : 'barunson';
+        const matInfo = _hasEntity.po_header
+          ? await db.prepare(`INSERT INTO po_header
+              (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+               due_date, total_qty, notes, origin, legal_entity, po_date, tolerance_pct, process_chain, process_step)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?)`)
+              .run(matPoNumber, '원재료', matVendor, matVendor, '', 'sent',
+                   expectedDate, matTotalQty, matNotes, '한국', _matEntity, tolerancePct,
+                   JSON.stringify(repChain), 0)
+          : await db.prepare(`INSERT INTO po_header
+              (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+               due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step)
+              VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?)`)
+              .run(matPoNumber, '원재료', matVendor, matVendor, '', 'sent',
+                   expectedDate, matTotalQty, matNotes, '한국', tolerancePct,
+                   JSON.stringify(repChain), 0);
         const matPoId = matInfo.lastInsertRowid;
 
         const insItem = db.prepare(`INSERT INTO po_items
@@ -9911,13 +9993,22 @@ async function handleRequest(req, res) {
           const _notesText = info.step === 1
             ? `후가공 1단계(${info.process}) 대기 - 원재료 입고 후 발송`
             : `후가공 ${info.step}단계(${info.process}) 대기 - 이전 단계 완료 후 발송`;
-          const postInfo = await db.prepare(`INSERT INTO po_header
-            (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
-             due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?,?)`)
-            .run(postPoNumber, '후공정', postVendor, matVendor, postVendor, 'draft',
-                 expectedDate, postTotalQty, _notesText, '한국', tolerancePct,
-                 JSON.stringify(info.items[0].process_chain || []), info.step, matPoId);
+          // 자식 후공정 PO 는 부모 원재료 PO 와 동일 법인 (위에서 결정한 _matEntity)
+          const postInfo = _hasEntity.po_header
+            ? await db.prepare(`INSERT INTO po_header
+                (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+                 due_date, total_qty, notes, origin, legal_entity, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?,?)`)
+                .run(postPoNumber, '후공정', postVendor, matVendor, postVendor, 'draft',
+                     expectedDate, postTotalQty, _notesText, '한국', _matEntity, tolerancePct,
+                     JSON.stringify(info.items[0].process_chain || []), info.step, matPoId)
+            : await db.prepare(`INSERT INTO po_header
+                (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+                 due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?,?)`)
+                .run(postPoNumber, '후공정', postVendor, matVendor, postVendor, 'draft',
+                     expectedDate, postTotalQty, _notesText, '한국', tolerancePct,
+                     JSON.stringify(info.items[0].process_chain || []), info.step, matPoId);
           const postPoId = postInfo.lastInsertRowid;
           for (const it of info.items) {
             await insItem.run(postPoId, it.product_code, it.brand || '', info.process,
@@ -10806,13 +10897,23 @@ async function handleRequest(req, res) {
             const nextVendorName = nextVendorRow ? nextVendorRow.name : nextStepInfo.vendor;
             // 현재 PO의 품목을 복사
             const currentItems = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(poId);
-            const nextHdr = await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, po_date, material_status, process_status)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,date('now','localtime'),'sent','waiting')`).run(
-              nextPoNumber, '후공정', nextVendorName, 'sent',
-              po.due_date || '', po.total_qty || 0,
-              `공정체인 자동생성: ${nextStepInfo.process}@${nextVendorName} (원PO: ${po.po_number})`,
-              currentStep + 1, parentId, po.process_chain || '', po.origin || '한국'
-            );
+            // 자식 PO 의 legal_entity 는 현재 PO (체인 상의 이전 단계) 와 동일 = 부모 세트와도 동일
+            const _nextEntity = (po.legal_entity === 'dd') ? 'dd' : 'barunson';
+            const nextHdr = _hasEntity.po_header
+              ? await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, legal_entity, po_date, material_status, process_status)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,date('now','localtime'),'sent','waiting')`).run(
+                  nextPoNumber, '후공정', nextVendorName, 'sent',
+                  po.due_date || '', po.total_qty || 0,
+                  `공정체인 자동생성: ${nextStepInfo.process}@${nextVendorName} (원PO: ${po.po_number})`,
+                  currentStep + 1, parentId, po.process_chain || '', po.origin || '한국', _nextEntity
+                )
+              : await db.prepare(`INSERT INTO po_header (po_number, po_type, vendor_name, status, due_date, total_qty, notes, process_step, parent_po_id, process_chain, origin, po_date, material_status, process_status)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,date('now','localtime'),'sent','waiting')`).run(
+                  nextPoNumber, '후공정', nextVendorName, 'sent',
+                  po.due_date || '', po.total_qty || 0,
+                  `공정체인 자동생성: ${nextStepInfo.process}@${nextVendorName} (원PO: ${po.po_number})`,
+                  currentStep + 1, parentId, po.process_chain || '', po.origin || '한국'
+                );
             const nextPoId = nextHdr.lastInsertRowid;
             for (const ci of currentItems) {
               await db.prepare('INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes) VALUES (?,?,?,?,?,?,?)').run(
@@ -13144,13 +13245,23 @@ async function handleRequest(req, res) {
       // (이전 버그: 자식 po_date = date('now','localtime') → 오늘 그룹으로 분리되어
       //  부모(옛 발주일) 그룹에서 자식 카드가 안 보임 → "후공정 카드 생성 안 됨" 으로 인지)
       const _parentPoDate = matPo.po_date || new Date().toISOString().slice(0,10);
-      const info = await db.prepare(`INSERT INTO po_header
-        (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
-         due_date, expected_date, total_qty, notes, origin, po_date, process_step, parent_po_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(postPoNumber, '후공정', postVendor, matPo.vendor_name || '', postVendor, 'draft',
-             matPo.due_date || '', matPo.expected_date || matPo.due_date || '',
-             totalQty, '사후추가: ' + processType, matPo.origin || '한국', _parentPoDate, 1, matPoId);
+      // 자식 PO 의 legal_entity 는 부모와 동일 — 같은 세트가 법인 토글에 따라 분리되어 안 보이는 문제 방지
+      const _childEntity = (matPo.legal_entity === 'dd') ? 'dd' : 'barunson';
+      const info = _hasEntity.po_header
+        ? await db.prepare(`INSERT INTO po_header
+            (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+             due_date, expected_date, total_qty, notes, origin, legal_entity, po_date, process_step, parent_po_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .run(postPoNumber, '후공정', postVendor, matPo.vendor_name || '', postVendor, 'draft',
+                 matPo.due_date || '', matPo.expected_date || matPo.due_date || '',
+                 totalQty, '사후추가: ' + processType, matPo.origin || '한국', _childEntity, _parentPoDate, 1, matPoId)
+        : await db.prepare(`INSERT INTO po_header
+            (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+             due_date, expected_date, total_qty, notes, origin, po_date, process_step, parent_po_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .run(postPoNumber, '후공정', postVendor, matPo.vendor_name || '', postVendor, 'draft',
+                 matPo.due_date || '', matPo.expected_date || matPo.due_date || '',
+                 totalQty, '사후추가: ' + processType, matPo.origin || '한국', _parentPoDate, 1, matPoId);
       postPoId = info.lastInsertRowid;
       createdNew = true;
       try { await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(postPoId, 'created', currentUser?.username || 'system', `사후 추가: 후공정 PO (${postVendor}, ${processType}, 원재료 PO: ${matPo.po_number})`); } catch(_) {}
