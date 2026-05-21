@@ -6536,6 +6536,101 @@ async function handleRequest(req, res) {
   }
 
   // ════════════════════════════════════════════════════════════════════
+  //  POST /api/admin/po-chain-backfill
+  //  옛 원재료 PO 의 process_chain JSON 에 있는 step 2+ 후가공 PO 를 백필 생성.
+  //  (이전 마법사 정책: step 1 만 즉시 생성. 761c655 fix 후 모든 step 생성)
+  //  옛 발주건의 누락 후공정 PO 를 일괄 보강.
+  //
+  //  매칭 기준:
+  //   - 원재료 PO 의 process_chain JSON 파싱 → step 2+ 만 처리
+  //   - 같은 parent_po_id + 같은 process_step + 같은 vendor 의 후공정 PO 이미 있으면 skip
+  //   - 없으면 새 후공정 PO 생성 (parent_po_id 연결, status='draft', items 복제)
+  //
+  //  Body: { "dry_run": true } → 생성 후보만 카운트 (변경 없음)
+  // ════════════════════════════════════════════════════════════════════
+  if (pathname === '/api/admin/po-chain-backfill' && method === 'POST') {
+    const body = await readJSON(req).catch(() => ({}));
+    const dryRun = !!body?.dry_run;
+    try {
+      const matPOs = await db.prepare(`
+        SELECT po_id, po_number, vendor_name AS material_vendor, process_chain, due_date,
+               origin, tolerance_pct, po_date
+        FROM po_header
+        WHERE po_type = '원재료'
+          AND process_chain IS NOT NULL
+          AND process_chain <> ''
+          AND status NOT IN ('cancelled')
+      `).all();
+      let scanned = 0, created = 0, skippedExisting = 0, skippedNoChain = 0, errors = 0;
+      const samples = [];
+
+      for (const mat of matPOs) {
+        scanned++;
+        let chain = [];
+        try { chain = JSON.parse(mat.process_chain || '[]'); } catch (_) {}
+        if (!Array.isArray(chain) || chain.length < 2) { skippedNoChain++; continue; }
+
+        const existing = await db.prepare(
+          "SELECT process_step, vendor_name, process_vendor_name FROM po_header WHERE parent_po_id = ? AND po_type = '후공정'"
+        ).all(mat.po_id);
+        const existingKey = new Set(existing.map(e => `${e.process_step}||${e.process_vendor_name || e.vendor_name}`));
+
+        const matItems = await db.prepare('SELECT * FROM po_items WHERE po_id = ?').all(mat.po_id);
+
+        for (let i = 0; i < chain.length; i++) {
+          const stepEntry = chain[i];
+          if (!stepEntry || !stepEntry.vendor || !stepEntry.process) continue;
+          const stepNum = Number(stepEntry.step) || (i + 1);
+          if (stepNum < 2) continue;  // step 1 은 이미 처리됐을 가능성, 백필 대상 아님
+
+          const key = `${stepNum}||${stepEntry.vendor}`;
+          if (existingKey.has(key)) { skippedExisting++; continue; }
+
+          if (!dryRun) {
+            try {
+              const postPoNumber = await generatePoNumber();
+              const totalQty = matItems.reduce((s, it) => s + (Number(it.ordered_qty) || 0), 0);
+              const postInfo = await db.prepare(`INSERT INTO po_header
+                (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
+                 due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step, parent_po_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+                .run(postPoNumber, '후공정', stepEntry.vendor, mat.material_vendor, stepEntry.vendor, 'draft',
+                     mat.due_date || '', totalQty,
+                     `[백필] 후가공 ${stepNum}단계(${stepEntry.process}) — 원재료 PO: ${mat.po_number}`,
+                     mat.origin || '한국', mat.po_date || new Date().toISOString().slice(0,10),
+                     mat.tolerance_pct || 5.0, JSON.stringify(chain), stepNum, mat.po_id);
+              const postPoId = postInfo.lastInsertRowid;
+              for (const it of matItems) {
+                await db.prepare(`INSERT INTO po_items (po_id, product_code, brand, process_type, ordered_qty, spec, notes)
+                  VALUES (?,?,?,?,?,?,?)`).run(postPoId, it.product_code, it.brand || '', stepEntry.process,
+                    Number(it.ordered_qty) || 0, it.spec || '',
+                    `[백필] 원재료 PO: ${mat.po_number}`);
+              }
+              try { await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(postPoId, 'created', currentUser?.username || 'backfill', `백필: step ${stepNum} 후공정 PO (원재료 ${mat.po_number}, ${stepEntry.vendor}, ${stepEntry.process})`); } catch (_) {}
+              created++;
+              if (samples.length < 5) samples.push({ mat_po: mat.po_number, step: stepNum, vendor: stepEntry.vendor, process: stepEntry.process, new_po: postPoNumber });
+            } catch (e) {
+              errors++;
+              if (samples.length < 5) samples.push({ mat_po: mat.po_number, step: stepNum, error: e.message });
+            }
+          } else {
+            // dry-run: 카운트만
+            created++;
+            if (samples.length < 5) samples.push({ mat_po: mat.po_number, step: stepNum, vendor: stepEntry.vendor, process: stepEntry.process });
+          }
+        }
+      }
+
+      if (currentUser && !dryRun) auditLog(currentUser.userId, currentUser.username, 'po_chain_backfill', 'po_header', '', `체인 백필: ${created}건 생성 / ${skippedExisting} skip / ${errors} 실패`, clientIP);
+      ok(res, { dry_run: dryRun, scanned, created, skipped_existing: skippedExisting, skipped_no_chain: skippedNoChain, errors, samples });
+    } catch (e) {
+      console.error('[po-chain-backfill] error:', e.message);
+      fail(res, 500, 'po-chain-backfill 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
   //  PATCH /api/po/:id/parent
   //  수동 매칭 — OS번호가 없어 자동 백필이 안 된 후공정 PO 의 parent_po_id 를
   //  사용자가 직접 지정. body: { parent_po_id: N } 또는 { parent_po_id: null } (해제)
