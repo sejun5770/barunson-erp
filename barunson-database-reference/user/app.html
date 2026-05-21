@@ -3126,6 +3126,12 @@ function closeMegaMenu() { /* no-op */ }
 <!-- PAGE: 발주현황 (PO List) -->
 <!-- ============================================================ -->
 <div class="page" id="page-po-list">
+  <!-- 법인 토글 (3-state: 전체/바른컴퍼니/디디) — _procEntity 동기화 -->
+  <div id="poListEntityToggle" style="display:flex;gap:0;margin-bottom:8px;border-bottom:2px solid #e5e7eb" title="법인별 PO 필터 — '전체' 클릭 시 양쪽 법인 모두 표시">
+    <button id="poListEntityAll" onclick="switchPOListEntity('')" style="padding:8px 16px;background:#f3f4f6;color:#64748b;border:none;border-radius:6px 6px 0 0;cursor:pointer;font-weight:600;font-size:12px">📋 전체</button>
+    <button id="poListEntityBarunson" onclick="switchPOListEntity('barunson')" style="padding:8px 16px;background:#6366f1;color:#fff;border:none;border-radius:6px 6px 0 0;cursor:pointer;font-weight:700;font-size:12px;margin-left:4px">🏢 바른컴퍼니</button>
+    <button id="poListEntityDD" onclick="switchPOListEntity('dd')" style="padding:8px 16px;background:#f3f4f6;color:#64748b;border:none;border-radius:6px 6px 0 0;cursor:pointer;font-weight:600;font-size:12px;margin-left:4px">🎎 디디</button>
+  </div>
   <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">
     <div class="status-tabs" id="poStatusTabs" style="margin-bottom:0">
       <div class="status-tab active" data-status="all" onclick="filterPO('all')">전체</div>
@@ -16888,9 +16894,11 @@ function renderPOStatusPipeline(po) {
 function loadPOList(callback){
   // 원재료 마감 엑셀 기간 input 기본값 (페이지 진입 시 1회)
   setPoClosingDateDefaults();
+  // 법인 토글 버튼 시각 상태 동기화 (페이지 진입/탭 전환 후에도 _procEntity 와 일치)
+  if (typeof _syncPOListEntityButtons === 'function') _syncPOListEntityButtons();
   let poUrl = '/api/po?include=items,progress';
   if (currentOriginContext) poUrl += '&origin=' + encodeURIComponent(currentOriginContext);
-  // 법인 필터 (발주현황 페이지에서 토글한 _procEntity 사용)
+  // 법인 필터 (발주현황 페이지에서 토글한 _procEntity 사용 — '' 이면 전체)
   if (typeof _procEntity !== 'undefined' && _procEntity) poUrl += '&entity=' + encodeURIComponent(_procEntity);
   fetch(poUrl).then(r=>r.json()).then(resp=>{
     poList=resp.data||resp||[];
@@ -29745,12 +29753,49 @@ function switchProcEntity(ent){
       bBtn.style.background='#f3f4f6'; bBtn.style.color='#64748b';
     }
   }
+  // 발주현황 버튼도 동기화 (있으면)
+  if (typeof _syncPOListEntityButtons === 'function') _syncPOListEntityButtons();
   // 디디는 더기프트 탭 숨김
   document.querySelectorAll('.proc-tab[data-proc-tab="thegift"]').forEach(el=>{
     el.style.display = (_procEntity === 'dd') ? 'none' : '';
   });
   if(_procEntity === 'dd' && _procTab === 'thegift') _procTab = 'korea';
   loadProcurementPage();
+}
+
+// ───────────────────────────────────────────────────────────────
+// 발주현황 페이지 전용 법인 토글 (3-state: 전체/바른컴퍼니/디디)
+// _procEntity 와 동기화 — '' (전체) 일 때는 entity 파라미터 미전송 = 모든 법인 PO 표시
+// ───────────────────────────────────────────────────────────────
+function switchPOListEntity(ent){
+  _procEntity = (ent === 'dd') ? 'dd' : (ent === 'barunson') ? 'barunson' : '';
+  _syncPOListEntityButtons();
+  // 통합발주관리 버튼도 동기화 (DD/barunson 일 때만 — '전체' 는 procurement 페이지에 없는 상태)
+  const procB = document.getElementById('procEntityBarunson');
+  const procD = document.getElementById('procEntityDD');
+  if (procB && procD) {
+    if (_procEntity === 'dd') {
+      procD.style.background='#ec4899'; procD.style.color='#fff';
+      procB.style.background='#f3f4f6'; procB.style.color='#64748b';
+    } else if (_procEntity === 'barunson') {
+      procB.style.background='#6366f1'; procB.style.color='#fff';
+      procD.style.background='#f3f4f6'; procD.style.color='#64748b';
+    }
+    // '전체' 는 procurement 측은 변화 없음 (다음 procurement 진입 시 사용자가 클릭)
+  }
+  loadPOList();
+}
+
+function _syncPOListEntityButtons(){
+  const btnAll = document.getElementById('poListEntityAll');
+  const btnB = document.getElementById('poListEntityBarunson');
+  const btnD = document.getElementById('poListEntityDD');
+  if (!btnAll || !btnB || !btnD) return;
+  const _on = (btn, color) => { btn.style.background = color; btn.style.color = '#fff'; btn.style.fontWeight = '700'; };
+  const _off = btn => { btn.style.background = '#f3f4f6'; btn.style.color = '#64748b'; btn.style.fontWeight = '600'; };
+  if (_procEntity === 'dd') { _on(btnD, '#ec4899'); _off(btnB); _off(btnAll); }
+  else if (_procEntity === 'barunson') { _on(btnB, '#6366f1'); _off(btnD); _off(btnAll); }
+  else { _on(btnAll, '#475569'); _off(btnB); _off(btnD); }
 }
 
 async function loadProcurementPage() {
