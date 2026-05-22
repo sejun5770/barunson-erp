@@ -17438,7 +17438,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
               <td>${esc(matName)}</td>
               <td>${esc(String(jeol))}</td>
               <td style="font-weight:700">${esc(reamQty)}</td>
-              <td><input type="text" data-item-id="${it.item_id}" data-po-id="${po.po_id}" value="${esc(itemOsVal)}" placeholder="OS번호" onclick="event.stopPropagation()" onchange="saveItemOS(this)" style="width:110px;padding:2px 4px;border:1px solid ${itemOsVal?'#86efac':'#d1d5db'};border-radius:3px;font-size:11px;${itemOsVal?'background:#f0fdf4':''}"></td>
+              <td id="osCell_${it.item_id}">${renderOSCellHtml(it.item_id, po.po_id, itemOsVal)}</td>
               <td>${recvHtml}</td>
               <td><input type="text" value="${esc(curPV||'')}" list="poPostVendorDL_${po.po_id}" onclick="event.stopPropagation()" onchange="inlineProductPostVendor('${esc(it.product_code||'')}',this.value,${po.po_id})" placeholder="입고처" style="width:100px;padding:2px 4px;border:1px solid transparent;border-radius:3px;font-size:11px;color:#7c3aed;font-weight:600;background:transparent;cursor:pointer" onfocus="this.style.border='1px solid #c4b5fd';this.style.background='#fff'" onblur="this.style.border='1px solid transparent';this.style.background='transparent'"></td>
             </tr>`;
@@ -17464,7 +17464,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
               <td>${esc(String(postJeol))}</td>
               <td><input type="text" value="${esc(it.process_type||it.spec||'')}" list="poProcessDL_${po.po_id}" onclick="event.stopPropagation()" onchange="inlinePOProcess(${po.po_id},${it.item_id},this.value)" style="width:80px;padding:2px 4px;border:1px solid transparent;border-radius:3px;font-size:12px;background:transparent;cursor:pointer" onfocus="this.style.border='1px solid #d1d5db';this.style.background='#fff'" onblur="this.style.border='1px solid transparent';this.style.background='transparent'"></td>
               <td style="font-weight:700">${esc(postReamQty)}</td>
-              <td><input type="text" data-item-id="${it.item_id}" data-po-id="${po.po_id}" value="${esc(postOsVal)}" placeholder="OS번호" onclick="event.stopPropagation()" onchange="saveItemOS(this)" style="width:110px;padding:2px 4px;border:1px solid ${postOsVal?'#86efac':'#d1d5db'};border-radius:3px;font-size:11px;${postOsVal?'background:#f0fdf4':''}"></td>
+              <td id="osCell_${it.item_id}">${renderOSCellHtml(it.item_id, po.po_id, postOsVal)}</td>
               <td>${recvHtml}</td>
               <td style="color:${_whColor};font-weight:600;font-size:11px" title="다음 공정 업체 또는 자사창고">${esc(nextWarehouse)}</td>
             </tr>`;
@@ -18292,6 +18292,8 @@ function savePostVendor(el) {
 }
 
 function saveItemOS(el) {
+  // (deprecated) onchange auto-save — 미스파이어/race condition 으로 안정성 낮음.
+  // 신규 코드는 renderOSCellHtml + saveOSCell 사용. 하위 호환을 위해 남김.
   const itemId = parseInt(el.dataset.itemId);
   const poId = parseInt(el.dataset.poId);
   const val = el.value.trim();
@@ -18305,6 +18307,83 @@ function saveItemOS(el) {
       el.style.background = val ? '#f0fdf4' : '';
     } else { alert('OS 저장 실패: ' + (d.error || '')); }
   }).catch(() => alert('서버 연결 실패'));
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 발주현황 OS번호 셀 — 명시적 저장 모드
+//   비어있을 때: input + [저장]
+//   값 있을 때: 값 표시 + [수정]
+//   수정 클릭: input + [저장] / [취소]
+// onchange auto-save 의 미스파이어/race condition 해결 + 저장 진행 시 disable 로 명확한 피드백
+// ───────────────────────────────────────────────────────────────────────────
+function renderOSCellHtml(itemId, poId, osVal) {
+  const safeVal = esc(osVal || '');
+  if (osVal) {
+    return `<span data-os-value="${safeVal}" style="color:#16a34a;font-weight:600;font-size:11px">${safeVal}</span>`
+      + ` <button onclick="event.stopPropagation();editOSCell(${itemId}, ${poId})" style="padding:1px 6px;font-size:10px;border:1px solid #cbd5e1;border-radius:3px;background:#f8fafc;cursor:pointer;color:#475569" title="OS번호 수정">수정</button>`;
+  }
+  return `<input type="text" id="osInp_${itemId}" placeholder="OS번호" onclick="event.stopPropagation()"`
+    + ` onkeydown="if(event.key==='Enter'){event.preventDefault();saveOSCell(${itemId}, ${poId})}"`
+    + ` style="width:80px;padding:2px 4px;border:1px solid #d1d5db;border-radius:3px;font-size:11px">`
+    + ` <button onclick="event.stopPropagation();saveOSCell(${itemId}, ${poId})" style="padding:1px 6px;font-size:10px;border:1px solid #3b82f6;border-radius:3px;background:#3b82f6;color:#fff;cursor:pointer">저장</button>`;
+}
+
+function editOSCell(itemId, poId) {
+  const cell = document.getElementById('osCell_' + itemId);
+  if (!cell) return;
+  const span = cell.querySelector('span[data-os-value]');
+  const curVal = span ? span.getAttribute('data-os-value') : '';
+  cell.innerHTML = `<input type="text" id="osInp_${itemId}" value="${esc(curVal)}" onclick="event.stopPropagation()"`
+    + ` onkeydown="if(event.key==='Enter'){event.preventDefault();saveOSCell(${itemId}, ${poId})}else if(event.key==='Escape'){cancelOSCell(${itemId}, ${poId}, '${esc(curVal)}')}"`
+    + ` style="width:80px;padding:2px 4px;border:1px solid #3b82f6;border-radius:3px;font-size:11px;background:#eff6ff">`
+    + ` <button onclick="event.stopPropagation();saveOSCell(${itemId}, ${poId})" style="padding:1px 6px;font-size:10px;border:1px solid #3b82f6;border-radius:3px;background:#3b82f6;color:#fff;cursor:pointer">저장</button>`
+    + ` <button onclick="event.stopPropagation();cancelOSCell(${itemId}, ${poId}, '${esc(curVal)}')" style="padding:1px 4px;font-size:10px;border:1px solid #cbd5e1;border-radius:3px;background:#fff;cursor:pointer">취소</button>`;
+  const inp = document.getElementById('osInp_' + itemId);
+  if (inp) { inp.focus(); inp.select(); }
+}
+
+function cancelOSCell(itemId, poId, originalVal) {
+  const cell = document.getElementById('osCell_' + itemId);
+  if (!cell) return;
+  cell.innerHTML = renderOSCellHtml(itemId, poId, originalVal);
+}
+
+function saveOSCell(itemId, poId) {
+  const inp = document.getElementById('osInp_' + itemId);
+  if (!inp) return;
+  const val = inp.value.trim();
+  // 저장 중 모든 컨트롤 disable — 중복 클릭 방지
+  inp.disabled = true;
+  const cell = document.getElementById('osCell_' + itemId);
+  const btns = cell ? cell.querySelectorAll('button') : [];
+  btns.forEach(b => { b.disabled = true; b.style.opacity='0.5'; });
+
+  fetch(`/api/po/${poId}/os`, {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ item_os: [{ item_id: itemId, os_number: val }] }),
+    credentials: 'include'
+  }).then(r => r.json()).then(d => {
+    if (d.ok || d.data?.ok) {
+      // 셀을 display 모드로 전환 (값이 비어있으면 빈 input 모드로)
+      if (cell) cell.innerHTML = renderOSCellHtml(itemId, poId, val);
+      // 로컬 poList 도 같이 갱신 — 다음 renderPOList 시 옛 값이 다시 안 보이도록
+      try {
+        const po = poList.find(p => p.po_id === poId);
+        const it = po?.items?.find(i => i.item_id === itemId);
+        if (it) it.os_number = val;
+        // 부모 PO 의 os_number 도 첫 값으로 동기화 (서버 동작과 일치)
+        if (po && val && !po.os_number) po.os_number = val;
+      } catch(_) {}
+    } else {
+      alert('OS 저장 실패: ' + (d.error || d.message || '알 수 없는 오류'));
+      inp.disabled = false;
+      btns.forEach(b => { b.disabled = false; b.style.opacity='1'; });
+    }
+  }).catch(e => {
+    alert('서버 연결 실패: ' + e.message);
+    inp.disabled = false;
+    btns.forEach(b => { b.disabled = false; b.style.opacity='1'; });
+  });
 }
 
 function savePoOS(poId) {
