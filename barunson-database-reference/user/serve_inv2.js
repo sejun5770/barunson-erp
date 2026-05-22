@@ -10029,6 +10029,58 @@ async function handleRequest(req, res) {
         }
       }
 
+      // ─ 입고처 (post_vendor) 자동 저장 ─
+      //   wizard 에서 지정한 process_chain 을 다음 발주에 재사용하기 위해 영구 저장:
+      //     1) product_post_vendor (전 단계 chain) — DELETE + INSERT (replace-all-for-code)
+      //     2) products.post_vendor (요약 표시용, step 1 vendor) — UPDATE
+      //   덕분에 다음 wizard 호출 시 latest-by-product 가 아니어도 입고처가 자동 채워지고,
+      //   발주현황 카드의 입고처 컬럼도 즉시 반영됨.
+      try {
+        // 품목별 process_chain 수집 (중복 제거 — 같은 product_code 의 마지막 chain 사용)
+        const chainByCode = {};
+        for (const it of items) {
+          if (!it.product_code || !Array.isArray(it.process_chain) || !it.process_chain.length) continue;
+          chainByCode[it.product_code] = it.process_chain;
+        }
+        const codes = Object.keys(chainByCode);
+        if (codes.length) {
+          const delPpv = db.prepare('DELETE FROM product_post_vendor WHERE product_code=?');
+          const insPpv = db.prepare(`INSERT INTO product_post_vendor (product_code, process_type, vendor_name, step_order, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now','localtime'))`);
+          let ppvSaved = 0, productUpdated = 0;
+          for (const code of codes) {
+            const chain = chainByCode[code];
+            try {
+              await delPpv.run(code);
+              for (let i = 0; i < chain.length; i++) {
+                const s = chain[i];
+                if (!s || !s.process || !s.vendor) continue;
+                const stepNum = Number(s.step) || (i + 1);
+                await insPpv.run(code, s.process, s.vendor, stepNum);
+                ppvSaved++;
+              }
+              // products.post_vendor = step 1 vendor (요약 — 발주현황 카드 입고처 셀 즉시 반영)
+              const firstVendor = chain[0]?.vendor || '';
+              if (firstVendor) {
+                try {
+                  await db.prepare("UPDATE products SET post_vendor=?, updated_at=datetime('now','localtime') WHERE product_code=?")
+                    .run(firstVendor, code);
+                  productUpdated++;
+                } catch(_) { /* products 행 없을 시 무시 */ }
+              }
+            } catch(e) {
+              console.warn(`[korea-wizard] post_vendor 저장 실패 (${code}):`, e.message);
+            }
+          }
+          // product_info 캐시 무효화 — 발주현황의 _postVendor 가 다음 fetch 시 새 값 반영
+          if (typeof scheduleProductInfoReload === 'function') scheduleProductInfoReload();
+          if (typeof xerpInventoryCacheTime !== 'undefined') xerpInventoryCacheTime = 0;
+          console.log(`[korea-wizard] post_vendor 자동 저장: ${codes.length}품목 / ppv ${ppvSaved}행 / products ${productUpdated}건`);
+        }
+      } catch (e) {
+        console.warn('[korea-wizard] post_vendor 자동 저장 블록 오류 (PO 생성은 정상):', e.message);
+      }
+
       // ─ 이메일 발송 (sendEmails=true 일 때만 즉시 발송) ─
       //   기본 정책 (sendEmails=false): 원재료 PO 도 draft 로 생성만 하고 사용자가 발주현황에서
       //   [📧 메일보내기] 로 수동 발송. 이는 wizard 확정 직후 오기 (잘못된 vendor / 잘못된 품목/수량) 를
