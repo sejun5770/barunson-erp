@@ -5212,6 +5212,70 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // GET /api/diagnostics — 데이터 영속성 진단 (배포 전후 비교용)
+  //   배포 후 데이터 손실 의심 시 이 응답의 db_file_mtime / row_counts 를 비교해 확인
+  if (pathname === '/api/diagnostics' && method === 'GET') {
+    const _diag = {
+      server_started_at: new Date(_startTime).toISOString(),
+      current_time: new Date().toISOString(),
+      version: APP_VERSION,
+      build_stamp: null,
+      db_mode: db && db.usingSqlite ? 'sqlite' : 'postgresql',
+      db_file: null,
+      db_file_size_bytes: null,
+      db_file_mtime: null,
+      data_dir: process.env.DATA_DIR || __dirname,
+      data_dir_writable: false,
+      row_counts: {},
+      // 추가 신호: 환경 변수 영속성 힌트
+      env: {
+        DATA_DIR: process.env.DATA_DIR || '(default __dirname)',
+        UPLOAD_DIR: process.env.UPLOAD_DIR || '(unset)',
+        NODE_ENV: process.env.NODE_ENV || '(unset)',
+        PG_HOST: process.env.PG_HOST ? '(set)' : '(unset)',
+      },
+    };
+    // build stamp (Docker 이미지에 박힌 빌드 시점)
+    try { _diag.build_stamp = fs.readFileSync('/app/.buildstamp', 'utf8').trim(); } catch(_) {}
+    // SQLite 모드면 orders.db 파일 정보
+    if (db && db.usingSqlite) {
+      try {
+        const _dbPath = path.join(_diag.data_dir, 'orders.db');
+        _diag.db_file = _dbPath;
+        const _stat = fs.statSync(_dbPath);
+        _diag.db_file_size_bytes = _stat.size;
+        _diag.db_file_mtime = _stat.mtime.toISOString();
+      } catch(e) { _diag.db_file_error = e.message; }
+      // 쓰기 가능성 테스트 (실제 파일 생성으로 디스크 영속성 확인)
+      try {
+        const _testFile = path.join(_diag.data_dir, '.diag-test-' + Date.now());
+        fs.writeFileSync(_testFile, 'ok');
+        fs.unlinkSync(_testFile);
+        _diag.data_dir_writable = true;
+      } catch(e) { _diag.data_dir_writable = false; _diag.data_dir_error = e.message; }
+    }
+    // 주요 테이블 row 카운트 — 배포 전후 비교 시 데이터 소실 즉시 발견
+    const tables = ['po_header', 'po_items', 'products', 'product_post_vendor', 'vendors', 'inv2_adjustments', 'po_drafts', 'po_activity_log'];
+    for (const t of tables) {
+      try {
+        const r = await db.prepare(`SELECT COUNT(*) AS c FROM ${t}`).get();
+        _diag.row_counts[t] = Number(r?.c) || 0;
+      } catch(e) { _diag.row_counts[t] = `(error: ${e.message.slice(0,60)})`; }
+    }
+    // 최근 인라인 편집 흔적 — po_activity_log 의 최근 N건
+    try {
+      const recent = await db.prepare(`SELECT action, actor, details, created_at FROM po_activity_log ORDER BY created_at DESC LIMIT 5`).all();
+      _diag.recent_activity = recent;
+    } catch(_) {}
+    // 최근 수정된 PO 5건 — 인라인 편집 결과가 살아있는지 빠른 확인
+    try {
+      const recentPo = await db.prepare(`SELECT po_number, po_type, vendor_name, status, os_number, updated_at FROM po_header WHERE updated_at IS NOT NULL ORDER BY updated_at DESC LIMIT 5`).all();
+      _diag.recent_po_updates = recentPo;
+    } catch(_) {}
+    ok(res, _diag);
+    return;
+  }
+
   // GET /api/manual — 사용 설명서 (MANUAL.md 원문)
   if (pathname === '/api/manual' && method === 'GET') {
     try {
