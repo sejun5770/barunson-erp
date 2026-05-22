@@ -3154,6 +3154,7 @@ function closeMegaMenu() { /* no-op */ }
       <span id="poSelectionInfo" style="font-size:11px;color:#475569;padding:4px 8px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;display:none" title="체크된 PO 만 엑셀 다운로드에 포함됩니다. 0건이면 필터된 전체가 출력됩니다.">선택: <b id="poSelectionCount" style="color:#2563eb">0</b>건</span>
       <button id="poSelectionClearBtn" class="btn btn-sm" onclick="clearPOSelection()" style="white-space:nowrap;background:#fff;border:1px solid #cbd5e1;color:#475569;font-size:11px;display:none" title="선택 모두 해제">선택해제</button>
       <button class="btn btn-sm" onclick="downloadPOExcel()" style="white-space:nowrap" title="선택된 PO 가 있으면 그것만, 없으면 필터된 전체를 엑셀로 다운로드">엑셀 다운로드</button>
+      <button class="btn btn-sm" onclick="loadPOListAllPeriod()" style="white-space:nowrap;background:#f1f5f9;border:1px solid #cbd5e1;color:#475569;font-size:11px" title="기본 최근 60일 — 옛 발주까지 보려면 클릭 (느릴 수 있음)">📜 전체 기간 로드</button>
     </div>
   </div>
 
@@ -16903,26 +16904,91 @@ function renderPOStatusPipeline(po) {
 }
 
 // ===== PO LIST (카드 기반 발주진행 현황) =====
+// 속도 개선:
+//  - skeleton UI 즉시 표시 (로딩 인식)
+//  - 기본 최근 60일 로드 (전체 아님) — 사용자가 기간 늘리려면 별도 UI 사용
+//  - poList 가 이미 있으면 캐시 표시 후 백그라운드 갱신
+let _poListLoading = false;
+let _poListLoadedRange = null;
+function _renderPOListSkeleton(container) {
+  // 6개 카드 모양 회색 플레이스홀더 — 사용자에게 '로딩 중' 인식 + 레이아웃 점프 방지
+  let html = '<style>@keyframes _skel{0%{background-position:200% 0}100%{background-position:-200% 0}}.skel{background:linear-gradient(90deg,#f1f5f9 0%,#e2e8f0 50%,#f1f5f9 100%);background-size:200% 100%;animation:_skel 1.5s linear infinite;border-radius:4px}</style>';
+  for (let i = 0; i < 6; i++) {
+    html += `<div class="po-card" style="border-left:4px solid #e2e8f0;margin-bottom:8px">
+      <div style="padding:12px 16px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <div class="skel" style="height:14px;width:120px"></div>
+          <div class="skel" style="height:14px;width:60px"></div>
+          <div class="skel" style="height:14px;width:200px;margin-left:auto"></div>
+        </div>
+        <div class="skel" style="height:28px;width:100%;margin-top:6px"></div>
+      </div>
+    </div>`;
+  }
+  container.innerHTML = html;
+}
 function loadPOList(callback){
   // 원재료 마감 엑셀 기간 input 기본값 (페이지 진입 시 1회)
   setPoClosingDateDefaults();
   // 법인 토글 버튼 시각 상태 동기화 (페이지 진입/탭 전환 후에도 _procEntity 와 일치)
   if (typeof _syncPOListEntityButtons === 'function') _syncPOListEntityButtons();
-  let poUrl = '/api/po?include=items,progress';
+
+  const container = document.getElementById('poCardContainer');
+  // 첫 진입 또는 캐시 비었을 때 skeleton 즉시 표시
+  if (container && (!Array.isArray(poList) || poList.length === 0)) {
+    _renderPOListSkeleton(container);
+  }
+  if (_poListLoading) {
+    // 중복 호출 방지 — 진행 중인 fetch 끝나면 callback 만 호출
+    if (typeof callback === 'function') setTimeout(() => callback(), 200);
+    return;
+  }
+  _poListLoading = true;
+
+  // 기본 기간: 최근 60일 (사용자가 명시적으로 풀 기간 요구 시는 별도 fetch — UI 미정)
+  //   - 전체 fetch 는 100+ MB 도 가능 → 진입 시 60일로 제한해 1차 응답 빠르게
+  const _today = new Date();
+  const _from = new Date(_today.getTime() - 60 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const _to = _today.toISOString().slice(0, 10);
+  let poUrl = '/api/po?include=items,progress&from=' + _from + '&to=' + _to;
   if (currentOriginContext) poUrl += '&origin=' + encodeURIComponent(currentOriginContext);
   // 법인 필터 (발주현황 페이지에서 토글한 _procEntity 사용 — '' 이면 전체)
   if (typeof _procEntity !== 'undefined' && _procEntity) poUrl += '&entity=' + encodeURIComponent(_procEntity);
   fetch(poUrl).then(r=>r.json()).then(resp=>{
     poList=resp.data||resp||[];
+    _poListLoadedRange = { from: _from, to: _to };
     // RAW 데이터에서 후공정 업체 매핑
     const pvMap={};
-    RAW.forEach(p=>{if(p._후공정업체)pvMap[p['제품코드']]=p._후공정업체;});
+    if (Array.isArray(RAW)) RAW.forEach(p=>{if(p._후공정업체)pvMap[p['제품코드']]=p._후공정업체;});
     poList.forEach(po=>{(po.items||[]).forEach(it=>{it._postVendor=pvMap[it.product_code]||'';});});
     renderPOList();
     if(typeof callback==='function') callback();
-  }).catch(()=>{
-    document.getElementById('poCardContainer').innerHTML='<div style="text-align:center;color:var(--text-muted);padding:40px">서버 연결 실패</div>';
-  });
+  }).catch((e)=>{
+    const c = document.getElementById('poCardContainer');
+    if (c) c.innerHTML='<div style="text-align:center;color:var(--text-muted);padding:40px">서버 연결 실패: ' + esc(e.message||'') + '<br><button onclick="loadPOList()" style="margin-top:8px;padding:6px 14px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;cursor:pointer">재시도</button></div>';
+  }).finally(() => { _poListLoading = false; });
+}
+
+// 사용자가 60일 이전 발주까지 보고 싶을 때 호출
+function loadPOListAllPeriod(){
+  if (_poListLoading) { alert('데이터를 가져오는 중입니다. 잠시 후 다시 시도해주세요.'); return; }
+  _poListLoading = true;
+  const container = document.getElementById('poCardContainer');
+  if (container) _renderPOListSkeleton(container);
+  let poUrl = '/api/po?include=items,progress';
+  if (currentOriginContext) poUrl += '&origin=' + encodeURIComponent(currentOriginContext);
+  if (typeof _procEntity !== 'undefined' && _procEntity) poUrl += '&entity=' + encodeURIComponent(_procEntity);
+  fetch(poUrl).then(r=>r.json()).then(resp=>{
+    poList=resp.data||resp||[];
+    _poListLoadedRange = { from: 'all', to: 'all' };
+    const pvMap={};
+    if (Array.isArray(RAW)) RAW.forEach(p=>{if(p._후공정업체)pvMap[p['제품코드']]=p._후공정업체;});
+    poList.forEach(po=>{(po.items||[]).forEach(it=>{it._postVendor=pvMap[it.product_code]||'';});});
+    renderPOList();
+  }).catch((e)=>{
+    const c = document.getElementById('poCardContainer');
+    if (c) c.innerHTML='<div style="text-align:center;color:var(--text-muted);padding:40px">서버 연결 실패: ' + esc(e.message||'') + '</div>';
+  }).finally(() => { _poListLoading = false; });
 }
 
 function filterPO(status){
