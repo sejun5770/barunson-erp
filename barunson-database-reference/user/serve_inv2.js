@@ -903,15 +903,18 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     let specText = (it.spec && String(it.spec).trim()) ? String(it.spec).trim() : '';
     if (!specText && pi['절'] && pi['조판']) specText = `${pi['절']}절 ${pi['조판']}조판`;
     if (!specText && pi['제품사양']) specText = pi['제품사양'];
-    // 입고처 = 현재 공정의 다음 단계 업체 (마지막 단계면 자사창고 '바른손')
-    // _steps 는 step_order + 봉투가공 후미 정렬이 적용된 상태로 들어옴 (app.html / serve 양쪽 동일 규칙)
-    let nextVendor = '바른손';
-    if (steps && steps.length) {
-      const cur = (it.process_type || '').trim();
-      const idx = steps.findIndex(s => (s.process || '').trim() === cur);
-      if (idx >= 0 && idx < steps.length - 1) {
-        const nx = steps[idx + 1];
-        if (nx && nx.vendor) nextVendor = nx.vendor;
+    // 입고처 = po_items.next_vendor (사용자가 직접 set 한 값) 우선 사용,
+    //   없으면 process_chain 의 다음 단계 vendor 로 폴백 (마지막 단계면 '바른손')
+    let nextVendor = (it.next_vendor || '').trim();
+    if (!nextVendor) {
+      nextVendor = '바른손';
+      if (steps && steps.length) {
+        const cur = (it.process_type || '').trim();
+        const idx = steps.findIndex(s => (s.process || '').trim() === cur);
+        if (idx >= 0 && idx < steps.length - 1) {
+          const nx = steps[idx + 1];
+          if (nx && nx.vendor) nextVendor = nx.vendor;
+        }
       }
     }
     return {
@@ -2536,6 +2539,10 @@ try { await db.exec(`ALTER TABLE po_items ADD COLUMN unit_price REAL DEFAULT 0`)
 try { await db.exec(`ALTER TABLE po_items ADD COLUMN amount REAL DEFAULT 0`); } catch(e) {}
 try { await db.exec(`ALTER TABLE po_items ADD COLUMN tax_amount REAL DEFAULT 0`); } catch(e) {}
 try { await db.exec(`ALTER TABLE po_items ADD COLUMN received_date TEXT DEFAULT ''`); } catch(e) {}
+// 다음 입고처 (PO item 단위) — wizard 확정 시 process_step 에 맞춰 자동 set
+//   원재료 (step=0): chain[0].vendor || '바른손'
+//   후공정 step N: chain[N].vendor || '바른손' (마지막 step 은 바른손)
+try { await db.exec(`ALTER TABLE po_items ADD COLUMN next_vendor TEXT DEFAULT ''`); } catch(e) {}
 
 // ── 구매마감 업체 첨부파일 (세금계산서/거래명세서) ──
 await db.exec(`CREATE TABLE IF NOT EXISTS purchase_closing_files (
@@ -6712,6 +6719,84 @@ async function handleRequest(req, res) {
   }
 
   // ════════════════════════════════════════════════════════════════════
+  //  PATCH /api/po-items/:item_id/next-vendor
+  //  PO item 의 입고처(다음 공정 vendor) 수정 — 발주현황 카드의 [수정] 버튼에서 호출
+  // ════════════════════════════════════════════════════════════════════
+  const nvItemMatch = pathname.match(/^\/api\/po-items\/(\d+)\/next-vendor$/);
+  if (nvItemMatch && method === 'PATCH') {
+    const itemId = parseInt(nvItemMatch[1]);
+    const body = await readJSON(req);
+    const newVal = (body.next_vendor === undefined || body.next_vendor === null) ? '' : String(body.next_vendor);
+    try {
+      const result = await db.prepare("UPDATE po_items SET next_vendor=? WHERE item_id=?").run(newVal, itemId);
+      if (!result?.changes && result?.changes !== undefined) {
+        fail(res, 404, 'item_id 없음 또는 변경 없음'); return;
+      }
+      // PO 카드 업데이트 시간 갱신 (헤더 updated_at)
+      try {
+        const _po = await db.prepare('SELECT po_id FROM po_items WHERE item_id=?').get(itemId);
+        if (_po) await db.prepare("UPDATE po_header SET updated_at=datetime('now','localtime') WHERE po_id=?").run(_po.po_id);
+      } catch(_) {}
+      if (currentUser) auditLog(currentUser.userId, currentUser.username, 'next_vendor_update', 'po_items', String(itemId), `입고처 변경: ${newVal || '(빈값)'}`, clientIP);
+      ok(res, { ok: true, item_id: itemId, next_vendor: newVal });
+    } catch (e) {
+      console.error('[next-vendor PATCH] error:', e.message);
+      fail(res, 500, '입고처 저장 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  POST /api/admin/next-vendor-backfill
+  //  옛 PO item 의 next_vendor 가 비어있으면 process_chain + process_step 기준으로 set.
+  //  Body: { "dry_run": true }
+  // ════════════════════════════════════════════════════════════════════
+  if (pathname === '/api/admin/next-vendor-backfill' && method === 'POST') {
+    const body = await readJSON(req).catch(() => ({}));
+    const dryRun = !!body?.dry_run;
+    try {
+      // 대상: next_vendor 가 빈 값인 모든 po_items + 부모 po_header 의 process_chain/process_step
+      const rows = await db.prepare(`
+        SELECT i.item_id, h.po_id, h.po_number, h.po_type, h.process_step, h.process_chain
+        FROM po_items i
+        JOIN po_header h ON h.po_id = i.po_id
+        WHERE (i.next_vendor IS NULL OR i.next_vendor = '')
+        ORDER BY h.po_id, i.item_id
+      `).all();
+
+      let processed = 0, updated = 0, skipped = 0, errors = 0;
+      const samples = [];
+      for (const r of rows) {
+        processed++;
+        let chain = [];
+        try { chain = JSON.parse(r.process_chain || '[]'); } catch(_) {}
+        const nextStepNum = (Number(r.process_step) || 0) + 1;
+        const found = Array.isArray(chain) ? chain.find(s => Number(s.step) === nextStepNum) : null;
+        const nv = found?.vendor || '바른손';
+        if (samples.length < 10) {
+          samples.push({ item_id: r.item_id, po: r.po_number, type: r.po_type, step: r.process_step, next_step: nextStepNum, next_vendor: nv });
+        }
+        if (!dryRun) {
+          try {
+            await db.prepare("UPDATE po_items SET next_vendor=? WHERE item_id=?").run(nv, r.item_id);
+            updated++;
+          } catch (e) {
+            errors++;
+          }
+        } else {
+          updated++; // dry-run 에서도 카운트
+        }
+      }
+      if (currentUser && !dryRun) auditLog(currentUser.userId, currentUser.username, 'next_vendor_backfill', 'po_items', '', `입고처 백필: ${updated}건 갱신 / ${errors} 실패`, clientIP);
+      ok(res, { dry_run: dryRun, processed, updated: dryRun ? 0 : updated, errors, samples });
+    } catch (e) {
+      console.error('[next-vendor-backfill] error:', e.message);
+      fail(res, 500, 'next-vendor-backfill 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
   //  POST /api/admin/clear-zero-os
   //  잘못 저장된 os_number='0' 또는 NULL/'' 도 무관하게 빈값으로 통일.
   //  버그 (이전 _propagateOSToChildren 의 defaultOsValue fallback) 로 인해
@@ -10088,12 +10173,16 @@ async function handleRequest(req, res) {
         const matPoId = matInfo.lastInsertRowid;
 
         const insItem = db.prepare(`INSERT INTO po_items
-          (po_id, product_code, brand, process_type, ordered_qty, spec, notes)
-          VALUES (?,?,?,?,?,?,?)`);
+          (po_id, product_code, brand, process_type, ordered_qty, spec, notes, next_vendor)
+          VALUES (?,?,?,?,?,?,?,?)`);
         for (const it of matItems) {
+          // 원재료 item 의 다음 입고처 = process_chain[0]?.vendor || '바른손'
+          //   사용자 정책: 원재료 → 후공정 step1 업체. 후공정 없으면 '바른손'.
+          const _nextV = (Array.isArray(it.process_chain) && it.process_chain[0]?.vendor) || '바른손';
           await insItem.run(matPoId, it.product_code, it.brand || '', '원재료',
             Number(it.ordered_qty) || 0, it.spec || '',
-            `용지:${it.material_name || ''} / 공정체인:${JSON.stringify(it.process_chain)}`);
+            `용지:${it.material_name || ''} / 공정체인:${JSON.stringify(it.process_chain)}`,
+            _nextV);
         }
 
         await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)")
@@ -10148,9 +10237,14 @@ async function handleRequest(req, res) {
                      JSON.stringify(info.items[0].process_chain || []), info.step, matPoId);
           const postPoId = postInfo.lastInsertRowid;
           for (const it of info.items) {
+            // 후공정 item 의 다음 입고처 = 다음 step (현재 step+1) 의 vendor || '바른손' (마지막 step)
+            const _nextStepNum = (info.step || 0) + 1;
+            const _nextChain = (Array.isArray(it.process_chain) ? it.process_chain : []).find(s => Number(s.step) === _nextStepNum);
+            const _nextV = _nextChain?.vendor || '바른손';
             await insItem.run(postPoId, it.product_code, it.brand || '', info.process,
               Number(it.ordered_qty) || 0, it.spec || '',
-              `원재료:${it.material_name || ''} / 전체체인:${JSON.stringify(it.process_chain)}`);
+              `원재료:${it.material_name || ''} / 전체체인:${JSON.stringify(it.process_chain)}`,
+              _nextV);
           }
           await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)")
             .run(postPoId, 'created', actorName, `마법사 생성: 후가공 PO step ${info.step} (${postVendor}, ${info.process}, 원재료 PO: ${matPoNumber})`);
