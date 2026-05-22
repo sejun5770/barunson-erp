@@ -17433,14 +17433,14 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
             const curPV=it._postVendor||'';
             return `<tr>
               <td style="font-weight:600">${esc(it.product_code||'')}</td>
-              <td><input type="text" value="${esc(po.vendor_name||'')}" list="poMatVendorDL_${po.po_id}" onclick="event.stopPropagation()" onchange="inlinePOVendor(${po.po_id},this.value)" style="width:100px;padding:2px 4px;border:1px solid transparent;border-radius:3px;font-size:12px;color:#0369a1;font-weight:600;background:transparent;cursor:pointer" onfocus="this.style.border='1px solid #93c5fd';this.style.background='#fff'" onblur="this.style.border='1px solid transparent';this.style.background='transparent'"></td>
+              <td id="vendorCell_${po.po_id}_${it.item_id}" data-item-id="${it.item_id}" data-po-id="${po.po_id}" data-datalist-id="poMatVendorDL_${po.po_id}" data-color="#0369a1">${renderVendorCellHtml(it.item_id, po.po_id, po.vendor_name||'', 'poMatVendorDL_'+po.po_id, '#0369a1')}</td>
               <td style="color:#0369a1">${esc(matCode)}</td>
               <td>${esc(matName)}</td>
               <td>${esc(String(jeol))}</td>
               <td style="font-weight:700">${esc(reamQty)}</td>
               <td id="osCell_${it.item_id}">${renderOSCellHtml(it.item_id, po.po_id, itemOsVal)}</td>
               <td>${recvHtml}</td>
-              <td><input type="text" value="${esc(curPV||'')}" list="poPostVendorDL_${po.po_id}" onclick="event.stopPropagation()" onchange="inlineProductPostVendor('${esc(it.product_code||'')}',this.value,${po.po_id})" placeholder="입고처" style="width:100px;padding:2px 4px;border:1px solid transparent;border-radius:3px;font-size:11px;color:#7c3aed;font-weight:600;background:transparent;cursor:pointer" onfocus="this.style.border='1px solid #c4b5fd';this.style.background='#fff'" onblur="this.style.border='1px solid transparent';this.style.background='transparent'"></td>
+              <td id="pvCell_${it.item_id}" data-product-code="${esc(it.product_code||'')}" data-item-id="${it.item_id}" data-po-id="${po.po_id}">${renderPostVendorCellHtml(it.item_id, it.product_code||'', po.po_id, curPV)}</td>
             </tr>`;
           } else {
             const postReamQty=toR(it.ordered_qty, it.product_code);
@@ -17458,11 +17458,11 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
             const _whColor = _nextStep ? '#7c3aed' : '#0369a1';
             return `<tr>
               <td style="font-weight:600">${esc(it.product_code||'')}</td>
-              <td style="color:#7c3aed"><input type="text" value="${esc(po.vendor_name||'')}" list="poVendorDL_${po.po_id}" onclick="event.stopPropagation()" onchange="inlinePOVendor(${po.po_id},this.value)" style="width:90px;padding:2px 4px;border:1px solid transparent;border-radius:3px;font-size:12px;color:#7c3aed;font-weight:600;background:transparent;cursor:pointer" onfocus="this.style.border='1px solid #c4b5fd';this.style.background='#fff'" onblur="this.style.border='1px solid transparent';this.style.background='transparent'"></td>
+              <td id="vendorCell_${po.po_id}_${it.item_id}" data-item-id="${it.item_id}" data-po-id="${po.po_id}" data-datalist-id="poVendorDL_${po.po_id}" data-color="#7c3aed">${renderVendorCellHtml(it.item_id, po.po_id, po.vendor_name||'', 'poVendorDL_'+po.po_id, '#7c3aed')}</td>
               <td style="color:#0369a1">${esc(postMatCode)}</td>
               <td>${esc(postMatName)}</td>
               <td>${esc(String(postJeol))}</td>
-              <td><input type="text" value="${esc(it.process_type||it.spec||'')}" list="poProcessDL_${po.po_id}" onclick="event.stopPropagation()" onchange="inlinePOProcess(${po.po_id},${it.item_id},this.value)" style="width:80px;padding:2px 4px;border:1px solid transparent;border-radius:3px;font-size:12px;background:transparent;cursor:pointer" onfocus="this.style.border='1px solid #d1d5db';this.style.background='#fff'" onblur="this.style.border='1px solid transparent';this.style.background='transparent'"></td>
+              <td id="procCell_${it.item_id}" data-spec-hint="${esc(it.spec||'')}">${renderProcessCellHtml(it.item_id, po.po_id, it.process_type||'', it.spec||'')}</td>
               <td style="font-weight:700">${esc(postReamQty)}</td>
               <td id="osCell_${it.item_id}">${renderOSCellHtml(it.item_id, po.po_id, postOsVal)}</td>
               <td>${recvHtml}</td>
@@ -18376,6 +18376,238 @@ function saveOSCell(itemId, poId) {
       } catch(_) {}
     } else {
       alert('OS 저장 실패: ' + (d.error || d.message || '알 수 없는 오류'));
+      inp.disabled = false;
+      btns.forEach(b => { b.disabled = false; b.style.opacity='1'; });
+    }
+  }).catch(e => {
+    alert('서버 연결 실패: ' + e.message);
+    inp.disabled = false;
+    btns.forEach(b => { b.disabled = false; b.style.opacity='1'; });
+  });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 입고처 (post_vendor) 셀 — 명시적 저장 모드
+//   값은 products.post_vendor (제품 단위) — 같은 product_code 의 모든 셀이 동시 갱신
+//   cell id: pvCell_{itemId}, 같은 product_code 공유는 data-product-code 로 매칭
+// ───────────────────────────────────────────────────────────────────────────
+function renderPostVendorCellHtml(itemId, productCode, poId, vendor) {
+  const safeVal = esc(vendor || '');
+  const safeCode = esc(productCode || '');
+  if (vendor) {
+    return `<span data-pv-value="${safeVal}" style="color:#7c3aed;font-weight:600;font-size:11px">${safeVal}</span>`
+      + ` <button onclick="event.stopPropagation();editPostVendorCell(${itemId}, '${safeCode}', ${poId})" style="padding:1px 6px;font-size:10px;border:1px solid #cbd5e1;border-radius:3px;background:#f8fafc;cursor:pointer;color:#475569" title="입고처 수정">수정</button>`;
+  }
+  return `<input type="text" id="pvInp_${itemId}" list="poPostVendorDL_${poId}" placeholder="입고처" onclick="event.stopPropagation()"`
+    + ` onkeydown="if(event.key==='Enter'){event.preventDefault();savePostVendorCell(${itemId}, '${safeCode}', ${poId})}"`
+    + ` style="width:90px;padding:2px 4px;border:1px solid #d1d5db;border-radius:3px;font-size:11px">`
+    + ` <button onclick="event.stopPropagation();savePostVendorCell(${itemId}, '${safeCode}', ${poId})" style="padding:1px 6px;font-size:10px;border:1px solid #3b82f6;border-radius:3px;background:#3b82f6;color:#fff;cursor:pointer">저장</button>`;
+}
+
+function editPostVendorCell(itemId, productCode, poId) {
+  const cell = document.getElementById('pvCell_' + itemId);
+  if (!cell) return;
+  const span = cell.querySelector('span[data-pv-value]');
+  const curVal = span ? span.getAttribute('data-pv-value') : '';
+  const safeCode = esc(productCode || '');
+  cell.innerHTML = `<input type="text" id="pvInp_${itemId}" list="poPostVendorDL_${poId}" value="${esc(curVal)}" onclick="event.stopPropagation()"`
+    + ` onkeydown="if(event.key==='Enter'){event.preventDefault();savePostVendorCell(${itemId}, '${safeCode}', ${poId})}else if(event.key==='Escape'){cancelPostVendorCell(${itemId}, '${safeCode}', ${poId}, '${esc(curVal)}')}"`
+    + ` style="width:90px;padding:2px 4px;border:1px solid #3b82f6;border-radius:3px;font-size:11px;background:#eff6ff">`
+    + ` <button onclick="event.stopPropagation();savePostVendorCell(${itemId}, '${safeCode}', ${poId})" style="padding:1px 6px;font-size:10px;border:1px solid #3b82f6;border-radius:3px;background:#3b82f6;color:#fff;cursor:pointer">저장</button>`
+    + ` <button onclick="event.stopPropagation();cancelPostVendorCell(${itemId}, '${safeCode}', ${poId}, '${esc(curVal)}')" style="padding:1px 4px;font-size:10px;border:1px solid #cbd5e1;border-radius:3px;background:#fff;cursor:pointer">취소</button>`;
+  const inp = document.getElementById('pvInp_' + itemId);
+  if (inp) { inp.focus(); inp.select(); }
+}
+
+function cancelPostVendorCell(itemId, productCode, poId, originalVal) {
+  const cell = document.getElementById('pvCell_' + itemId);
+  if (!cell) return;
+  cell.innerHTML = renderPostVendorCellHtml(itemId, productCode, poId, originalVal);
+}
+
+function savePostVendorCell(itemId, productCode, poId) {
+  const inp = document.getElementById('pvInp_' + itemId);
+  if (!inp) return;
+  const val = inp.value.trim();
+  const cell = document.getElementById('pvCell_' + itemId);
+  inp.disabled = true;
+  const btns = cell ? cell.querySelectorAll('button') : [];
+  btns.forEach(b => { b.disabled = true; b.style.opacity='0.5'; });
+
+  fetch(`/api/products/${encodeURIComponent(productCode)}/post-vendor`, {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ post_vendor: val }),
+    credentials: 'include'
+  }).then(r => r.json()).then(d => {
+    if (d.ok !== false && !d.error) {
+      // 같은 product_code 셀들 모두 갱신 (다른 PO/행에도 동일 입고처 적용)
+      try {
+        document.querySelectorAll('[id^="pvCell_"]').forEach(c => {
+          if (c.dataset.productCode === productCode) {
+            c.innerHTML = renderPostVendorCellHtml(parseInt(c.dataset.itemId || itemId), productCode, parseInt(c.dataset.poId || poId), val);
+          }
+        });
+        // 단일 cell fallback (data attribute 없을 때)
+        if (cell && !cell.dataset.productCode) cell.innerHTML = renderPostVendorCellHtml(itemId, productCode, poId, val);
+        // 로컬 RAW + poList 의 _postVendor 도 갱신
+        if (typeof RAW !== 'undefined') {
+          RAW.forEach(p => { if (p['제품코드'] === productCode) p._후공정업체 = val; });
+        }
+        poList.forEach(po => (po.items || []).forEach(it => { if (it.product_code === productCode) it._postVendor = val; }));
+      } catch(_) {}
+    } else {
+      alert('입고처 저장 실패: ' + (d.error || d.message || '알 수 없는 오류'));
+      inp.disabled = false;
+      btns.forEach(b => { b.disabled = false; b.style.opacity='1'; });
+    }
+  }).catch(e => {
+    alert('서버 연결 실패: ' + e.message);
+    inp.disabled = false;
+    btns.forEach(b => { b.disabled = false; b.style.opacity='1'; });
+  });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 공정명 (process_type) 셀 — 명시적 저장 모드 (후공정 행 전용)
+//   값은 po_items.process_type — 행(item) 단위
+// ───────────────────────────────────────────────────────────────────────────
+function renderProcessCellHtml(itemId, poId, processType, specHint) {
+  const safeVal = esc(processType || '');
+  const safeHint = esc(specHint || '');
+  if (processType) {
+    return `<span data-proc-value="${safeVal}" style="font-weight:600;font-size:12px">${safeVal}</span>`
+      + ` <button onclick="event.stopPropagation();editProcessCell(${itemId}, ${poId}, '${safeHint}')" style="padding:1px 6px;font-size:10px;border:1px solid #cbd5e1;border-radius:3px;background:#f8fafc;cursor:pointer;color:#475569" title="공정명 수정">수정</button>`;
+  }
+  return `<input type="text" id="procInp_${itemId}" list="poProcessDL_${poId}" placeholder="${safeHint ? '예: '+safeHint : '공정명'}" onclick="event.stopPropagation()"`
+    + ` onkeydown="if(event.key==='Enter'){event.preventDefault();saveProcessCell(${itemId}, ${poId})}"`
+    + ` style="width:80px;padding:2px 4px;border:1px solid #d1d5db;border-radius:3px;font-size:12px">`
+    + ` <button onclick="event.stopPropagation();saveProcessCell(${itemId}, ${poId})" style="padding:1px 6px;font-size:10px;border:1px solid #3b82f6;border-radius:3px;background:#3b82f6;color:#fff;cursor:pointer">저장</button>`;
+}
+
+function editProcessCell(itemId, poId, specHint) {
+  const cell = document.getElementById('procCell_' + itemId);
+  if (!cell) return;
+  const span = cell.querySelector('span[data-proc-value]');
+  const curVal = span ? span.getAttribute('data-proc-value') : '';
+  const safeHint = esc(specHint || '');
+  cell.innerHTML = `<input type="text" id="procInp_${itemId}" list="poProcessDL_${poId}" value="${esc(curVal)}" onclick="event.stopPropagation()"`
+    + ` onkeydown="if(event.key==='Enter'){event.preventDefault();saveProcessCell(${itemId}, ${poId})}else if(event.key==='Escape'){cancelProcessCell(${itemId}, ${poId}, '${esc(curVal)}', '${safeHint}')}"`
+    + ` style="width:80px;padding:2px 4px;border:1px solid #3b82f6;border-radius:3px;font-size:12px;background:#eff6ff">`
+    + ` <button onclick="event.stopPropagation();saveProcessCell(${itemId}, ${poId})" style="padding:1px 6px;font-size:10px;border:1px solid #3b82f6;border-radius:3px;background:#3b82f6;color:#fff;cursor:pointer">저장</button>`
+    + ` <button onclick="event.stopPropagation();cancelProcessCell(${itemId}, ${poId}, '${esc(curVal)}', '${safeHint}')" style="padding:1px 4px;font-size:10px;border:1px solid #cbd5e1;border-radius:3px;background:#fff;cursor:pointer">취소</button>`;
+  const inp = document.getElementById('procInp_' + itemId);
+  if (inp) { inp.focus(); inp.select(); }
+}
+
+function cancelProcessCell(itemId, poId, originalVal, specHint) {
+  const cell = document.getElementById('procCell_' + itemId);
+  if (!cell) return;
+  cell.innerHTML = renderProcessCellHtml(itemId, poId, originalVal, specHint);
+}
+
+function saveProcessCell(itemId, poId) {
+  const inp = document.getElementById('procInp_' + itemId);
+  if (!inp) return;
+  const val = inp.value.trim();
+  const cell = document.getElementById('procCell_' + itemId);
+  inp.disabled = true;
+  const btns = cell ? cell.querySelectorAll('button') : [];
+  btns.forEach(b => { b.disabled = true; b.style.opacity='0.5'; });
+
+  fetch(`/api/po/${poId}/items`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ add:[], remove:[], update:[{item_id:itemId, process_type: val}], reason:'공정 변경: '+val }),
+    credentials: 'include'
+  }).then(r => r.json()).then(d => {
+    if (d.ok !== false && !d.error) {
+      // spec hint 는 셀에 저장돼있을 수 있으니 다시 가져오기 (재렌더 시 동일 hint 유지)
+      const specHint = cell?.dataset?.specHint || '';
+      if (cell) cell.innerHTML = renderProcessCellHtml(itemId, poId, val, specHint);
+      // 로컬 poList 갱신
+      try {
+        const po = poList.find(p => p.po_id === poId);
+        const it = po?.items?.find(i => i.item_id === itemId);
+        if (it) it.process_type = val;
+      } catch(_) {}
+    } else {
+      alert('공정 저장 실패: ' + (d.error || d.message || '알 수 없는 오류'));
+      inp.disabled = false;
+      btns.forEach(b => { b.disabled = false; b.style.opacity='1'; });
+    }
+  }).catch(e => {
+    alert('서버 연결 실패: ' + e.message);
+    inp.disabled = false;
+    btns.forEach(b => { b.disabled = false; b.style.opacity='1'; });
+  });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 거래처명 (vendor_name) 셀 — 명시적 저장 모드
+//   값은 po_header.vendor_name (PO 단위) — 같은 PO 의 모든 행이 동시 갱신됨
+//   cell id: vendorCell_{poId}_{itemId} — DOM 중복 방지하면서 PO 단위 조회는 [data-po-id]
+// ───────────────────────────────────────────────────────────────────────────
+function renderVendorCellHtml(itemId, poId, vendor, datalistId, color) {
+  const safeVal = esc(vendor || '');
+  const safeColor = color || '#0369a1';
+  if (vendor) {
+    return `<span data-vendor-value="${safeVal}" style="color:${safeColor};font-weight:600">${safeVal}</span>`
+      + ` <button onclick="event.stopPropagation();editVendorCell(${itemId}, ${poId}, '${esc(datalistId)}', '${safeColor}')" style="padding:1px 6px;font-size:10px;border:1px solid #cbd5e1;border-radius:3px;background:#f8fafc;cursor:pointer;color:#475569" title="거래처명 수정">수정</button>`;
+  }
+  return `<input type="text" id="venInp_${itemId}" list="${esc(datalistId)}" placeholder="거래처명" onclick="event.stopPropagation()"`
+    + ` onkeydown="if(event.key==='Enter'){event.preventDefault();saveVendorCell(${itemId}, ${poId}, '${esc(datalistId)}', '${safeColor}')}"`
+    + ` style="width:100px;padding:2px 4px;border:1px solid #d1d5db;border-radius:3px;font-size:12px">`
+    + ` <button onclick="event.stopPropagation();saveVendorCell(${itemId}, ${poId}, '${esc(datalistId)}', '${safeColor}')" style="padding:1px 6px;font-size:10px;border:1px solid #3b82f6;border-radius:3px;background:#3b82f6;color:#fff;cursor:pointer">저장</button>`;
+}
+
+function editVendorCell(itemId, poId, datalistId, color) {
+  const cell = document.getElementById('vendorCell_' + poId + '_' + itemId);
+  if (!cell) return;
+  const span = cell.querySelector('span[data-vendor-value]');
+  const curVal = span ? span.getAttribute('data-vendor-value') : '';
+  cell.innerHTML = `<input type="text" id="venInp_${itemId}" list="${esc(datalistId)}" value="${esc(curVal)}" onclick="event.stopPropagation()"`
+    + ` onkeydown="if(event.key==='Enter'){event.preventDefault();saveVendorCell(${itemId}, ${poId}, '${esc(datalistId)}', '${esc(color)}')}else if(event.key==='Escape'){cancelVendorCell(${itemId}, ${poId}, '${esc(datalistId)}', '${esc(color)}', '${esc(curVal)}')}"`
+    + ` style="width:100px;padding:2px 4px;border:1px solid #3b82f6;border-radius:3px;font-size:12px;background:#eff6ff">`
+    + ` <button onclick="event.stopPropagation();saveVendorCell(${itemId}, ${poId}, '${esc(datalistId)}', '${esc(color)}')" style="padding:1px 6px;font-size:10px;border:1px solid #3b82f6;border-radius:3px;background:#3b82f6;color:#fff;cursor:pointer">저장</button>`
+    + ` <button onclick="event.stopPropagation();cancelVendorCell(${itemId}, ${poId}, '${esc(datalistId)}', '${esc(color)}', '${esc(curVal)}')" style="padding:1px 4px;font-size:10px;border:1px solid #cbd5e1;border-radius:3px;background:#fff;cursor:pointer">취소</button>`;
+  const inp = document.getElementById('venInp_' + itemId);
+  if (inp) { inp.focus(); inp.select(); }
+}
+
+function cancelVendorCell(itemId, poId, datalistId, color, originalVal) {
+  const cell = document.getElementById('vendorCell_' + poId + '_' + itemId);
+  if (!cell) return;
+  cell.innerHTML = renderVendorCellHtml(itemId, poId, originalVal, datalistId, color);
+}
+
+function saveVendorCell(itemId, poId, datalistId, color) {
+  const inp = document.getElementById('venInp_' + itemId);
+  if (!inp) return;
+  const val = inp.value.trim();
+  if (!val) { alert('거래처명을 입력하세요'); return; }
+  const cell = document.getElementById('vendorCell_' + poId + '_' + itemId);
+  inp.disabled = true;
+  const btns = cell ? cell.querySelectorAll('button') : [];
+  btns.forEach(b => { b.disabled = true; b.style.opacity='0.5'; });
+
+  fetch(`/api/po/${poId}/items`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ add:[], remove:[], update:[], vendor_name: val, reason:'업체명 변경: '+val }),
+    credentials: 'include'
+  }).then(r => r.json()).then(d => {
+    if (d.ok !== false && !d.error) {
+      // 같은 PO 의 모든 vendor 셀 갱신 (행마다 동일 값이라)
+      try {
+        document.querySelectorAll(`[id^="vendorCell_${poId}_"]`).forEach(c => {
+          const itemIdAttr = c.dataset.itemId ? parseInt(c.dataset.itemId) : itemId;
+          const dlist = c.dataset.datalistId || datalistId;
+          const col = c.dataset.color || color;
+          c.innerHTML = renderVendorCellHtml(itemIdAttr, poId, val, dlist, col);
+        });
+        const po = poList.find(p => p.po_id === poId);
+        if (po) po.vendor_name = val;
+      } catch(_) {}
+    } else {
+      alert('거래처명 저장 실패: ' + (d.error || d.message || '알 수 없는 오류'));
       inp.disabled = false;
       btns.forEach(b => { b.disabled = false; b.style.opacity='1'; });
     }
