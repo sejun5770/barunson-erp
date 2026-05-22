@@ -9616,6 +9616,24 @@ async function handleRequest(req, res) {
       } else if (anyDone) {
         await db.prepare("UPDATE po_header SET status='partial', process_status='working', updated_at=datetime('now','localtime') WHERE po_id=?").run(body.po_id);
       }
+      // 원재료 PO 입고 시 자식 후공정 PO 의 received_qty 미러링 — product_code 매핑
+      //   사용자 요청: 원재료 진행 시 후공정 카드 입고현황도 자동 갱신 (수량/입고현황 동기화)
+      if (poHeader && (await db.prepare("SELECT po_type FROM po_header WHERE po_id=?").get(body.po_id))?.po_type === '원재료') {
+        const _matItems = await db.prepare("SELECT product_code, received_qty FROM po_items WHERE po_id=?").all(body.po_id);
+        const _recvByCode = {};
+        for (const m of _matItems) {
+          if (m.product_code) _recvByCode[m.product_code] = m.received_qty || 0;
+        }
+        const _children = await db.prepare("SELECT po_id FROM po_header WHERE parent_po_id=?").all(body.po_id);
+        for (const c of _children) {
+          for (const code of Object.keys(_recvByCode)) {
+            try {
+              await db.prepare("UPDATE po_items SET received_qty=? WHERE po_id=? AND product_code=?")
+                .run(_recvByCode[code], c.po_id, code);
+            } catch(_) {}
+          }
+        }
+      }
       // 입고 활동 로그
       await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)").run(
         body.po_id, 'receive', body.received_by || 'system',
@@ -13226,6 +13244,7 @@ async function handleRequest(req, res) {
         removed++;
       }
       // 품목 수정
+      const _qtyChangesByCode = {}; // 원재료 PO 의 ordered_qty 변경 추적 → 자식 후공정에 전파
       for (const it of updateItems) {
         if (!it.item_id) continue;
         const sets = [], vals = [];
@@ -13233,7 +13252,35 @@ async function handleRequest(req, res) {
         if (it.spec !== undefined) { sets.push('spec=?'); vals.push(it.spec); }
         if (it.notes !== undefined) { sets.push('notes=?'); vals.push(it.notes); }
         if (it.process_type !== undefined) { sets.push('process_type=?'); vals.push(it.process_type); }
-        if (sets.length) { vals.push(it.item_id, poId); await db.prepare(`UPDATE po_items SET ${sets.join(',')} WHERE item_id=? AND po_id=?`).run(...vals); updated++; }
+        if (sets.length) {
+          vals.push(it.item_id, poId);
+          await db.prepare(`UPDATE po_items SET ${sets.join(',')} WHERE item_id=? AND po_id=?`).run(...vals);
+          updated++;
+          // 원재료 PO + ordered_qty 변경 시 product_code 기억 — 트랜잭션 후 자식 전파에 사용
+          if (po.po_type === '원재료' && it.ordered_qty !== undefined) {
+            const _src = await db.prepare("SELECT product_code FROM po_items WHERE item_id=?").get(it.item_id);
+            if (_src?.product_code) _qtyChangesByCode[_src.product_code] = Number(it.ordered_qty) || 0;
+          }
+        }
+      }
+      // 자식 후공정 PO 전파 — 같은 product_code 의 item ordered_qty 미러링
+      //   원재료 수량 변경 시 동일 품목의 후공정 카드도 자동 수량 갱신 (사용자 요청)
+      const _propagatedCodes = Object.keys(_qtyChangesByCode);
+      if (_propagatedCodes.length > 0) {
+        const children = await db.prepare("SELECT po_id FROM po_header WHERE parent_po_id=?").all(poId);
+        for (const c of children) {
+          for (const code of _propagatedCodes) {
+            try {
+              await db.prepare("UPDATE po_items SET ordered_qty=? WHERE po_id=? AND product_code=?")
+                .run(_qtyChangesByCode[code], c.po_id, code);
+            } catch(_) {}
+          }
+          // 자식 PO 의 total_qty 도 재계산
+          try {
+            const _t = await db.prepare("SELECT COALESCE(SUM(ordered_qty),0) AS t FROM po_items WHERE po_id=?").get(c.po_id);
+            await db.prepare("UPDATE po_header SET total_qty=?, updated_at=datetime('now','localtime') WHERE po_id=?").run(_t.t, c.po_id);
+          } catch(_) {}
+        }
       }
       // po_header 업데이트 (업체명 변경 등)
       if (body.vendor_name) {
@@ -13579,6 +13626,27 @@ async function handleRequest(req, res) {
         await db.prepare(`UPDATE po_header SET status = 'received', process_status = 'completed', material_status = 'received', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
       } else if (anyReceived) {
         await db.prepare(`UPDATE po_header SET status = 'partial', process_status = 'working', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(body.po_id);
+      }
+
+      // 원재료 PO 입고 시 자식 후공정 PO 의 received_qty 미러링
+      //   같은 product_code 의 자식 item.received_qty 를 부모와 동일하게 SET (절대값 미러)
+      //   사용자 요청: 원재료 진행 시 후공정 카드 입고현황도 함께 갱신
+      const _hdr = await db.prepare("SELECT po_type FROM po_header WHERE po_id=?").get(body.po_id);
+      if (_hdr && _hdr.po_type === '원재료') {
+        const _matItems = await db.prepare("SELECT product_code, received_qty FROM po_items WHERE po_id=?").all(body.po_id);
+        const _recvByCode = {};
+        for (const m of _matItems) {
+          if (m.product_code) _recvByCode[m.product_code] = m.received_qty || 0;
+        }
+        const _children = await db.prepare("SELECT po_id FROM po_header WHERE parent_po_id=?").all(body.po_id);
+        for (const c of _children) {
+          for (const code of Object.keys(_recvByCode)) {
+            try {
+              await db.prepare("UPDATE po_items SET received_qty=? WHERE po_id=? AND product_code=?")
+                .run(_recvByCode[code], c.po_id, code);
+            } catch(_) {}
+          }
+        }
       }
 
       return receiptId;
