@@ -9905,6 +9905,11 @@ async function handleRequest(req, res) {
     const notes = body.notes || '';
     const tolerancePct = body.tolerance_pct != null ? Number(body.tolerance_pct) : 5.0;
     const actorName = body.actor || (currentUser ? currentUser.username : 'system');
+    // 메일 즉시 발송 여부 — 기본 false (사용자가 발주현황에서 확인 후 수동 발송).
+    // 명시적 true 일 때만 마법사 확정 직후 원재료 업체에 이메일 즉시 발송.
+    const sendEmails = body.send_emails === true;
+    // 원재료 PO 상태: 메일 발송 시 'sent' / 미발송 시 'draft' — 후가공처럼 draft 유지로 사용자가 수동 발송 트리거
+    const matInitStatus = sendEmails ? 'sent' : 'draft';
 
     // product_code 정제
     for (const it of items) {
@@ -9941,14 +9946,14 @@ async function handleRequest(req, res) {
               (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
                due_date, total_qty, notes, origin, legal_entity, po_date, tolerance_pct, process_chain, process_step)
               VALUES (?,?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?)`)
-              .run(matPoNumber, '원재료', matVendor, matVendor, '', 'sent',
+              .run(matPoNumber, '원재료', matVendor, matVendor, '', matInitStatus,
                    expectedDate, matTotalQty, matNotes, '한국', _matEntity, tolerancePct,
                    JSON.stringify(repChain), 0)
           : await db.prepare(`INSERT INTO po_header
               (po_number, po_type, vendor_name, material_vendor_name, process_vendor_name, status,
                due_date, total_qty, notes, origin, po_date, tolerance_pct, process_chain, process_step)
               VALUES (?,?,?,?,?,?,?,?,?,?,date('now','localtime'),?,?,?)`)
-              .run(matPoNumber, '원재료', matVendor, matVendor, '', 'sent',
+              .run(matPoNumber, '원재료', matVendor, matVendor, '', matInitStatus,
                    expectedDate, matTotalQty, matNotes, '한국', tolerancePct,
                    JSON.stringify(repChain), 0);
         const matPoId = matInfo.lastInsertRowid;
@@ -10024,26 +10029,33 @@ async function handleRequest(req, res) {
         }
       }
 
-      // ─ 이메일 발송 (비동기, 실패해도 응답은 성공) ─
-      (async () => {
-        for (const m of materialPos) {
-          try {
-            const vendorRow = await db.prepare("SELECT email, email_cc FROM vendors WHERE name=?").get(m.vendor);
-            if (vendorRow?.email) {
-              const matPo = await db.prepare("SELECT * FROM po_header WHERE po_id=?").get(m.po_id);
-              const matItems = await db.prepare("SELECT * FROM po_items WHERE po_id=?").all(m.po_id);
-              await sendPOEmail(matPo, matItems, vendorRow.email, m.vendor, false, vendorRow.email_cc);
-            }
-          } catch (e) { console.warn(`[korea-wizard] 원재료 이메일 실패 (${m.vendor}):`, e.message); }
-        }
-        // 후가공은 원재료 입고 후 자동 발송되므로 여기서 즉시 발송하지 않음 (draft 상태 유지)
-        // 사용자가 원재료 입고 확정 시 기존 vendor-portal PATCH 로직이 자동으로 후가공 PO를 sent로 전환하며 이메일 발송
-      })().catch(e => console.error('[korea-wizard] 비동기 이메일 오류:', e.message));
+      // ─ 이메일 발송 (sendEmails=true 일 때만 즉시 발송) ─
+      //   기본 정책 (sendEmails=false): 원재료 PO 도 draft 로 생성만 하고 사용자가 발주현황에서
+      //   [📧 메일보내기] 로 수동 발송. 이는 wizard 확정 직후 오기 (잘못된 vendor / 잘못된 품목/수량) 를
+      //   되돌리기 어려운 자동 발송 전에 검수할 시간을 주기 위함.
+      if (sendEmails) {
+        (async () => {
+          for (const m of materialPos) {
+            try {
+              const vendorRow = await db.prepare("SELECT email, email_cc FROM vendors WHERE name=?").get(m.vendor);
+              if (vendorRow?.email) {
+                const matPo = await db.prepare("SELECT * FROM po_header WHERE po_id=?").get(m.po_id);
+                const matItems = await db.prepare("SELECT * FROM po_items WHERE po_id=?").all(m.po_id);
+                await sendPOEmail(matPo, matItems, vendorRow.email, m.vendor, false, vendorRow.email_cc);
+              }
+            } catch (e) { console.warn(`[korea-wizard] 원재료 이메일 실패 (${m.vendor}):`, e.message); }
+          }
+          // 후가공은 원재료 입고 후 자동 발송되므로 여기서 즉시 발송하지 않음 (draft 상태 유지)
+          // 사용자가 원재료 입고 확정 시 기존 vendor-portal PATCH 로직이 자동으로 후가공 PO를 sent로 전환하며 이메일 발송
+        })().catch(e => console.error('[korea-wizard] 비동기 이메일 오류:', e.message));
+      } else {
+        console.log(`[korea-wizard] send_emails=false — 원재료 ${materialPos.length}장 draft 로 생성, 메일 미발송 (수동 발송 대기)`);
+      }
 
       if (currentUser) auditLog(currentUser.userId, currentUser.username, 'po_create_wizard', 'po_header', null,
-        `한국 마법사 발주: 원재료 ${materialPos.length}장 + 후가공 ${processPos.length}장`, clientIP);
+        `한국 마법사 발주: 원재료 ${materialPos.length}장 + 후가공 ${processPos.length}장 (메일 ${sendEmails ? '즉시 발송' : '미발송 — 수동 발송 대기'})`, clientIP);
 
-      ok(res, { material_pos: materialPos, process_pos: processPos });
+      ok(res, { material_pos: materialPos, process_pos: processPos, emails_sent: sendEmails });
     } catch (e) {
       console.error('[korea-wizard] 실패:', e.message, e.stack);
       fail(res, 500, '마법사 발주 생성 실패: ' + e.message);
