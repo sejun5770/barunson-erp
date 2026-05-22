@@ -18390,23 +18390,29 @@ function saveOSCell(itemId, poId) {
         const po = poList.find(p => p.po_id === poId);
         const savedItem = po?.items?.find(i => i.item_id === itemId);
         if (savedItem) savedItem.os_number = val;
-        if (po && val && !po.os_number) po.os_number = val;
+        // 부모 PO 헤더 OS 재계산 — 현재 items 중 첫 비어있지 않은 값 (없으면 빈값)
+        if (po) {
+          const firstOS = (po.items || []).find(it => it.os_number)?.os_number || '';
+          po.os_number = firstOS;
+        }
 
-        // 같은 product_code 의 자식 후공정 PO 셀 자동 갱신 (서버 _propagateOSToChildren 와 동기화)
+        // 같은 product_code 의 자식 후공정 PO 셀 자동 갱신 — product_code 엄격 매칭
+        //   빈값 (해제) 도 전파 — 부모 OS 비우면 자식도 비워짐 (서버 _propagateOSToChildren 동기화)
         const productCode = savedItem?.product_code;
-        if (productCode && val) {
+        if (productCode) {
           const children = poList.filter(p => p.parent_po_id === poId);
           children.forEach(childPo => {
             (childPo.items || []).forEach(childItem => {
+              // 부모와 같은 product_code 만 갱신 — 다른 품목은 절대 건드리지 않음
               if (childItem.product_code === productCode) {
-                childItem.os_number = val;
-                // 자식 셀은 display-only (renderOSDisplayHtml) — innerHTML 즉시 교체
+                childItem.os_number = val;  // val 빈값이면 자식도 빈값
                 const childCell = document.getElementById('osCell_' + childItem.item_id);
                 if (childCell) childCell.innerHTML = renderOSDisplayHtml(val);
               }
             });
-            // 자식 PO 헤더 os_number 도 첫 값으로 (서버 동작과 일치)
-            if (!childPo.os_number && val) childPo.os_number = val;
+            // 자식 PO 헤더 = 자식 items 중 첫 비어있지 않은 OS (없으면 빈값)
+            const firstOS = (childPo.items || []).find(it => it.os_number)?.os_number || '';
+            childPo.os_number = firstOS;
           });
         }
       } catch(_) {}

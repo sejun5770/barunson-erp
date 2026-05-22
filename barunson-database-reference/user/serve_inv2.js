@@ -6712,6 +6712,53 @@ async function handleRequest(req, res) {
   }
 
   // ════════════════════════════════════════════════════════════════════
+  //  POST /api/admin/clear-zero-os
+  //  잘못 저장된 os_number='0' 또는 NULL/'' 도 무관하게 빈값으로 통일.
+  //  버그 (이전 _propagateOSToChildren 의 defaultOsValue fallback) 로 인해
+  //  product_code 미매칭 자식에도 "0" 이 일괄 적용되던 데이터 보정.
+  //  Body: { "dry_run": true } / { "value": "0" } (기본 "0")
+  // ════════════════════════════════════════════════════════════════════
+  if (pathname === '/api/admin/clear-zero-os' && method === 'POST') {
+    const body = await readJSON(req).catch(() => ({}));
+    const dryRun = !!body?.dry_run;
+    const targetVal = (body?.value !== undefined && body?.value !== null) ? String(body.value) : '0';
+    try {
+      // 영향 row 카운트 — po_items + po_header 양쪽
+      const itemsAffected = await db.prepare(`SELECT COUNT(*) AS c FROM po_items WHERE os_number = ?`).get(targetVal);
+      const headersAffected = await db.prepare(`SELECT COUNT(*) AS c FROM po_header WHERE os_number = ?`).get(targetVal);
+      const samples = await db.prepare(`SELECT h.po_number, h.po_type, h.os_number AS header_os, COUNT(i.item_id) AS items
+        FROM po_header h LEFT JOIN po_items i ON i.po_id = h.po_id AND i.os_number = ?
+        WHERE h.os_number = ? OR EXISTS (SELECT 1 FROM po_items i2 WHERE i2.po_id = h.po_id AND i2.os_number = ?)
+        GROUP BY h.po_number, h.po_type, h.os_number
+        ORDER BY h.po_number DESC LIMIT 10`).all(targetVal, targetVal, targetVal);
+
+      let itemsCleared = 0, headersCleared = 0;
+      if (!dryRun) {
+        const r1 = await db.prepare(`UPDATE po_items SET os_number = '' WHERE os_number = ?`).run(targetVal);
+        itemsCleared = r1?.changes || 0;
+        const r2 = await db.prepare(`UPDATE po_header SET os_number = '', updated_at = datetime('now','localtime') WHERE os_number = ?`).run(targetVal);
+        headersCleared = r2?.changes || 0;
+        // status 가 'os_registered' 인데 os_number 가 비어버린 PO 는 status 도 되돌림
+        await db.prepare(`UPDATE po_header SET status = 'os_pending' WHERE (os_number IS NULL OR os_number = '') AND status = 'os_registered'`).run();
+        if (currentUser) auditLog(currentUser.userId, currentUser.username, 'os_clear_zero', 'po_items', '', `잘못 저장된 OS='${targetVal}' 정리: items ${itemsCleared} / headers ${headersCleared}`, clientIP);
+      }
+      ok(res, {
+        dry_run: dryRun,
+        target_value: targetVal,
+        items_affected: Number(itemsAffected?.c) || 0,
+        headers_affected: Number(headersAffected?.c) || 0,
+        items_cleared: dryRun ? 0 : itemsCleared,
+        headers_cleared: dryRun ? 0 : headersCleared,
+        samples
+      });
+    } catch (e) {
+      console.error('[clear-zero-os] error:', e.message);
+      fail(res, 500, 'clear-zero-os 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
   //  POST /api/admin/po-entity-backfill
   //  자식 후공정 PO 의 legal_entity 를 부모 원재료 PO 와 동일하게 맞추는 일회성 백필.
   //  옛 데이터에서 부모는 'dd' 인데 자식은 'barunson' 으로 들어간 케이스 보정 —
@@ -12159,25 +12206,21 @@ async function handleRequest(req, res) {
     const osNumber = body.os_number || '';
     const itemOS = body.item_os || []; // [{item_id, os_number}]
 
-    // 자식(후공정) PO 들에 OS번호 전파 — 제품코드 기준 매핑.
-    // 한 발주서에 여러 제품코드가 있고 제품별 OS번호가 다른 경우,
-    // 자식 po_items 의 각 item 은 같은 product_code 의 부모 OS번호를 받음.
-    //   1) 부모 po_items 에서 product_code → os_number 매핑 빌드
-    //   2) 자식 po_items 각 item 마다 product_code 매칭 → 그 OS번호 set
-    //   3) 자식 item.product_code 가 부모에 없으면 defaultOsValue (전체 모드 입력값) fallback
-    //   4) 자식 po_header.os_number 는 자식 item 중 첫 OS번호 (대표값)
-    async function _propagateOSToChildren(parentId, defaultOsValue) {
+    // 자식(후공정) PO 들에 OS번호 전파 — 제품코드 기준 엄격 매칭.
+    //   1) 부모 po_items 의 현재 (product_code, os_number) 맵 빌드 (빈값 포함 — 해제 전파용)
+    //   2) 자식 po_items 각 item 마다 product_code 가 부모에 존재할 때만 UPDATE
+    //   3) **부모에 없는 product_code 의 자식 item 은 절대 건드리지 않음** (이전 defaultOsValue fallback 제거)
+    //   4) 자식 po_header.os_number 는 자식 item 중 첫 비어있지 않은 OS (없으면 빈값)
+    async function _propagateOSToChildren(parentId) {
       try {
         const parentItems = await db.prepare(
-          "SELECT product_code, os_number FROM po_items WHERE po_id = ? AND os_number IS NOT NULL AND os_number <> ''"
+          "SELECT product_code, os_number FROM po_items WHERE po_id = ?"
         ).all(parentId);
         const osByCode = {};
         for (const r of parentItems) {
-          if (r.product_code && r.os_number && !osByCode[r.product_code]) {
-            osByCode[r.product_code] = r.os_number;
-          }
+          if (r.product_code) osByCode[r.product_code] = r.os_number || '';
         }
-        if (Object.keys(osByCode).length === 0 && !defaultOsValue) return 0;
+        if (Object.keys(osByCode).length === 0) return 0;
 
         const _children = await db.prepare("SELECT po_id FROM po_header WHERE parent_po_id = ?").all(parentId);
         if (!_children.length) return 0;
@@ -12185,21 +12228,21 @@ async function handleRequest(req, res) {
         for (const c of _children) {
           try {
             const childItems = await db.prepare("SELECT item_id, product_code FROM po_items WHERE po_id = ?").all(c.po_id);
-            let firstOS = '';
             let updatedItems = 0;
             for (const item of childItems) {
-              const os = (item.product_code && osByCode[item.product_code]) || defaultOsValue;
-              if (os) {
-                await db.prepare("UPDATE po_items SET os_number = ? WHERE item_id = ?").run(os, item.item_id);
-                if (!firstOS) firstOS = os;
-                updatedItems++;
-              }
+              if (!item.product_code) continue;
+              // 부모에 같은 product_code 가 있을 때만 전파 — 미매칭 자식은 건드리지 않음
+              if (!(item.product_code in osByCode)) continue;
+              const os = osByCode[item.product_code];  // 빈값일 수 있음 (해제)
+              await db.prepare("UPDATE po_items SET os_number = ? WHERE item_id = ?").run(os, item.item_id);
+              updatedItems++;
             }
-            if (firstOS) {
-              await db.prepare("UPDATE po_header SET os_number = ?, updated_at = datetime('now','localtime') WHERE po_id = ?").run(firstOS, c.po_id);
-              try { logPOActivity(c.po_id, 'os_inherited', { actor_type: 'system', details: `부모 PO #${parentId} 로부터 OS번호 자동 전파 (${updatedItems}개 item, 제품코드 매핑)` }); } catch (_) {}
-              propagated++;
-            }
+            // 자식 헤더의 os_number 는 자식 item 중 첫 비어있지 않은 OS — 전부 빈값이면 빈값
+            const allChildItems = await db.prepare("SELECT os_number FROM po_items WHERE po_id=?").all(c.po_id);
+            const childFirstOS = allChildItems.find(it => it.os_number)?.os_number || '';
+            await db.prepare("UPDATE po_header SET os_number = ?, updated_at = datetime('now','localtime') WHERE po_id = ?").run(childFirstOS, c.po_id);
+            try { logPOActivity(c.po_id, 'os_inherited', { actor_type: 'system', details: `부모 PO #${parentId} 로부터 OS번호 전파 (${updatedItems}개 item, 제품코드 매핑)` }); } catch (_) {}
+            if (updatedItems > 0) propagated++;
           } catch (_) { /* 한 자식 실패해도 다른 자식 계속 */ }
         }
         return propagated;
@@ -12207,38 +12250,49 @@ async function handleRequest(req, res) {
     }
 
     if (itemOS.length > 0) {
-      // 제품별 OS번호 등록
+      // 제품별 OS번호 등록/해제 — 빈값도 UPDATE (사용자가 OS 해제하려는 의도)
       const stmt = db.prepare('UPDATE po_items SET os_number=? WHERE item_id=? AND po_id=?');
       const tx = db.transaction(async () => {
         for (const io of itemOS) {
-          if (io.os_number) await stmt.run(io.os_number, io.item_id, poId);
+          // 빈값 ('') 도 UPDATE — io.os_number 가 string 으로 와야 함 (frontend 보장)
+          const val = (io.os_number === undefined || io.os_number === null) ? '' : String(io.os_number);
+          await stmt.run(val, io.item_id, poId);
         }
       });
       await tx();
-      // PO 헤더에도 첫 번째 OS번호 기록 (대표값)
-      const firstOS = itemOS.find(i => i.os_number)?.os_number || osNumber;
-      if (firstOS) {
-        await db.prepare(`UPDATE po_header SET os_number = ?, status = 'os_registered', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(firstOS, poId);
-      }
-      logPOActivity(poId, 'os_registered', { actor_type: 'admin', to_status: 'os_registered', details: `제품별 OS번호 등록 (${itemOS.filter(i=>i.os_number).length}건)` });
-      // 자식 PO 자동 전파
-      const _propagated = await _propagateOSToChildren(poId, firstOS);
-      ok(res, { ok: true, po_id: poId, item_count: itemOS.filter(i=>i.os_number).length, status: 'os_registered', propagated_to_children: _propagated });
-    } else if (osNumber) {
-      // PO 전체 OS번호 등록
+      // PO 헤더 OS 재계산 — 현재 모든 item 의 첫 비어있지 않은 OS (없으면 빈값)
+      const allCurItems = await db.prepare("SELECT os_number FROM po_items WHERE po_id=?").all(poId);
+      const headerOS = allCurItems.find(it => it.os_number)?.os_number || '';
       const curPO = await db.prepare('SELECT status FROM po_header WHERE po_id=?').get(poId);
-      const shouldChangeStatus = curPO && curPO.status === 'os_pending';
+      const shouldSetStatus = headerOS && curPO && curPO.status === 'os_pending';
+      if (shouldSetStatus) {
+        await db.prepare(`UPDATE po_header SET os_number = ?, status = 'os_registered', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(headerOS, poId);
+      } else {
+        await db.prepare(`UPDATE po_header SET os_number = ?, updated_at = datetime('now','localtime') WHERE po_id = ?`).run(headerOS, poId);
+      }
+      const _itemsWithValue = itemOS.filter(i => i.os_number).length;
+      const _itemsCleared = itemOS.length - _itemsWithValue;
+      let _logDetails = `제품별 OS번호: ${_itemsWithValue}건 등록`;
+      if (_itemsCleared > 0) _logDetails += `, ${_itemsCleared}건 해제`;
+      logPOActivity(poId, 'os_registered', { actor_type: 'admin', to_status: shouldSetStatus ? 'os_registered' : (curPO?.status || ''), details: _logDetails });
+      // 자식 PO 전파 — product_code 매칭 엄격, defaultOsValue 미사용
+      const _propagated = await _propagateOSToChildren(poId);
+      ok(res, { ok: true, po_id: poId, item_count: _itemsWithValue, cleared_count: _itemsCleared, header_os: headerOS, propagated_to_children: _propagated });
+    } else if (osNumber || body.os_number === '') {
+      // PO 전체 OS번호 등록/해제 — osNumber 가 빈값 ('') 일 때도 허용 (해제 의도)
+      const curPO = await db.prepare('SELECT status FROM po_header WHERE po_id=?').get(poId);
+      const shouldChangeStatus = osNumber && curPO && curPO.status === 'os_pending';
       if (shouldChangeStatus) {
         await db.prepare(`UPDATE po_header SET os_number = ?, status = 'os_registered', updated_at = datetime('now','localtime') WHERE po_id = ?`).run(osNumber, poId);
       } else {
         await db.prepare(`UPDATE po_header SET os_number = ?, updated_at = datetime('now','localtime') WHERE po_id = ?`).run(osNumber, poId);
       }
-      // 모든 아이템에도 동일 OS번호 적용
+      // 모든 아이템에도 동일 OS번호 적용 (빈값도 허용)
       await db.prepare('UPDATE po_items SET os_number=? WHERE po_id=?').run(osNumber, poId);
       const newStatus = shouldChangeStatus ? 'os_registered' : (curPO?.status || 'unknown');
-      logPOActivity(poId, 'os_saved', { actor_type: 'admin', details: `OS번호: ${osNumber}` });
-      // 자식 PO 자동 전파
-      const _propagated = await _propagateOSToChildren(poId, osNumber);
+      logPOActivity(poId, 'os_saved', { actor_type: 'admin', details: osNumber ? `OS번호: ${osNumber}` : 'OS번호 해제' });
+      // 자식 PO 전파 — 동일하게 엄격 매칭
+      const _propagated = await _propagateOSToChildren(poId);
       ok(res, { ok: true, po_id: poId, os_number: osNumber, status: newStatus, propagated_to_children: _propagated });
     } else {
       fail(res, 400, 'os_number 또는 item_os 필수');
