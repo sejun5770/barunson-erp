@@ -15401,19 +15401,16 @@ function pwRenderStep4() {
     </div>`;
   });
   html += `</div></div>`;
-  // 메일 즉시 발송 체크박스 (기본 OFF — 사용자가 발주현황에서 확인 후 수동 발송)
-  html += `<div style="margin-top:12px;padding:12px;background:#eff6ff;border:1px solid #93c5fd;border-radius:6px;font-size:12px;color:#1e3a8a">
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600">
-      <input type="checkbox" id="pwSendEmailsNow" style="transform:scale(1.2);cursor:pointer">
-      <span>확정 후 즉시 원재료 업체에 이메일 발송</span>
-    </label>
-    <div style="margin-top:6px;font-size:11px;color:#1e40af;line-height:1.5">
-      <b>체크 시</b>: 확정 직후 원재료 업체 이메일 자동 발송 (즉시 SMS/메일이 발송됩니다)<br>
-      <b>미체크 시(권장)</b>: 원재료 PO 가 <b>draft</b> 로 생성됨 → 발주현황에서 [📧 메일보내기] 로 수동 발송. 잘못된 vendor/수량 확인 후 발송할 수 있어 안전합니다.
-    </div>
-  </div>`;
-  html += `<div style="margin-top:8px;padding:10px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:11px;color:#92400e">
-    ※ 후가공 PO 는 항상 draft 로 생성됩니다 — 원재료 입고 확정 시 자동으로 발송됩니다.
+  // 메일 정책 (체크박스 제거) — wizard 확정 시 모든 PO 는 항상 draft 로 생성, 사용자가 입고처 설정 후 수동 발송
+  //   이유: 자동 발송 시 입고처(다음 공정 업체) 가 빈 상태로 발송되어 수탁처가 혼란
+  html += `<div style="margin-top:12px;padding:12px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:12px;color:#92400e;line-height:1.6">
+    <b>📋 발주 확정 후 메일 발송 절차</b><br>
+    <span style="font-size:11px">
+      ① 발주 확정 시 모든 PO 는 <b>draft (대기)</b> 로 생성됩니다 — 메일 자동 발송 안 함<br>
+      ② 발주현황 카드에서 각 품목별 <b>입고처 (다음 공정 업체)</b> 를 확인/입력<br>
+      ③ 각 PO 카드의 <b>[📧 메일보내기]</b> 버튼으로 검수 후 수동 발송<br>
+      ④ 후가공 PO 는 원재료 입고 확정 시 자동으로 발송됩니다
+    </span>
   </div>`;
   el.innerHTML = html;
   const hint = document.getElementById('pwHint');
@@ -15423,20 +15420,13 @@ function pwRenderStep4() {
 }
 
 async function pwConfirmSubmit() {
-  // 메일 즉시 발송 체크박스 — 미체크 시 원재료 PO 도 draft 로 생성, 사용자가 발주현황에서 수동 발송
-  const sendEmailsNow = !!document.getElementById('pwSendEmailsNow')?.checked;
-  // 추가 확인: 즉시 발송 선택 시 한번 더 confirm
-  if (sendEmailsNow) {
-    if (!confirm('원재료 업체에 즉시 이메일이 발송됩니다.\n발주 내용에 오기가 없는지 다시 한번 확인하셨나요?')) {
-      return;
-    }
-  }
-  // items 조립
+  // 메일 자동 발송 정책: wizard 는 무조건 send_emails=false (draft 로만 생성)
+  //   사유: 입고처 빈 상태 자동 발송 시 수탁처 혼란 — 사용자가 입고처 확인 후 수동 발송
   const payload = {
     expected_date: document.getElementById('poDeliveryDate')?.value || '',
     notes: '',
     tolerance_pct: 5.0,
-    send_emails: sendEmailsNow,
+    send_emails: false,
     legal_entity: (typeof _procEntity !== 'undefined' && _procEntity) ? _procEntity : 'barunson',
     items: _pwItems.map(p => {
       const code = p['제품코드'] || '';
@@ -15469,12 +15459,8 @@ async function pwConfirmSubmit() {
       return;
     }
     const d = j.data;
-    // 성공 메시지 — 메일 발송 여부에 따라 안내 변경
-    const msgHead = `발주 생성 완료\n원재료 PO ${d.material_pos.length}장 / 후가공 PO ${d.process_pos.length}장`;
-    const msgTail = d.emails_sent
-      ? `\n\n✉ 원재료 업체에 이메일 발송 완료`
-      : `\n\n📋 메일 미발송 (draft 상태)\n→ 발주현황 페이지에서 각 PO 의 [📧 메일보내기] 버튼으로 검토 후 발송하세요.`;
-    alert(msgHead + msgTail);
+    // 성공 메시지 — 항상 draft 로 생성됨, 사용자가 발주현황에서 수동 발송
+    alert(`발주 생성 완료\n원재료 PO ${d.material_pos.length}장 / 후가공 PO ${d.process_pos.length}장\n\n📋 모든 PO 는 draft (대기) 상태로 생성됩니다.\n→ 발주현황 페이지에서 입고처 확인 후 각 PO 의 [📧 메일보내기] 버튼으로 발송하세요.`);
     // 발주 완료 후 orderQty 초기화 (발주된 품목들)
     _pwItems.forEach(p => { const c = p['제품코드']; if (c && orderQty) delete orderQty[c]; });
     try { localStorage.setItem('orderQty', JSON.stringify(orderQty||{})); } catch(_){}
@@ -17490,7 +17476,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
               <td>${esc(String(postJeol))}</td>
               <td id="procCell_${it.item_id}" data-spec-hint="${esc(it.spec||'')}">${renderProcessCellHtml(it.item_id, po.po_id, it.process_type||'', it.spec||'')}</td>
               <td style="font-weight:700">${esc(postReamQty)}</td>
-              <td id="osCell_${it.item_id}">${renderOSCellHtml(it.item_id, po.po_id, postOsVal)}</td>
+              <td id="osCell_${it.item_id}" title="원재료(부모) PO 의 OS번호 저장 시 자동 입력">${renderOSDisplayHtml(postOsVal)}</td>
               <td>${recvHtml}</td>
               <td style="color:${_whColor};font-weight:600;font-size:11px" title="다음 공정 업체 또는 자사창고">${esc(nextWarehouse)}</td>
             </tr>`;
@@ -17584,7 +17570,6 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
           ${renderPOProgressMini(po)}
           <span style="font-size:12px;color:#6b7280">${items.length}품목 · ${totalOrdered.toLocaleString()}매</span>
           <span style="font-size:12px;color:#6b7280">입고 <span class="recv-text ${overallCls}" style="font-weight:600">${overallPct}%</span></span>
-          ${po.os_number ? `<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:#e8f5e9;color:#2e7d32;font-weight:600">OS: ${esc(po.os_number)}</span>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:4px">
           ${actions}
@@ -18336,12 +18321,20 @@ function saveItemOS(el) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 발주현황 OS번호 셀 — 명시적 저장 모드
+// 발주현황 OS번호 셀 — 명시적 저장 모드 (원재료/부모 카드 전용)
 //   비어있을 때: input + [저장]
 //   값 있을 때: 값 표시 + [수정]
 //   수정 클릭: input + [저장] / [취소]
-// onchange auto-save 의 미스파이어/race condition 해결 + 저장 진행 시 disable 로 명확한 피드백
+//   저장 시 같은 product_code 의 자식 후공정 셀들도 자동 갱신 (DOM 즉시 반영)
 // ───────────────────────────────────────────────────────────────────────────
+// 후공정(자식) 카드용 — display-only 셀 (입력 불가, 부모 OS 저장 시 자동 채움)
+function renderOSDisplayHtml(osVal) {
+  if (osVal) {
+    return `<span style="color:#16a34a;font-weight:600;font-size:11px">${esc(osVal)}</span>`;
+  }
+  return `<span style="color:#9ca3af;font-size:11px;font-style:italic" title="원재료(부모) PO 의 OS번호 저장 시 자동 입력">자동</span>`;
+}
+
 function renderOSCellHtml(itemId, poId, osVal) {
   const safeVal = esc(osVal || '');
   if (osVal) {
@@ -18390,15 +18383,32 @@ function saveOSCell(itemId, poId) {
     credentials: 'include'
   }).then(r => r.json()).then(d => {
     if (d.ok || d.data?.ok) {
-      // 셀을 display 모드로 전환 (값이 비어있으면 빈 input 모드로)
+      // 1) 부모 셀을 display 모드로 전환
       if (cell) cell.innerHTML = renderOSCellHtml(itemId, poId, val);
-      // 로컬 poList 도 같이 갱신 — 다음 renderPOList 시 옛 값이 다시 안 보이도록
+      // 2) 로컬 poList 갱신 + 자식 후공정 PO 의 같은 product_code item 에 OS 전파
       try {
         const po = poList.find(p => p.po_id === poId);
-        const it = po?.items?.find(i => i.item_id === itemId);
-        if (it) it.os_number = val;
-        // 부모 PO 의 os_number 도 첫 값으로 동기화 (서버 동작과 일치)
+        const savedItem = po?.items?.find(i => i.item_id === itemId);
+        if (savedItem) savedItem.os_number = val;
         if (po && val && !po.os_number) po.os_number = val;
+
+        // 같은 product_code 의 자식 후공정 PO 셀 자동 갱신 (서버 _propagateOSToChildren 와 동기화)
+        const productCode = savedItem?.product_code;
+        if (productCode && val) {
+          const children = poList.filter(p => p.parent_po_id === poId);
+          children.forEach(childPo => {
+            (childPo.items || []).forEach(childItem => {
+              if (childItem.product_code === productCode) {
+                childItem.os_number = val;
+                // 자식 셀은 display-only (renderOSDisplayHtml) — innerHTML 즉시 교체
+                const childCell = document.getElementById('osCell_' + childItem.item_id);
+                if (childCell) childCell.innerHTML = renderOSDisplayHtml(val);
+              }
+            });
+            // 자식 PO 헤더 os_number 도 첫 값으로 (서버 동작과 일치)
+            if (!childPo.os_number && val) childPo.os_number = val;
+          });
+        }
       } catch(_) {}
     } else {
       alert('OS 저장 실패: ' + (d.error || d.message || '알 수 없는 오류'));
