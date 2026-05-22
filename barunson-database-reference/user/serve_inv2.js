@@ -2076,6 +2076,9 @@ try { await db.exec("ALTER TABLE po_header ADD COLUMN origin TEXT DEFAULT ''"); 
 // 결과: /api/inventory/pending-orders 의 MIN(h.due_date) 쿼리가 "no such column" 으로 실패 →
 // 응답 빈 객체 → 재고현황 화면의 미입고 컬럼이 모두 비어 보임.
 try { await db.exec("ALTER TABLE po_header ADD COLUMN due_date TEXT DEFAULT ''"); } catch(_) {}
+// expected_date — PG 스키마에 누락된 환경 대응. SQLite CREATE TABLE 에는 이미 있음(line 1564).
+// 사후추가 endpoint 등이 INSERT 시 사용. due_date 와 같은 값으로 저장됨.
+try { await db.exec("ALTER TABLE po_header ADD COLUMN expected_date TEXT DEFAULT ''"); } catch(_) {}
 
 // ── updated_at 컬럼 보강 ──
 // 동일 패턴: CREATE 정의에는 있지만 옛 운영 schema 에는 누락된 경우가 있어
