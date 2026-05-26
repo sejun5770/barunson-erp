@@ -1631,6 +1631,20 @@ await db.exec(`
     sort_order    INTEGER DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS idx_bom_items_bom ON bom_items(bom_id);
+  CREATE TABLE IF NOT EXISTS product_materials (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_code    TEXT NOT NULL,
+    material_code   TEXT DEFAULT '',
+    material_name   TEXT DEFAULT '',
+    cut_spec        TEXT DEFAULT '',
+    jopan           TEXT DEFAULT '',
+    paper_maker     TEXT DEFAULT '',
+    sort_order      INTEGER DEFAULT 0,
+    notes           TEXT DEFAULT '',
+    created_at      TEXT DEFAULT (datetime('now','localtime')),
+    updated_at      TEXT DEFAULT (datetime('now','localtime'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_pm_mat_code ON product_materials(product_code);
   CREATE TABLE IF NOT EXISTS product_post_vendor (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     product_code TEXT NOT NULL,
@@ -7078,6 +7092,88 @@ async function handleRequest(req, res) {
     const code = decodeURIComponent(prodHistMatch[1]);
     const rows = await db.prepare('SELECT * FROM product_field_history WHERE product_code=? ORDER BY changed_at DESC LIMIT 50').all(code);
     ok(res, rows);
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  품목 다중 원재료 API (1 product : N materials)
+  //  - GET /api/products/:code/materials — 원재료 목록 (없으면 products 단일필드 1행으로 fallback)
+  //  - PUT /api/products/:code/materials — bulk replace + products 1차 원재료 동기화
+  // ════════════════════════════════════════════════════════════════════
+  const prodMatMatch = pathname.match(/^\/api\/products\/(.+)\/materials$/);
+  if (prodMatMatch && method === 'GET') {
+    const code = decodeURIComponent(prodMatMatch[1]);
+    try {
+      const rows = await db.prepare(`SELECT id, product_code, material_code, material_name, cut_spec, jopan, paper_maker, sort_order, notes
+        FROM product_materials WHERE product_code=? ORDER BY sort_order ASC, id ASC`).all(code);
+      // 비어있으면 products 단일 필드를 1행으로 합성 (옛 데이터 호환)
+      if (!rows.length) {
+        const p = await db.prepare('SELECT material_code, material_name, cut_spec, jopan, paper_maker FROM products WHERE product_code=?').get(code);
+        if (p && (p.material_code || p.material_name)) {
+          ok(res, [{
+            id: 0, product_code: code,
+            material_code: p.material_code || '', material_name: p.material_name || '',
+            cut_spec: p.cut_spec || '', jopan: p.jopan || '', paper_maker: p.paper_maker || '',
+            sort_order: 0, notes: '', _from_legacy: true
+          }]);
+          return;
+        }
+      }
+      ok(res, rows);
+    } catch (e) { fail(res, 500, 'materials 조회 실패: ' + e.message); }
+    return;
+  }
+  if (prodMatMatch && method === 'PUT') {
+    const code = decodeURIComponent(prodMatMatch[1]);
+    const body = await readJSON(req);
+    const materials = Array.isArray(body.materials) ? body.materials : [];
+    try {
+      const tx = db.transaction(async () => {
+        // 1) 기존 다중 원재료 삭제
+        await db.prepare('DELETE FROM product_materials WHERE product_code=?').run(code);
+        // 2) 새 원재료 INSERT
+        const ins = db.prepare(`INSERT INTO product_materials
+          (product_code, material_code, material_name, cut_spec, jopan, paper_maker, sort_order, notes, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,datetime('now','localtime'))`);
+        for (let i = 0; i < materials.length; i++) {
+          const m = materials[i];
+          if (!m || (!m.material_code && !m.material_name)) continue;  // 둘 다 빈 행은 skip
+          await ins.run(code,
+            String(m.material_code || '').trim(),
+            String(m.material_name || '').trim(),
+            String(m.cut_spec || '').trim(),
+            String(m.jopan || '').trim(),
+            String(m.paper_maker || '').trim(),
+            Number(m.sort_order) || i,
+            String(m.notes || '').trim()
+          );
+        }
+        // 3) products 의 1차 원재료 동기화 (sort_order=0 또는 첫번째) — backward compat
+        const first = materials.find(m => m && (m.material_code || m.material_name)) || null;
+        if (first) {
+          await db.prepare(`UPDATE products SET
+            material_code=?, material_name=?, cut_spec=?, jopan=?, paper_maker=?,
+            updated_at=datetime('now','localtime')
+            WHERE product_code=?`).run(
+            String(first.material_code || '').trim(),
+            String(first.material_name || '').trim(),
+            String(first.cut_spec || '').trim(),
+            String(first.jopan || '').trim(),
+            String(first.paper_maker || '').trim(),
+            code
+          );
+        }
+      });
+      await tx();
+      if (currentUser) auditLog(currentUser.userId, currentUser.username, 'product_materials_save', 'product_materials', code, `원재료 ${materials.length}건 저장`, clientIP);
+      // 캐시 무효화 — 다음 fetch 시 새 데이터
+      if (typeof scheduleProductInfoReload === 'function') scheduleProductInfoReload();
+      if (typeof xerpInventoryCacheTime !== 'undefined') xerpInventoryCacheTime = 0;
+      ok(res, { ok: true, product_code: code, count: materials.length });
+    } catch (e) {
+      console.error('[product-materials PUT] error:', e.message);
+      fail(res, 500, 'materials 저장 실패: ' + e.message);
+    }
     return;
   }
 
