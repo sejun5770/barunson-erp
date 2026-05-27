@@ -6797,6 +6797,76 @@ async function handleRequest(req, res) {
   }
 
   // ════════════════════════════════════════════════════════════════════
+  //  POST /api/admin/product-material-audit
+  //  products.material_code 또는 material_name 에 vendors.name (거래처명) 이 들어간
+  //  케이스 검출 — 데이터 오염 진단/정리용.
+  //  Body: { dry_run: true|false, clear: 'code'|'name'|'both' (기본 'both') }
+  // ════════════════════════════════════════════════════════════════════
+  if (pathname === '/api/admin/product-material-audit' && method === 'POST') {
+    const body = await readJSON(req).catch(() => ({}));
+    const dryRun = body?.dry_run !== false;  // 기본 dry-run
+    const clearMode = body?.clear || 'both';  // 'code' | 'name' | 'both'
+    try {
+      // 모든 vendor 명 수집
+      const vendors = await db.prepare(`SELECT name FROM vendors WHERE name IS NOT NULL AND name <> ''`).all();
+      const vendorNames = new Set(vendors.map(v => (v.name || '').trim()).filter(Boolean));
+      if (!vendorNames.size) { ok(res, { error: 'vendors 테이블 비어있음 — 매칭 대상 없음' }); return; }
+
+      // products 전체 스캔 (수십만 row 안 됨 — vendors 테이블 vs product 단순 비교)
+      const allProducts = await db.prepare(`SELECT id, product_code, material_code, material_name FROM products WHERE (material_code IS NOT NULL AND material_code <> '') OR (material_name IS NOT NULL AND material_name <> '')`).all();
+      const matches = [];
+      for (const p of allProducts) {
+        const codeHit = p.material_code && vendorNames.has(p.material_code.trim());
+        const nameHit = p.material_name && vendorNames.has(p.material_name.trim());
+        if (codeHit || nameHit) {
+          matches.push({
+            id: p.id, product_code: p.product_code,
+            material_code: p.material_code, material_name: p.material_name,
+            code_is_vendor: codeHit, name_is_vendor: nameHit,
+          });
+        }
+      }
+
+      let cleared = 0;
+      if (!dryRun && matches.length) {
+        for (const m of matches) {
+          try {
+            const sets = [], vals = [];
+            if (m.code_is_vendor && (clearMode === 'code' || clearMode === 'both')) {
+              sets.push('material_code=?'); vals.push('');
+            }
+            if (m.name_is_vendor && (clearMode === 'name' || clearMode === 'both')) {
+              sets.push('material_name=?'); vals.push('');
+            }
+            if (sets.length) {
+              sets.push("updated_at=datetime('now','localtime')");
+              vals.push(m.id);
+              await db.prepare(`UPDATE products SET ${sets.join(', ')} WHERE id=?`).run(...vals);
+              cleared++;
+            }
+          } catch (e) {
+            console.warn('[product-material-audit] update fail:', m.product_code, e.message);
+          }
+        }
+        if (currentUser) auditLog(currentUser.userId, currentUser.username, 'product_material_audit', 'products', '', `material 손상 정리: ${cleared}건 (clear=${clearMode})`, clientIP);
+        if (typeof scheduleProductInfoReload === 'function') scheduleProductInfoReload();
+      }
+      ok(res, {
+        dry_run: dryRun,
+        clear_mode: clearMode,
+        vendors_total: vendorNames.size,
+        matches_count: matches.length,
+        cleared,
+        samples: matches.slice(0, 20)
+      });
+    } catch (e) {
+      console.error('[product-material-audit] error:', e.message);
+      fail(res, 500, 'product-material-audit 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
   //  POST /api/admin/clear-zero-os
   //  잘못 저장된 os_number='0' 또는 NULL/'' 도 무관하게 빈값으로 통일.
   //  버그 (이전 _propagateOSToChildren 의 defaultOsValue fallback) 로 인해
