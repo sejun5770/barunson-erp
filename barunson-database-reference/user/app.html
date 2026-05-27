@@ -4693,24 +4693,18 @@ function closeMegaMenu() { /* no-op */ }
         <select id="pmStatus"><option value="active">운영중</option><option value="inactive">중단</option></select>
       </div>
     </div>
-    <!-- 원재료 다중 등록 (1개 이상) — sort_order=0 이 대표 원재료 -->
-    <div style="margin-top:8px;padding:10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <label style="font-weight:700;color:#1e40af;font-size:13px">원재료 (1개 이상)</label>
-        <button type="button" onclick="pmAddMaterialRow()" style="padding:3px 10px;font-size:11px;border:1px solid #3b82f6;background:#3b82f6;color:#fff;border-radius:4px;cursor:pointer">+ 원재료 추가</button>
-      </div>
-      <div id="pmMaterialsList"></div>
-      <div style="font-size:10px;color:#6b7280;margin-top:4px">첫 행이 대표 원재료입니다. 같은 품목의 표지/본문지/띠지 등 여러 원재료를 추가하세요.</div>
+    <div class="form-row">
+      <div class="form-group"><label>원자재코드</label><input type="text" id="pmMatCode" placeholder="BP0997"></div>
+      <div class="form-group"><label>원재료명</label><input type="text" id="pmMatName" placeholder="110팬시켄버스"></div>
     </div>
-    <div class="form-row" style="margin-top:8px">
-      <div class="form-group" style="flex:1"><label>비고</label><input type="text" id="pmMemo" placeholder=""></div>
+    <div class="form-row">
+      <div class="form-group"><label>절</label><input type="number" id="pmCut" placeholder="2"></div>
+      <div class="form-group"><label>조판</label><input type="number" id="pmJopan" placeholder="12"></div>
     </div>
-    <!-- (deprecated) hidden 단일 필드 — saveProduct 호환용 (multi-row 의 첫 행 값을 자동 set) -->
-    <input type="hidden" id="pmMatCode">
-    <input type="hidden" id="pmMatName">
-    <input type="hidden" id="pmCut">
-    <input type="hidden" id="pmJopan">
-    <input type="hidden" id="pmPaperMaker">
+    <div class="form-row">
+      <div class="form-group"><label>제지사</label><input type="text" id="pmPaperMaker" placeholder="대한"></div>
+      <div class="form-group"><label>비고</label><input type="text" id="pmMemo" placeholder=""></div>
+    </div>
     <div style="display:flex; gap:16px; align-items:center; margin-top:8px;">
       <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
         <input type="checkbox" id="pmNewProduct" style="width:18px; height:18px; accent-color:#f59e0b;">
@@ -23059,8 +23053,6 @@ function showAddProductModal(){
   document.getElementById('pmCode').disabled=false;
   document.getElementById('pmNewProduct').checked = false;
   document.getElementById('pmFirstOrderStatus').textContent = '';
-  // 다중 원재료: 신규 등록 모드 → 빈 행 1개로 초기화
-  pmLoadMaterials(null);
   document.getElementById('pmModalOverlay').classList.add('show');
 }
 
@@ -23093,79 +23085,10 @@ function editProduct(id){
   if (np) np.checked = !!p.is_new_product;
   const fos = document.getElementById('pmFirstOrderStatus');
   if (fos) fos.textContent = p.first_order_done ? '(첫 발주 완료 - 목형비 제외됨)' : '';
-  // 다중 원재료 로드 — product_materials 테이블에서 fetch, 없으면 products 단일 필드 1행 fallback
-  pmLoadMaterials(p.product_code);
   document.getElementById('pmModalOverlay').classList.add('show');
 }
 
-// 품목 등록 모달 — 원재료 다중 등록 헬퍼
-function _pmRenderMaterialRow(idx, mat) {
-  const m = mat || {};
-  return `<div class="pm-mat-row" data-idx="${idx}" style="display:grid;grid-template-columns:1fr 1.5fr 60px 60px 1fr 30px;gap:6px;margin-bottom:6px;align-items:center">
-    <input type="text" data-pm-field="material_code" value="${esc(m.material_code||'')}" placeholder="원자재코드" style="padding:4px 6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">
-    <input type="text" data-pm-field="material_name" value="${esc(m.material_name||'')}" placeholder="원재료명 (예: 110팬시켄버스)" style="padding:4px 6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">
-    <input type="number" data-pm-field="cut_spec" value="${esc(m.cut_spec||'')}" placeholder="절" style="padding:4px 6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px;text-align:center">
-    <input type="number" data-pm-field="jopan" value="${esc(m.jopan||'')}" placeholder="조판" style="padding:4px 6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px;text-align:center">
-    <input type="text" data-pm-field="paper_maker" value="${esc(m.paper_maker||'')}" placeholder="제지사" style="padding:4px 6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px">
-    <button type="button" onclick="pmRemoveMaterialRow(this)" style="padding:2px 8px;background:#fee2e2;border:1px solid #f87171;color:#991b1b;border-radius:4px;cursor:pointer;font-size:12px" title="삭제">✕</button>
-  </div>`;
-}
-function pmAddMaterialRow() {
-  const list = document.getElementById('pmMaterialsList');
-  if (!list) return;
-  const idx = list.querySelectorAll('.pm-mat-row').length;
-  list.insertAdjacentHTML('beforeend', _pmRenderMaterialRow(idx, null));
-}
-function pmRemoveMaterialRow(btn) {
-  const row = btn.closest('.pm-mat-row');
-  if (!row) return;
-  const list = row.parentElement;
-  row.remove();
-  // 행이 0개면 빈 행 1개 자동 유지
-  if (list && list.querySelectorAll('.pm-mat-row').length === 0) pmAddMaterialRow();
-}
-// 모달 열 때 원재료 목록 로드 (수정 모드) 또는 빈 행 1개 (신규)
-async function pmLoadMaterials(productCode) {
-  const list = document.getElementById('pmMaterialsList');
-  if (!list) return;
-  list.innerHTML = '';
-  if (productCode) {
-    try {
-      const resp = await fetch('/api/products/' + encodeURIComponent(productCode) + '/materials', { credentials:'include' });
-      const j = await resp.json();
-      const rows = (j.data && Array.isArray(j.data)) ? j.data : (Array.isArray(j) ? j : []);
-      if (rows.length) {
-        rows.forEach((r, i) => list.insertAdjacentHTML('beforeend', _pmRenderMaterialRow(i, r)));
-        return;
-      }
-    } catch(_) {}
-  }
-  // 기본 1행
-  pmAddMaterialRow();
-}
-function pmCollectMaterials() {
-  const rows = document.querySelectorAll('#pmMaterialsList .pm-mat-row');
-  const materials = [];
-  rows.forEach((row, i) => {
-    const get = (f) => row.querySelector(`[data-pm-field="${f}"]`)?.value.trim() || '';
-    const m = {
-      material_code: get('material_code'),
-      material_name: get('material_name'),
-      cut_spec: get('cut_spec'),
-      jopan: get('jopan'),
-      paper_maker: get('paper_maker'),
-      sort_order: i,
-    };
-    // 둘 다 빈 행은 skip
-    if (m.material_code || m.material_name) materials.push(m);
-  });
-  return materials;
-}
-
 async function saveProduct(){
-  // 다중 원재료 수집 — 첫 행은 products 단일 필드와 동기화 (backward compat)
-  const materials = pmCollectMaterials();
-  const first = materials[0] || {};
   const body={
     product_code:document.getElementById('pmCode').value.trim(),
     product_name:document.getElementById('pmName').value.trim(),
@@ -23175,12 +23098,12 @@ async function saveProduct(){
     category:document.getElementById('pmCategory').value.trim(),
     op_category:document.getElementById('pmOpCategory').value,
     status:document.getElementById('pmStatus').value,
-    material_code: first.material_code || '',
-    material_name: first.material_name || '',
+    material_code:document.getElementById('pmMatCode').value.trim(),
+    material_name:document.getElementById('pmMatName').value.trim(),
     unit:document.getElementById('pmUnit').value.trim()||'EA',
-    cut_spec: first.cut_spec || '',
-    jopan: first.jopan || '',
-    paper_maker: first.paper_maker || '',
+    cut_spec:document.getElementById('pmCut').value.trim(),
+    jopan:document.getElementById('pmJopan').value.trim(),
+    paper_maker:document.getElementById('pmPaperMaker').value.trim(),
     spec:document.getElementById('pmSpec')?.value.trim() || '',
     memo:document.getElementById('pmMemo').value.trim(),
     is_new_product: document.getElementById('pmNewProduct')?.checked ? 1 : 0,
@@ -23191,29 +23114,13 @@ async function saveProduct(){
   const url=pmEditId?`/api/products/${pmEditId}`:'/api/products';
   const method=pmEditId?'PUT':'POST';
   const resp=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
-  if(!resp.ok){
+  if(resp.ok){
+    document.getElementById('pmModalOverlay').classList.remove('show');
+    invalidateInventoryCache();
+    loadProductMgmt();
+  } else {
     alert('저장 실패: '+(resp.error||''));
-    return;
   }
-  // products 저장 성공 후 multi materials PUT — products 가 신규 등록된 후에야 product_code 가 유효
-  if (materials.length > 0) {
-    try {
-      const matResp = await fetch('/api/products/' + encodeURIComponent(body.product_code) + '/materials', {
-        method: 'PUT', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ materials }),
-        credentials:'include'
-      }).then(r=>r.json());
-      if (matResp.ok === false || matResp.error) {
-        alert('원재료 다중 저장 부분 실패: ' + (matResp.error || '')); // 메인 product 저장은 됨
-      }
-    } catch(e) {
-      console.warn('multi-material 저장 오류:', e);
-      // 메인 저장은 됐으므로 계속
-    }
-  }
-  document.getElementById('pmModalOverlay').classList.remove('show');
-  invalidateInventoryCache();
-  loadProductMgmt();
 }
 
 async function deleteProduct(id){
