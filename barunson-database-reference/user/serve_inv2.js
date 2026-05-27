@@ -997,7 +997,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <td style="${tdStyle}">${it.material_code || ''}</td>
       <td style="${tdStyle}">${it.material_name || ''}</td>
       <td style="${tdStyle}">${it.spec || ''}</td>
-      <td style="${tdStyle};color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
+      <td style="${tdStyle};color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
       <td style="${tdStyle};font-weight:700;font-size:15px">${it.ream_qty || '-'}R</td>
       <td style="${tdStyle}">${it.cut_spec || ''}</td>
     </tr>`).join('');
@@ -1187,7 +1187,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td>${it.material_code || ''}</td>
               <td>${it.material_name || ''}</td>
               <td>${it.spec || ''}</td>
-              <td style="color:#c2410c;font-weight:600">${it.item_chain || '-'}</td>
+              <td style="color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
               <td class="right bold" style="font-size:14px">${it.ream_qty || '-'}R</td>
               <td class="center">${it.cut_spec || ''}</td>
             </tr>`).join('');
@@ -1309,7 +1309,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           it.material_code || '',
           it.material_name || '',
           it.spec || '',
-          it.item_chain || '',
+          it.next_vendor || it.item_chain || '바른손',
           (it.ream_qty != null && it.ream_qty !== '' ? it.ream_qty : '-') + 'R',
           it.cut_spec || ''
         ]);
