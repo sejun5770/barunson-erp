@@ -824,16 +824,20 @@ async function logPOActivity(poId, action, opts = {}) {
 // 이메일 발송: SMTP 우선, Apps Script 폴백
 // 2026-04: 거래처 포털 링크 제거. PDF 첨부 + 이메일 회신/전화 안내로 변경.
 // 2026-04: DD 법인 발주는 '바른디자인' 명의로 발송 (바른컴퍼니 아님)
-async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, emailCc) {
+// opts: { isResend?: boolean } — 재발송 시 제목/본문에 '재발송' 표시
+async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, emailCc, opts) {
 
   const pInfo = getProductInfo();
+  const isResend = !!(opts && opts.isResend);
 
   // 법인별 발송 명의 분기
   const isDD = (po.legal_entity === 'dd');
   const SENDER_COMPANY = isDD ? '바른디자인' : '바른컴퍼니';
 
   const typeLabel = isPostProcess ? '후공정' : '원재료';
-  const subject = `[${SENDER_COMPANY}] ${typeLabel} 발주서 - ${po.po_number} (${vendorName})`;
+  // 재발송 시 제목 prefix '[재발송]' 추가 — 수탁처가 메일함에서 즉시 구분
+  const resendPrefix = isResend ? '[재발송] ' : '';
+  const subject = `${resendPrefix}[${SENDER_COMPANY}] ${typeLabel} 발주서 - ${po.po_number} (${vendorName})`;
 
   // 품목별 product_info 매핑 + 연(R) 계산: 발주수량 / 500 / 절 / 조판
   // parseJeolServer: 'T3K'→3, '3TK'→3 등 문자열에서 절 숫자 추출
@@ -1055,14 +1059,20 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
   }
 
   // 이메일 본문 HTML — max-width 700→960px (8~10컬럼 표가 wrap 되지 않도록)
+  //   재발송 시 상단에 빨간 배지 표시 → 수탁처가 첫 발송 vs 재발송 구분 용이
+  const resendBadgeHtml = isResend ? `
+      <div style="background:#dc2626;color:#fff;padding:12px 20px;border-radius:8px 8px 0 0;font-weight:700;font-size:14px;text-align:center;border-bottom:2px solid #b91c1c">
+        🔁 재발송건 — 동일 발주서를 다시 발송했습니다 (변경 내용 확인 부탁드립니다)
+      </div>` : '';
   const html = `
     <div style="font-family:'맑은 고딕',sans-serif;max-width:960px;margin:0 auto">
-      <div style="background:#f97316;color:#fff;padding:20px;border-radius:8px 8px 0 0">
-        <h2 style="margin:0">${SENDER_COMPANY} ${typeLabel} 발주서</h2>
+      ${resendBadgeHtml}
+      <div style="background:#f97316;color:#fff;padding:20px;${isResend ? '' : 'border-radius:8px 8px 0 0'}">
+        <h2 style="margin:0">${SENDER_COMPANY} ${typeLabel} 발주서${isResend ? ' <span style="font-size:14px;background:#fee2e2;color:#991b1b;padding:2px 10px;border-radius:4px;margin-left:8px">재발송</span>' : ''}</h2>
       </div>
       <div style="padding:24px;border:1px solid #e5e7eb;border-top:none">
         <table style="width:100%;margin-bottom:20px;font-size:14px">
-          <tr><td style="padding:6px 0;color:#666;width:100px">발주번호</td><td style="padding:6px 0;font-weight:600">${po.po_number}</td></tr>
+          <tr><td style="padding:6px 0;color:#666;width:100px">발주번호</td><td style="padding:6px 0;font-weight:600">${po.po_number}${isResend ? ' <span style="color:#dc2626;font-weight:700;margin-left:6px">(재발송)</span>' : ''}</td></tr>
           <tr><td style="padding:6px 0;color:#666">발주일</td><td style="padding:6px 0">${po.po_date || ''}</td></tr>
           <tr><td style="padding:6px 0;color:#666">거래처</td><td style="padding:6px 0;font-weight:600">${vendorName}</td></tr>
           <tr><td style="padding:6px 0;color:#666">납기예정일</td><td style="padding:6px 0">${po.expected_date || ''}</td></tr>
@@ -13919,6 +13929,7 @@ async function handleRequest(req, res) {
   }
 
   // POST /api/po/:id/resend — 이메일 재발송
+  // resend 플래그를 sendPOEmail 로 전달 → 메일 제목/본문에 '[재발송]' 표시
   const poResend = pathname.match(/^\/api\/po\/(\d+)\/resend$/);
   if (poResend && method === 'POST') {
     const id = parseInt(poResend[1]);
@@ -13929,7 +13940,8 @@ async function handleRequest(req, res) {
     if (!vendor || !vendor.email) { fail(res, 400, '업체 이메일 미등록'); return; }
     try {
       const isPost = po.po_type === '후공정';
-      const emailResult = await sendPOEmail(po, items, vendor.email, vendor.name, isPost, vendor.email_cc || '');
+      // isResend=true — 메일 제목 '[재발송]' prefix + 본문에 재발송 배지 표시
+      const emailResult = await sendPOEmail(po, items, vendor.email, vendor.name, isPost, vendor.email_cc || '', { isResend: true });
       // 활동 로그
       try { await db.prepare('INSERT INTO po_activity_log (po_id, action, details) VALUES (?, ?, ?)').run(id, '이메일 재발송', emailResult.ok ? '성공: ' + vendor.email : '실패: ' + (emailResult.error||'')); } catch(e){}
       ok(res, { email: emailResult });
