@@ -15415,9 +15415,16 @@ function pwRenderStep4() {
     </div>`;
   });
   html += `</div></div>`;
+  // 발주일 선택 — 기본값 오늘, 과거 누락 발주 히스토리 입력 가능
+  const _todayStr = new Date().toISOString().slice(0, 10);
+  html += `<div style="margin-top:12px;padding:12px;background:#f0fdf4;border:1px solid #86efac;border-radius:6px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <label style="font-weight:700;color:#166534;font-size:13px;white-space:nowrap">📅 발주일</label>
+    <input type="date" id="pwPODate" value="${_todayStr}" max="${_todayStr}" style="padding:6px 10px;border:1.5px solid #16a34a;border-radius:6px;font-size:13px;font-weight:600;color:#166534">
+    <span style="font-size:11px;color:#166534">기본 오늘 · <b>과거 일자 선택 시</b> 누락된 발주를 그 날짜의 히스토리로 등록</span>
+  </div>`;
   // 메일 정책 (체크박스 제거) — wizard 확정 시 모든 PO 는 항상 draft 로 생성, 사용자가 입고처 설정 후 수동 발송
   //   이유: 자동 발송 시 입고처(다음 공정 업체) 가 빈 상태로 발송되어 수탁처가 혼란
-  html += `<div style="margin-top:12px;padding:12px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:12px;color:#92400e;line-height:1.6">
+  html += `<div style="margin-top:8px;padding:12px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:12px;color:#92400e;line-height:1.6">
     <b>📋 발주 확정 후 메일 발송 절차</b><br>
     <span style="font-size:11px">
       ① 발주 확정 시 모든 PO 는 <b>draft (대기)</b> 로 생성됩니다 — 메일 자동 발송 안 함<br>
@@ -15436,8 +15443,21 @@ function pwRenderStep4() {
 async function pwConfirmSubmit() {
   // 메일 자동 발송 정책: wizard 는 무조건 send_emails=false (draft 로만 생성)
   //   사유: 입고처 빈 상태 자동 발송 시 수탁처 혼란 — 사용자가 입고처 확인 후 수동 발송
+  // 발주일 — 사용자 선택 (기본 오늘), 과거 일자 선택 시 누락 발주 히스토리 입력
+  const _selectedPoDate = document.getElementById('pwPODate')?.value || '';
+  const _todayStr = new Date().toISOString().slice(0, 10);
+  // 미래 일자 가드
+  if (_selectedPoDate && _selectedPoDate > _todayStr) {
+    alert('발주일은 오늘 이전까지만 선택 가능합니다.');
+    return;
+  }
+  // 과거 일자면 한번 더 확인
+  if (_selectedPoDate && _selectedPoDate < _todayStr) {
+    if (!confirm(`발주일 ${_selectedPoDate} (과거 일자) 로 등록하시겠습니까?\n\n→ 누락된 발주의 히스토리 입력 용도로 사용됩니다.\n→ 잘못된 일자면 [취소] 후 수정해주세요.`)) return;
+  }
   const payload = {
     expected_date: document.getElementById('poDeliveryDate')?.value || '',
+    po_date: _selectedPoDate || _todayStr,
     notes: '',
     tolerance_pct: 5.0,
     send_emails: false,
