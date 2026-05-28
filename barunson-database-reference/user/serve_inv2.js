@@ -1007,8 +1007,8 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <th style="${thStyle}">제품코드</th>
       <th style="${thStyle}">원재료코드</th>
       <th style="${thStyle}">원재료명</th>
-      <th style="${thStyle}">원재료 규격</th>
       ${_showItemSpec ? `<th style="${thStyle}">품목규격</th>` : ''}
+      <th style="${thStyle}">원재료 규격</th>
       <th style="${thStyle};color:#c2410c">다음 입고처</th>
       <th style="${thStyle}">발주수량(R)</th>
       <th style="${thStyle}">절</th>
@@ -1019,8 +1019,8 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <td style="${tdStyle};font-weight:600">${it.product_code || ''}</td>
       <td style="${tdStyle}">${it.material_code || ''}</td>
       <td style="${tdStyle}">${it.material_name || ''}</td>
-      <td style="${tdStyle}">${it.material_spec || it.spec || ''}</td>
       ${_showItemSpec ? `<td style="${tdStyle}">${it.item_spec || ''}</td>` : ''}
+      <td style="${tdStyle}">${it.material_spec || it.spec || ''}</td>
       <td style="${tdStyle};color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
       <td style="${tdStyle};font-weight:700;font-size:15px">${it.ream_qty || '-'}R</td>
       <td style="${tdStyle}">${it.cut_spec || ''}</td>
@@ -1197,8 +1197,8 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th>제품코드${isChinaVendor ? '<br><span style="font-weight:400;color:#999">产品编号</span>' : ''}</th>
           <th>원재료코드</th>
           <th>원재료명${isChinaVendor ? '<br><span style="font-weight:400;color:#999">材料名称</span>' : ''}</th>
-          <th>원재료 규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">纸张规格</span>' : ''}</th>
           ${_showItemSpec ? '<th>품목규격</th>' : ''}
+          <th>원재료 규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">纸张规格</span>' : ''}</th>
           <th style="color:#c2410c">다음 입고처${isChinaVendor ? '<br><span style="font-weight:400;color:#999">下一入库处</span>' : ''}</th>
           <th class="right">발주수량(R)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
           <th class="center">절</th>
@@ -1224,8 +1224,8 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td class="bold">${it.product_code || ''}</td>
               <td>${it.material_code || ''}</td>
               <td>${it.material_name || ''}</td>
-              <td>${it.material_spec || it.spec || ''}</td>
               ${_showItemSpec ? `<td>${it.item_spec || ''}</td>` : ''}
+              <td>${it.material_spec || it.spec || ''}</td>
               <td style="color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
               <td class="right bold" style="font-size:14px">${it.ream_qty || '-'}R</td>
               <td class="center">${it.cut_spec || ''}</td>
@@ -1343,9 +1343,9 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     aoa.push([]);
     // 품목 헤더 + 데이터 (이메일 본문 표와 동일 컬럼 구성)
     if (isRawMaterial) {
-      const header = ['#', '제품코드', '원재료코드', '원재료명', '원재료 규격'];
+      const header = ['#', '제품코드', '원재료코드', '원재료명'];
       if (_showItemSpec) header.push('품목규격');
-      header.push('다음 입고처', '발주수량(R)', '절');
+      header.push('원재료 규격', '다음 입고처', '발주수량(R)', '절');
       if (_showJopan) header.push('조판');
       if (_showMemo) header.push('비고');
       aoa.push(header);
@@ -1354,11 +1354,11 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           i + 1,
           it.product_code || '',
           it.material_code || '',
-          it.material_name || '',
-          it.material_spec || it.spec || ''
+          it.material_name || ''
         ];
         if (_showItemSpec) row.push(it.item_spec || '');
         row.push(
+          it.material_spec || it.spec || '',
           it.next_vendor || it.item_chain || '바른손',
           (it.ream_qty != null && it.ream_qty !== '' ? it.ream_qty : '-') + 'R',
           it.cut_spec || ''

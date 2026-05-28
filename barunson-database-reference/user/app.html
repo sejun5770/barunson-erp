@@ -17538,8 +17538,8 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
     if(items.length){
       const isMat = po.po_type==='원재료';
       const headerCols = isMat
-        ? `<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>원재료 규격</th>${_poShowItemSpec ? '<th>품목규격</th>' : ''}<th>절</th>${_poShowJopan ? '<th>조판</th>' : ''}<th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>${_poShowMemo ? '<th>비고</th>' : ''}`
-        : `<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>원재료 규격</th>${_poShowItemSpec ? '<th>품목규격</th>' : ''}<th>절</th>${_poShowJopan ? '<th>조판</th>' : ''}<th>공정</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>${_poShowMemo ? '<th>비고</th>' : ''}`;
+        ? `<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th>${_poShowItemSpec ? '<th>품목규격</th>' : ''}<th>원재료 규격</th><th>절</th>${_poShowJopan ? '<th>조판</th>' : ''}<th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>${_poShowMemo ? '<th>비고</th>' : ''}`
+        : `<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th>${_poShowItemSpec ? '<th>품목규격</th>' : ''}<th>원재료 규격</th><th>절</th>${_poShowJopan ? '<th>조판</th>' : ''}<th>공정</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>${_poShowMemo ? '<th>비고</th>' : ''}`;
       itemsHtml=`<table class="po-items-table" style="width:100%;font-size:12px;border-collapse:collapse">
         <thead><tr>${headerCols}</tr></thead>
         <tbody>${items.map(it=>{
@@ -17563,8 +17563,8 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
               <td id="vendorCell_${po.po_id}_${it.item_id}" data-item-id="${it.item_id}" data-po-id="${po.po_id}" data-datalist-id="poMatVendorDL_${po.po_id}" data-color="#0369a1">${renderVendorCellHtml(it.item_id, po.po_id, po.vendor_name||'', 'poMatVendorDL_'+po.po_id, '#0369a1')}</td>
               <td style="color:#0369a1">${esc(matCode)}</td>
               <td>${esc(matName)}</td>
-              <td style="font-size:11px;color:#475569">${esc(matSpec)}</td>
               ${_poShowItemSpec ? `<td style="font-size:11px;color:#475569">${esc(itemSpecVal)}</td>` : ''}
+              <td style="font-size:11px;color:#475569">${esc(matSpec)}</td>
               <td>${esc(String(jeol))}</td>
               ${_poShowJopan ? `<td style="font-size:11px;color:#475569;text-align:center">${esc(String(jopanVal))}</td>` : ''}
               <td style="font-weight:700">${esc(reamQty)}</td>
@@ -17596,8 +17596,8 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
               <td id="vendorCell_${po.po_id}_${it.item_id}" data-item-id="${it.item_id}" data-po-id="${po.po_id}" data-datalist-id="poVendorDL_${po.po_id}" data-color="#7c3aed">${renderVendorCellHtml(it.item_id, po.po_id, po.vendor_name||'', 'poVendorDL_'+po.po_id, '#7c3aed')}</td>
               <td style="color:#0369a1">${esc(postMatCode)}</td>
               <td>${esc(postMatName)}</td>
-              <td style="font-size:11px;color:#475569">${esc(postMatSpec)}</td>
               ${_poShowItemSpec ? `<td style="font-size:11px;color:#475569">${esc(postItemSpec)}</td>` : ''}
+              <td style="font-size:11px;color:#475569">${esc(postMatSpec)}</td>
               <td>${esc(String(postJeol))}</td>
               ${_poShowJopan ? `<td style="font-size:11px;color:#475569;text-align:center">${esc(String(postJopan))}</td>` : ''}
               <td id="procCell_${it.item_id}" data-spec-hint="${esc(it.spec||'')}">${renderProcessCellHtml(it.item_id, po.po_id, it.process_type||'', it.spec||'')}</td>
