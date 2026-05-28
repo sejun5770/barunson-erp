@@ -640,7 +640,7 @@ const _POST_COL_TO_KR = {
 
 async function reloadProductInfoFromDB() {
   try {
-    const products = await db.prepare("SELECT product_code, material_code, material_name, cut_spec, jopan, paper_maker, product_spec, material_spec, memo, thomson, envelope, seari, laser, cutting, silk FROM products").all();
+    const products = await db.prepare("SELECT product_code, material_code, material_name, cut_spec, jopan, paper_maker, product_spec, spec, material_spec, memo, thomson, envelope, seari, laser, cutting, silk FROM products").all();
     let ppv = [];
     // 봉투가공은 항상 마지막 — step_order 보다 우선
     try { ppv = await db.prepare("SELECT product_code, process_type, vendor_name, step_order FROM product_post_vendor ORDER BY product_code, CASE WHEN process_type='봉투가공' THEN 1 ELSE 0 END, step_order").all(); } catch(_) {}
@@ -694,6 +694,8 @@ async function reloadProductInfoFromDB() {
       if (p.jopan !== null && p.jopan !== undefined && p.jopan !== '') row['조판'] = String(p.jopan);
       if (p.product_spec) row['제품사양'] = p.product_spec;
       if (p.material_spec) row['원재료규격'] = p.material_spec;
+      // 품목규격 = products.spec (XERP 동기화된 제품 자체 규격, 예: 210*297)
+      if (p.spec) row['품목규격'] = p.spec;
       if (p.memo) row['비고'] = p.memo;
       // 레거시 후공정 키가 남아있으면 제거
       for (const pt of postProcessTypes) { delete row[pt]; }
@@ -857,7 +859,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     try {
       const ph = _codes.map(() => '?').join(',');
       const rows = await db.prepare(
-        `SELECT product_code, material_code, material_name, cut_spec, jopan, product_spec, material_spec, paper_maker, memo
+        `SELECT product_code, material_code, material_name, cut_spec, jopan, product_spec, spec, material_spec, paper_maker, memo
          FROM products WHERE product_code IN (${ph})`
       ).all(..._codes);
       for (const r of rows) _dbByCode[r.product_code] = r;
@@ -931,9 +933,13 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       material_name: pi['원재료용지명'] || dbp.material_name || it.material_name || '',
       // 원재료 규격 (XERP mmInoutItem.ItemSpec by material_code, 예: '1000*740')
       material_spec: pi['원재료규격'] || dbp.material_spec || '',
+      // 품목규격 (products.spec, XERP 동기화 제품 자체 규격, 예: '210*297')
+      item_spec: pi['품목규격'] || dbp.spec || '',
       // 품목 비고 (products.memo) — 발주서 메일/엑셀에서 빠른 참조용
       product_memo: pi['비고'] || dbp.memo || '',
       cut_spec: pi['절'] || dbp.cut_spec || it.cut_spec || '',
+      // 조판 (products.jopan, 예: 12)
+      jopan: pi['조판'] || dbp.jopan || '',
       ream_qty: reamsStr,
       item_chain: itemChainText,
       spec_display: specText,
@@ -990,8 +996,10 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
   const tdStyle = 'border:1px solid #ddd;padding:8px 8px;font-size:13px;text-align:center;vertical-align:middle;white-space:nowrap';
 
   let tableHeader, tableRows;
-  // 비고 컬럼 노출 여부 — enrichedItems 중 하나라도 product_memo 가 있으면 노출
+  // 조건부 컬럼 노출 — enrichedItems 중 하나라도 값 있으면 컬럼 표시
   const _showMemo = enrichedItems.some(it => (it.product_memo || '').trim());
+  const _showItemSpec = enrichedItems.some(it => (it.item_spec || '').toString().trim());
+  const _showJopan = enrichedItems.some(it => (it.jopan || '').toString().trim());
   if (isRawMaterial) {
     // 원재료 발주서: 원재료 규격 (XERP mmInoutItem.ItemSpec by material_code, 예: 1000*740)
     //   이전엔 it.spec (제품 사양) 표시했으나, 사용자 요청으로 원재료의 실제 종이 규격 표시
@@ -1000,9 +1008,11 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <th style="${thStyle}">원재료코드</th>
       <th style="${thStyle}">원재료명</th>
       <th style="${thStyle}">원재료 규격</th>
+      ${_showItemSpec ? `<th style="${thStyle}">품목규격</th>` : ''}
       <th style="${thStyle};color:#c2410c">다음 입고처</th>
       <th style="${thStyle}">발주수량(R)</th>
       <th style="${thStyle}">절</th>
+      ${_showJopan ? `<th style="${thStyle}">조판</th>` : ''}
       ${_showMemo ? `<th style="${thStyle}">비고</th>` : ''}
     </tr>`;
     tableRows = enrichedItems.map(it => `<tr>
@@ -1010,9 +1020,11 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <td style="${tdStyle}">${it.material_code || ''}</td>
       <td style="${tdStyle}">${it.material_name || ''}</td>
       <td style="${tdStyle}">${it.material_spec || it.spec || ''}</td>
+      ${_showItemSpec ? `<td style="${tdStyle}">${it.item_spec || ''}</td>` : ''}
       <td style="${tdStyle};color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
       <td style="${tdStyle};font-weight:700;font-size:15px">${it.ream_qty || '-'}R</td>
       <td style="${tdStyle}">${it.cut_spec || ''}</td>
+      ${_showJopan ? `<td style="${tdStyle}">${it.jopan || ''}</td>` : ''}
       ${_showMemo ? `<td style="${tdStyle};font-size:11px;color:#475569">${it.product_memo || ''}</td>` : ''}
     </tr>`).join('');
   } else {
@@ -1186,9 +1198,11 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th>원재료코드</th>
           <th>원재료명${isChinaVendor ? '<br><span style="font-weight:400;color:#999">材料名称</span>' : ''}</th>
           <th>원재료 규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">纸张规格</span>' : ''}</th>
+          ${_showItemSpec ? '<th>품목규격</th>' : ''}
           <th style="color:#c2410c">다음 입고처${isChinaVendor ? '<br><span style="font-weight:400;color:#999">下一入库处</span>' : ''}</th>
           <th class="right">발주수량(R)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
           <th class="center">절</th>
+          ${_showJopan ? '<th class="center">조판</th>' : ''}
           ${_showMemo ? '<th>비고</th>' : ''}
         </tr>` : `<tr>
           <th style="width:30px">#</th>
@@ -1211,9 +1225,11 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td>${it.material_code || ''}</td>
               <td>${it.material_name || ''}</td>
               <td>${it.material_spec || it.spec || ''}</td>
+              ${_showItemSpec ? `<td>${it.item_spec || ''}</td>` : ''}
               <td style="color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
               <td class="right bold" style="font-size:14px">${it.ream_qty || '-'}R</td>
               <td class="center">${it.cut_spec || ''}</td>
+              ${_showJopan ? `<td class="center">${it.jopan || ''}</td>` : ''}
               ${_showMemo ? `<td style="font-size:11px;color:#475569">${it.product_memo || ''}</td>` : ''}
             </tr>`).join('');
           }
@@ -1327,7 +1343,10 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     aoa.push([]);
     // 품목 헤더 + 데이터 (이메일 본문 표와 동일 컬럼 구성)
     if (isRawMaterial) {
-      const header = ['#', '제품코드', '원재료코드', '원재료명', '원재료 규격', '다음 입고처', '발주수량(R)', '절'];
+      const header = ['#', '제품코드', '원재료코드', '원재료명', '원재료 규격'];
+      if (_showItemSpec) header.push('품목규격');
+      header.push('다음 입고처', '발주수량(R)', '절');
+      if (_showJopan) header.push('조판');
       if (_showMemo) header.push('비고');
       aoa.push(header);
       enrichedItems.forEach((it, i) => {
@@ -1336,11 +1355,15 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           it.product_code || '',
           it.material_code || '',
           it.material_name || '',
-          it.material_spec || it.spec || '',
+          it.material_spec || it.spec || ''
+        ];
+        if (_showItemSpec) row.push(it.item_spec || '');
+        row.push(
           it.next_vendor || it.item_chain || '바른손',
           (it.ream_qty != null && it.ream_qty !== '' ? it.ream_qty : '-') + 'R',
           it.cut_spec || ''
-        ];
+        );
+        if (_showJopan) row.push(it.jopan || '');
         if (_showMemo) row.push(it.product_memo || '');
         aoa.push(row);
       });
@@ -7318,6 +7341,7 @@ async function handleRequest(req, res) {
               '_원자재코드': p.material_code || '',
               '_원재료용지명': p.material_name || '',
               '_원재료규격': p.material_spec || '',
+              '_품목규격': p.spec || '',
               '_비고': p.memo || '',
               '_절': p.cut_spec || '',
               '_조판': p.jopan || '',
