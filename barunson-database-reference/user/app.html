@@ -4694,9 +4694,15 @@ function closeMegaMenu() { /* no-op */ }
       </div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label>원자재코드</label><input type="text" id="pmMatCode" placeholder="BP0997"></div>
+      <div class="form-group"><label>원자재코드</label><input type="text" id="pmMatCode" placeholder="BP0997" onblur="pmAutoFetchMatSpec()"></div>
       <div class="form-group"><label>원재료명</label><input type="text" id="pmMatName" placeholder="110팬시켄버스"></div>
-      <div class="form-group"><label>원재료 규격 <span style="font-size:10px;color:#6b7280;font-weight:400">(XERP 자동)</span></label><input type="text" id="pmMatSpec" placeholder="1000*740"></div>
+      <div class="form-group">
+        <label>원재료 규격 <span style="font-size:10px;color:#6b7280;font-weight:400">(XERP 자동)</span></label>
+        <div style="display:flex;gap:4px;align-items:center">
+          <input type="text" id="pmMatSpec" placeholder="1000*740" style="flex:1">
+          <button type="button" onclick="pmFetchMatSpec()" id="pmMatSpecBtn" title="XERP 에서 원재료 코드의 규격 새로 가져오기" style="padding:4px 8px;background:#eff6ff;border:1px solid #93c5fd;color:#1e40af;border-radius:4px;cursor:pointer;font-size:11px">🔄</button>
+        </div>
+      </div>
     </div>
     <div class="form-row">
       <div class="form-group"><label>절</label><input type="number" id="pmCut" placeholder="2"></div>
@@ -23096,6 +23102,46 @@ function editProduct(id){
   if (fos) fos.textContent = p.first_order_done ? '(첫 발주 완료 - 목형비 제외됨)' : '';
   document.getElementById('pmModalOverlay').classList.add('show');
 }
+
+// 원자재코드 → XERP 규격 자동/수동 조회
+//   onblur (자동): 원재료 규격이 비어있을 때만 조회 (기존 값 덮어쓰지 않음)
+//   🔄 버튼 (수동): 무조건 새로 조회 (최신값 강제 갱신)
+async function _pmFetchMatSpecCore(force) {
+  const codeEl = document.getElementById('pmMatCode');
+  const specEl = document.getElementById('pmMatSpec');
+  const btn = document.getElementById('pmMatSpecBtn');
+  if (!codeEl || !specEl) return;
+  const code = codeEl.value.trim();
+  if (!code) {
+    if (force) alert('원자재코드를 먼저 입력하세요');
+    return;
+  }
+  // 자동 모드 (onblur): 이미 값 있으면 skip — 사용자 입력 보존
+  if (!force && specEl.value.trim()) return;
+  // 영숫자/_/- 만 허용 (서버에서도 검증하지만 frontend 도 사전 차단)
+  if (!/^[A-Za-z0-9_\-]+$/.test(code)) return;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+  specEl.disabled = true;
+  try {
+    const resp = await fetch('/api/xerp/material-spec?code=' + encodeURIComponent(code), { credentials:'include' });
+    const j = await resp.json();
+    const spec = (j.data && j.data.spec) || j.spec || '';
+    if (spec) {
+      specEl.value = spec;
+      specEl.style.background = '#f0fdf4';
+      setTimeout(() => { specEl.style.background = ''; }, 1500);
+    } else if (force) {
+      alert(`XERP 에서 ${code} 의 규격을 찾을 수 없습니다.`);
+    }
+  } catch (e) {
+    if (force) alert('XERP 조회 실패: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔄'; }
+    specEl.disabled = false;
+  }
+}
+function pmAutoFetchMatSpec() { _pmFetchMatSpecCore(false); }
+function pmFetchMatSpec() { _pmFetchMatSpecCore(true); }
 
 async function saveProduct(){
   const body={

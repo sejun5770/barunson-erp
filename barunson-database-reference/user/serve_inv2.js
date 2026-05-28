@@ -7158,6 +7158,38 @@ async function handleRequest(req, res) {
   }
 
   // ════════════════════════════════════════════════════════════════════
+  //  GET /api/xerp/material-spec?code=BP1259
+  //  XERP mmInoutItem 에서 원재료 코드의 최신 ItemSpec 즉시 조회
+  //  품목 등록 모달에서 원자재코드 입력 시 자동 채움용
+  // ════════════════════════════════════════════════════════════════════
+  if (pathname === '/api/xerp/material-spec' && method === 'GET') {
+    const code = (parsed.searchParams.get('code') || '').trim();
+    if (!code) { fail(res, 400, 'code 파라미터 필요'); return; }
+    // 안전 — 영숫자/_/- 만 허용 (SQL injection 차단)
+    if (!/^[A-Za-z0-9_\-]+$/.test(code)) { fail(res, 400, '원재료 코드 형식 올바르지 않음'); return; }
+    if (!xerpPool) { fail(res, 503, 'XERP 연결 없음'); return; }
+    try {
+      const reqQ = xerpPool.request();
+      reqQ.timeout = 15000;
+      const r = await reqQ.query(`
+        SELECT TOP 1 RTRIM(ItemSpec) AS item_spec
+        FROM mmInoutItem WITH (NOLOCK)
+        WHERE SiteCode = '${XERP_SITE_CODE}'
+          AND RTRIM(ItemCode) = '${code.toUpperCase()}'
+          AND ItemSpec IS NOT NULL AND RTRIM(ItemSpec) <> ''
+        ORDER BY InoutDate DESC, InoutSerNo DESC
+      `);
+      const row = (r.recordset || [])[0];
+      const spec = row?.item_spec || '';
+      ok(res, { ok: true, code, spec });
+    } catch (e) {
+      console.error('[xerp material-spec] error:', e.message);
+      fail(res, 500, 'XERP 조회 실패: ' + e.message);
+    }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
   //  품목별 후공정 업체 매핑 API
   // ════════════════════════════════════════════════════════════════════
 
