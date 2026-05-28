@@ -4696,6 +4696,7 @@ function closeMegaMenu() { /* no-op */ }
     <div class="form-row">
       <div class="form-group"><label>원자재코드</label><input type="text" id="pmMatCode" placeholder="BP0997"></div>
       <div class="form-group"><label>원재료명</label><input type="text" id="pmMatName" placeholder="110팬시켄버스"></div>
+      <div class="form-group"><label>원재료 규격 <span style="font-size:10px;color:#6b7280;font-weight:400">(XERP 자동)</span></label><input type="text" id="pmMatSpec" placeholder="1000*740"></div>
     </div>
     <div class="form-row">
       <div class="form-group"><label>절</label><input type="number" id="pmCut" placeholder="2"></div>
@@ -23044,6 +23045,7 @@ function showAddProductModal(){
   document.getElementById('pmStatus').value='active';
   document.getElementById('pmMatCode').value='';
   document.getElementById('pmMatName').value='';
+  if (document.getElementById('pmMatSpec')) document.getElementById('pmMatSpec').value='';
   document.getElementById('pmUnit').value='EA';
   document.getElementById('pmCut').value='';
   document.getElementById('pmJopan').value='';
@@ -23075,6 +23077,7 @@ function editProduct(id){
   document.getElementById('pmStatus').value=p.status||'active';
   document.getElementById('pmMatCode').value=p.material_code||'';
   document.getElementById('pmMatName').value=p.material_name||'';
+  if (document.getElementById('pmMatSpec')) document.getElementById('pmMatSpec').value=p.material_spec||'';
   document.getElementById('pmUnit').value=p.unit||'EA';
   document.getElementById('pmCut').value=p.cut_spec||'';
   document.getElementById('pmJopan').value=p.jopan||'';
@@ -23100,6 +23103,7 @@ async function saveProduct(){
     status:document.getElementById('pmStatus').value,
     material_code:document.getElementById('pmMatCode').value.trim(),
     material_name:document.getElementById('pmMatName').value.trim(),
+    material_spec:document.getElementById('pmMatSpec')?.value.trim() || '',
     unit:document.getElementById('pmUnit').value.trim()||'EA',
     cut_spec:document.getElementById('pmCut').value.trim(),
     jopan:document.getElementById('pmJopan').value.trim(),

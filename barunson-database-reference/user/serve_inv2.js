@@ -640,7 +640,7 @@ const _POST_COL_TO_KR = {
 
 async function reloadProductInfoFromDB() {
   try {
-    const products = await db.prepare("SELECT product_code, material_code, material_name, cut_spec, jopan, paper_maker, product_spec, thomson, envelope, seari, laser, cutting, silk FROM products").all();
+    const products = await db.prepare("SELECT product_code, material_code, material_name, cut_spec, jopan, paper_maker, product_spec, material_spec, thomson, envelope, seari, laser, cutting, silk FROM products").all();
     let ppv = [];
     // 봉투가공은 항상 마지막 — step_order 보다 우선
     try { ppv = await db.prepare("SELECT product_code, process_type, vendor_name, step_order FROM product_post_vendor ORDER BY product_code, CASE WHEN process_type='봉투가공' THEN 1 ELSE 0 END, step_order").all(); } catch(_) {}
@@ -693,6 +693,7 @@ async function reloadProductInfoFromDB() {
       if (p.cut_spec !== null && p.cut_spec !== undefined && p.cut_spec !== '') row['절'] = String(p.cut_spec);
       if (p.jopan !== null && p.jopan !== undefined && p.jopan !== '') row['조판'] = String(p.jopan);
       if (p.product_spec) row['제품사양'] = p.product_spec;
+      if (p.material_spec) row['원재료규격'] = p.material_spec;
       // 레거시 후공정 키가 남아있으면 제거
       for (const pt of postProcessTypes) { delete row[pt]; }
       out[code] = row;
@@ -851,7 +852,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     try {
       const ph = _codes.map(() => '?').join(',');
       const rows = await db.prepare(
-        `SELECT product_code, material_code, material_name, cut_spec, jopan, product_spec, paper_maker
+        `SELECT product_code, material_code, material_name, cut_spec, jopan, product_spec, material_spec, paper_maker
          FROM products WHERE product_code IN (${ph})`
       ).all(..._codes);
       for (const r of rows) _dbByCode[r.product_code] = r;
@@ -923,6 +924,8 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       material_code: pi['원자재코드'] || dbp.material_code || it.material_code || '',
       // 원재료명: 규격 컬럼이 별도로 존재하므로 it.spec fallback 은 의도적 제외 (중복 표시 방지)
       material_name: pi['원재료용지명'] || dbp.material_name || it.material_name || '',
+      // 원재료 규격 (XERP mmInoutItem.ItemSpec by material_code, 예: '1000*740')
+      material_spec: pi['원재료규격'] || dbp.material_spec || '',
       cut_spec: pi['절'] || dbp.cut_spec || it.cut_spec || '',
       ream_qty: reamsStr,
       item_chain: itemChainText,
@@ -981,13 +984,13 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
 
   let tableHeader, tableRows;
   if (isRawMaterial) {
-    // 원재료 발주서: '규격' → '용지 규격' (XERP mmInoutItem.ItemSpec 동기화값, 예: 788*1061)
-    // po_items.spec 에 PO 등록 시 products.spec(=XERP 매칭값) 으로 자동 채워짐 (line ~11275)
+    // 원재료 발주서: 원재료 규격 (XERP mmInoutItem.ItemSpec by material_code, 예: 1000*740)
+    //   이전엔 it.spec (제품 사양) 표시했으나, 사용자 요청으로 원재료의 실제 종이 규격 표시
     tableHeader = `<tr>
       <th style="${thStyle}">제품코드</th>
       <th style="${thStyle}">원재료코드</th>
       <th style="${thStyle}">원재료명</th>
-      <th style="${thStyle}">용지 규격</th>
+      <th style="${thStyle}">원재료 규격</th>
       <th style="${thStyle};color:#c2410c">다음 입고처</th>
       <th style="${thStyle}">발주수량(R)</th>
       <th style="${thStyle}">절</th>
@@ -996,7 +999,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <td style="${tdStyle};font-weight:600">${it.product_code || ''}</td>
       <td style="${tdStyle}">${it.material_code || ''}</td>
       <td style="${tdStyle}">${it.material_name || ''}</td>
-      <td style="${tdStyle}">${it.spec || ''}</td>
+      <td style="${tdStyle}">${it.material_spec || it.spec || ''}</td>
       <td style="${tdStyle};color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
       <td style="${tdStyle};font-weight:700;font-size:15px">${it.ream_qty || '-'}R</td>
       <td style="${tdStyle}">${it.cut_spec || ''}</td>
@@ -1163,7 +1166,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th>제품코드${isChinaVendor ? '<br><span style="font-weight:400;color:#999">产品编号</span>' : ''}</th>
           <th>원재료코드</th>
           <th>원재료명${isChinaVendor ? '<br><span style="font-weight:400;color:#999">材料名称</span>' : ''}</th>
-          <th>용지 규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">纸张规格</span>' : ''}</th>
+          <th>원재료 규격${isChinaVendor ? '<br><span style="font-weight:400;color:#999">纸张规格</span>' : ''}</th>
           <th style="color:#c2410c">다음 입고처${isChinaVendor ? '<br><span style="font-weight:400;color:#999">下一入库处</span>' : ''}</th>
           <th class="right">발주수량(R)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
           <th class="center">절</th>
@@ -1186,7 +1189,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td class="bold">${it.product_code || ''}</td>
               <td>${it.material_code || ''}</td>
               <td>${it.material_name || ''}</td>
-              <td>${it.spec || ''}</td>
+              <td>${it.material_spec || it.spec || ''}</td>
               <td style="color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
               <td class="right bold" style="font-size:14px">${it.ream_qty || '-'}R</td>
               <td class="center">${it.cut_spec || ''}</td>
@@ -1301,14 +1304,14 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     aoa.push([]);
     // 품목 헤더 + 데이터 (이메일 본문 표와 동일 컬럼 구성)
     if (isRawMaterial) {
-      aoa.push(['#', '제품코드', '원재료코드', '원재료명', '용지 규격', '다음 입고처', '발주수량(R)', '절']);
+      aoa.push(['#', '제품코드', '원재료코드', '원재료명', '원재료 규격', '다음 입고처', '발주수량(R)', '절']);
       enrichedItems.forEach((it, i) => {
         aoa.push([
           i + 1,
           it.product_code || '',
           it.material_code || '',
           it.material_name || '',
-          it.spec || '',
+          it.material_spec || it.spec || '',
           it.next_vendor || it.item_chain || '바른손',
           (it.ream_qty != null && it.ream_qty !== '' ? it.ream_qty : '-') + 'R',
           it.cut_spec || ''
@@ -1955,6 +1958,9 @@ try { await db.exec("ALTER TABLE products ADD COLUMN op_category TEXT DEFAULT ''
 try { await db.exec("ALTER TABLE products ADD COLUMN temp_code TEXT DEFAULT ''"); } catch(e) {}
 // 규격 — XERP mmInoutItem.ItemSpec 에서 1회성 동기화됨. 한번 채워지면 수동 수정 전까지 유지.
 try { await db.exec("ALTER TABLE products ADD COLUMN spec TEXT DEFAULT ''"); } catch(e) {}
+// 원재료 규격 (예: 1000*740) — XERP mmInoutItem.ItemSpec WHERE ItemCode=material_code 동기화값
+//   products.spec 은 제품의 spec (예: 210*297) — 다른 개념
+try { await db.exec("ALTER TABLE products ADD COLUMN material_spec TEXT DEFAULT ''"); } catch(e) {}
 // inventory_snapshot 에 창고별 재고 JSON 컬럼 — { "MF01": 100, "MT01": 50, ... }
 // 프론트가 창고 드롭다운으로 즉시 필터링 가능. current_stock 은 전체 합산을 그대로 유지(legacy 호환).
 try { await db.exec("ALTER TABLE inventory_snapshot ADD COLUMN warehouses_json TEXT DEFAULT ''"); } catch(e) {}
@@ -6131,9 +6137,9 @@ async function handleRequest(req, res) {
     try {
       let info;
       // op_category, is_new_product 는 PUT 핸들러에만 있었음. 신규등록 시에도 저장되도록 baseCols 포함.
-      const baseCols = 'product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo, op_category, is_new_product, spec';
+      const baseCols = 'product_code, product_name, brand, origin, category, status, material_code, material_name, unit, cut_spec, jopan, paper_maker, memo, op_category, is_new_product, spec, material_spec';
       const baseVals = [b.product_code, b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', b.is_new_product ? 1 : 0, b.spec||''];
+        b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', b.is_new_product ? 1 : 0, b.spec||'', b.material_spec||''];
       let cols = baseCols, vals = [...baseVals];
       if (_hasEntity.products) { cols += ', legal_entity'; vals.push(entity); }
       if (_hasTempCode) { cols += ', temp_code'; vals.push(b.temp_code||''); }
@@ -6161,9 +6167,9 @@ async function handleRequest(req, res) {
     // temp_code 컬럼 존재 여부 런타임 체크
     let _hasTempCodeU = false;
     try { await db.prepare('SELECT temp_code FROM products LIMIT 1').get(); _hasTempCodeU = true; } catch(_){}
-    let setCols = 'product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?, is_new_product=?, spec=?';
+    let setCols = 'product_name=?, brand=?, origin=?, category=?, status=?, material_code=?, material_name=?, unit=?, cut_spec=?, jopan=?, paper_maker=?, memo=?, op_category=?, is_new_product=?, spec=?, material_spec=?';
     let setVals = [b.product_name||'', b.brand||'', b.origin||'한국', b.category||'', b.status||'active',
-      b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', b.is_new_product ? 1 : 0, b.spec||''];
+      b.material_code||'', b.material_name||'', b.unit||'EA', b.cut_spec||'', b.jopan||'', b.paper_maker||'', b.memo||'', b.op_category||'', b.is_new_product ? 1 : 0, b.spec||'', b.material_spec||''];
     if (_hasEntity.products) { setCols += ', legal_entity=?'; setVals.push(entity); }
     if (_hasTempCodeU) { setCols += ', temp_code=?'; setVals.push(b.temp_code||''); }
     // 매입관리 필드: lead_time_days, moq, payment_terms, supplier_id
@@ -8659,6 +8665,67 @@ async function handleRequest(req, res) {
           }
         } catch (specErr) {
           console.warn('[sync bg] 규격 동기화 예외:', specErr.message);
+        }
+
+        // ── 원재료 규격 동기화 (products.material_spec) ──
+        // products.material_code 기준으로 XERP mmInoutItem.ItemSpec 가져옴.
+        // 같은 패턴 (1회성 채움 — 이미 있으면 skip).
+        // 예: BP1259 (원재료코드) → ItemSpec '1000*740'
+        let matSpecSyncedCount = 0;
+        try {
+          const needMatSpec = await db.prepare(`SELECT DISTINCT material_code FROM products
+            WHERE material_code IS NOT NULL AND material_code <> ''
+              AND (material_spec IS NULL OR material_spec = '')
+              AND status IN ('active','inactive')`).all();
+          const validMatCodes = (needMatSpec || []).map(r => (r.material_code || '').replace(/[\s ​‌‍﻿]/g, '').trim()).filter(c => /^[A-Za-z0-9_\-]+$/.test(c));
+          if (validMatCodes.length > 0 && xerpPool) {
+            const matSpecMap = {};
+            const validMatSet = new Set(validMatCodes.map(c => c.toUpperCase()));
+            const t0matSpec = Date.now();
+            const CHUNK = 1000;
+            try {
+              for (let i = 0; i < validMatCodes.length; i += CHUNK) {
+                const chunk = validMatCodes.slice(i, i + CHUNK).map(c => c.toUpperCase());
+                const inClause = chunk.map(c => `'${c}'`).join(',');
+                const reqQ = xerpPool.request();
+                reqQ.timeout = 60000;
+                const r = await reqQ.query(`
+                  SELECT item_code, item_spec FROM (
+                    SELECT RTRIM(ItemCode) AS item_code,
+                           RTRIM(ItemSpec) AS item_spec,
+                           ROW_NUMBER() OVER (PARTITION BY RTRIM(ItemCode) ORDER BY InoutDate DESC, InoutSerNo DESC) AS rn
+                    FROM mmInoutItem WITH (NOLOCK)
+                    WHERE SiteCode = '${XERP_SITE_CODE}' AND RTRIM(ItemCode) IN (${inClause})
+                  ) t
+                  WHERE t.rn = 1 AND t.item_spec <> ''
+                `);
+                for (const row of (r.recordset || [])) {
+                  const c = (row.item_code || '').trim();
+                  const sp = (row.item_spec || '').trim();
+                  if (c && sp && validMatSet.has(c.toUpperCase())) matSpecMap[c] = sp;
+                }
+              }
+              const elapsed = ((Date.now() - t0matSpec) / 1000).toFixed(1);
+              console.log(`[sync bg] 원재료 규격 IN절 쿼리: ${Object.keys(matSpecMap).length}개 매칭 (후보 ${validMatCodes.length}개, ${elapsed}s)`);
+            } catch (e) {
+              console.warn('[sync bg] 원재료 규격 IN절 쿼리 실패:', e.message);
+            }
+            if (Object.keys(matSpecMap).length > 0) {
+              const updMatSpec = db.prepare("UPDATE products SET material_spec = ? WHERE material_code = ? AND (material_spec IS NULL OR material_spec = '')");
+              const applyTx2 = db.transaction(async () => {
+                for (const [mcode, mspec] of Object.entries(matSpecMap)) {
+                  try {
+                    const info = await updMatSpec.run(mspec, mcode);
+                    if (info && info.changes > 0) matSpecSyncedCount += info.changes;
+                  } catch (_) {}
+                }
+              });
+              await applyTx2();
+            }
+            console.log(`[sync bg] 원재료 규격 동기화: ${matSpecSyncedCount}개 row UPDATE (XERP 발견 ${Object.keys(matSpecMap).length}개 material_code)`);
+          }
+        } catch (matSpecErr) {
+          console.warn('[sync bg] 원재료 규격 동기화 예외:', matSpecErr.message);
         }
 
         try {
