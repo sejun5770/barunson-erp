@@ -17847,7 +17847,13 @@ function _poItemRenderList(items, isMat) {
     const rowStyle = isRemoved ? 'opacity:0.35;text-decoration:line-through;' : '';
     const info = productInfo[it.product_code] || {};
     const updatedQty = edits.toUpdate[it.item_id]?.ordered_qty ?? it.ordered_qty ?? 0;
-    const updatedNotes = edits.toUpdate[it.item_id]?.notes ?? it.notes ?? '';
+    // 비고: 사용자 수정값 > po_items.notes > products.memo (품목등록 비고) — 비어있을 때만 fallback
+    //   품목관리에서 입력한 비고가 발주서/품목수정 모달에서 자동 표시되도록 (사용자 요청)
+    //   옛 wizard 가 생성한 자동 메타 문자열 (용지:... / 원재료:...) 도 빈 것으로 취급 → products.memo 표시
+    const _productMemo = info['비고'] || it.product_memo || '';
+    const _rawNotes = edits.toUpdate[it.item_id]?.notes ?? it.notes ?? '';
+    const _isAutoMeta = /^(용지|원재료):/.test(_rawNotes) && /(공정체인|전체체인):/.test(_rawNotes);
+    const updatedNotes = (_rawNotes && !_isAutoMeta) ? _rawNotes : _productMemo;
     const updatedProcess = edits.toUpdate[it.item_id]?.process_type ?? it.process_type ?? it.spec ?? '';
     html += `<tr style="${rowStyle};border-bottom:1px solid #f1f5f9" data-item-id="${it.item_id}">
       <td style="padding:8px;font-weight:600">${esc(it.product_code||'')}</td>

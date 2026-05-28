@@ -10381,9 +10381,17 @@ async function handleRequest(req, res) {
           // 원재료 item 의 다음 입고처 = process_chain[0]?.vendor || '바른손'
           //   사용자 정책: 원재료 → 후공정 step1 업체. 후공정 없으면 '바른손'.
           const _nextV = (Array.isArray(it.process_chain) && it.process_chain[0]?.vendor) || '바른손';
+          // notes: products.memo (품목등록 비고) 를 자동 채움 — 자동생성 메타 문자열은 제거
+          //   이전: '용지:... / 공정체인:...' 자동생성 (redundant, 사용자에게 의미 없음)
+          //   이후: products.memo 직접 저장 — 사용자가 입력한 비고가 발주현황/모달에 보임
+          let _itemMemo = '';
+          try {
+            const _prodMemo = await db.prepare('SELECT memo FROM products WHERE product_code=?').get(it.product_code);
+            _itemMemo = _prodMemo?.memo || '';
+          } catch(_) {}
           await insItem.run(matPoId, it.product_code, it.brand || '', '원재료',
             Number(it.ordered_qty) || 0, it.spec || '',
-            `용지:${it.material_name || ''} / 공정체인:${JSON.stringify(it.process_chain)}`,
+            _itemMemo,
             _nextV);
         }
 
@@ -10443,9 +10451,15 @@ async function handleRequest(req, res) {
             const _nextStepNum = (info.step || 0) + 1;
             const _nextChain = (Array.isArray(it.process_chain) ? it.process_chain : []).find(s => Number(s.step) === _nextStepNum);
             const _nextV = _nextChain?.vendor || '바른손';
+            // notes: products.memo (품목등록 비고) — 원재료 item INSERT 와 동일 정책
+            let _itemMemo = '';
+            try {
+              const _prodMemo = await db.prepare('SELECT memo FROM products WHERE product_code=?').get(it.product_code);
+              _itemMemo = _prodMemo?.memo || '';
+            } catch(_) {}
             await insItem.run(postPoId, it.product_code, it.brand || '', info.process,
               Number(it.ordered_qty) || 0, it.spec || '',
-              `원재료:${it.material_name || ''} / 전체체인:${JSON.stringify(it.process_chain)}`,
+              _itemMemo,
               _nextV);
           }
           await db.prepare("INSERT INTO po_activity_log (po_id, action, actor, details) VALUES (?,?,?,?)")
