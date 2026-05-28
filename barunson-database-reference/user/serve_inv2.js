@@ -640,7 +640,7 @@ const _POST_COL_TO_KR = {
 
 async function reloadProductInfoFromDB() {
   try {
-    const products = await db.prepare("SELECT product_code, material_code, material_name, cut_spec, jopan, paper_maker, product_spec, material_spec, thomson, envelope, seari, laser, cutting, silk FROM products").all();
+    const products = await db.prepare("SELECT product_code, material_code, material_name, cut_spec, jopan, paper_maker, product_spec, material_spec, memo, thomson, envelope, seari, laser, cutting, silk FROM products").all();
     let ppv = [];
     // 봉투가공은 항상 마지막 — step_order 보다 우선
     try { ppv = await db.prepare("SELECT product_code, process_type, vendor_name, step_order FROM product_post_vendor ORDER BY product_code, CASE WHEN process_type='봉투가공' THEN 1 ELSE 0 END, step_order").all(); } catch(_) {}
@@ -694,6 +694,7 @@ async function reloadProductInfoFromDB() {
       if (p.jopan !== null && p.jopan !== undefined && p.jopan !== '') row['조판'] = String(p.jopan);
       if (p.product_spec) row['제품사양'] = p.product_spec;
       if (p.material_spec) row['원재료규격'] = p.material_spec;
+      if (p.memo) row['비고'] = p.memo;
       // 레거시 후공정 키가 남아있으면 제거
       for (const pt of postProcessTypes) { delete row[pt]; }
       out[code] = row;
@@ -856,7 +857,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     try {
       const ph = _codes.map(() => '?').join(',');
       const rows = await db.prepare(
-        `SELECT product_code, material_code, material_name, cut_spec, jopan, product_spec, material_spec, paper_maker
+        `SELECT product_code, material_code, material_name, cut_spec, jopan, product_spec, material_spec, paper_maker, memo
          FROM products WHERE product_code IN (${ph})`
       ).all(..._codes);
       for (const r of rows) _dbByCode[r.product_code] = r;
@@ -930,6 +931,8 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       material_name: pi['원재료용지명'] || dbp.material_name || it.material_name || '',
       // 원재료 규격 (XERP mmInoutItem.ItemSpec by material_code, 예: '1000*740')
       material_spec: pi['원재료규격'] || dbp.material_spec || '',
+      // 품목 비고 (products.memo) — 발주서 메일/엑셀에서 빠른 참조용
+      product_memo: pi['비고'] || dbp.memo || '',
       cut_spec: pi['절'] || dbp.cut_spec || it.cut_spec || '',
       ream_qty: reamsStr,
       item_chain: itemChainText,
@@ -987,6 +990,8 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
   const tdStyle = 'border:1px solid #ddd;padding:8px 8px;font-size:13px;text-align:center;vertical-align:middle;white-space:nowrap';
 
   let tableHeader, tableRows;
+  // 비고 컬럼 노출 여부 — enrichedItems 중 하나라도 product_memo 가 있으면 노출
+  const _showMemo = enrichedItems.some(it => (it.product_memo || '').trim());
   if (isRawMaterial) {
     // 원재료 발주서: 원재료 규격 (XERP mmInoutItem.ItemSpec by material_code, 예: 1000*740)
     //   이전엔 it.spec (제품 사양) 표시했으나, 사용자 요청으로 원재료의 실제 종이 규격 표시
@@ -998,6 +1003,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <th style="${thStyle};color:#c2410c">다음 입고처</th>
       <th style="${thStyle}">발주수량(R)</th>
       <th style="${thStyle}">절</th>
+      ${_showMemo ? `<th style="${thStyle}">비고</th>` : ''}
     </tr>`;
     tableRows = enrichedItems.map(it => `<tr>
       <td style="${tdStyle};font-weight:600">${it.product_code || ''}</td>
@@ -1007,6 +1013,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
       <td style="${tdStyle};color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
       <td style="${tdStyle};font-weight:700;font-size:15px">${it.ream_qty || '-'}R</td>
       <td style="${tdStyle}">${it.cut_spec || ''}</td>
+      ${_showMemo ? `<td style="${tdStyle};font-size:11px;color:#475569">${it.product_memo || ''}</td>` : ''}
     </tr>`).join('');
   } else {
     // 후공정 발주서: 공정별 섹션 분리 — 각 섹션 헤더에 담당자 표시
@@ -1027,6 +1034,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
         <th style="${thStyle}">생산수량(낱개)</th>
         <th style="${thStyle}">규격</th>
         <th style="${thStyle}">입고처</th>
+        ${_showMemo ? `<th style="${thStyle}">비고</th>` : ''}
       </tr>`;
     const postRowHtml = it => `<tr>
           <td style="${tdStyle};font-weight:600">${it.product_code || ''}</td>
@@ -1036,6 +1044,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <td style="${tdStyle};font-weight:700;font-size:15px">${(it.ordered_qty || 0).toLocaleString()}</td>
           <td style="${tdStyle}">${it.spec || ''}</td>
           <td style="${tdStyle};color:#7c2d12;font-weight:600">${it.next_vendor || '바른손'}</td>
+          ${_showMemo ? `<td style="${tdStyle};font-size:11px;color:#475569">${it.product_memo || ''}</td>` : ''}
         </tr>`;
     if (sectionOrder.length <= 1) {
       tableHeader = postHeaderHtml;
@@ -1180,6 +1189,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th style="color:#c2410c">다음 입고처${isChinaVendor ? '<br><span style="font-weight:400;color:#999">下一入库处</span>' : ''}</th>
           <th class="right">발주수량(R)${isChinaVendor ? '<br><span style="font-weight:400;color:#999">订购量</span>' : ''}</th>
           <th class="center">절</th>
+          ${_showMemo ? '<th>비고</th>' : ''}
         </tr>` : `<tr>
           <th style="width:30px">#</th>
           <th>제품코드</th>
@@ -1189,6 +1199,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           <th class="right">생산수량(낱개)</th>
           <th>규격</th>
           <th>입고처</th>
+          ${_showMemo ? '<th>비고</th>' : ''}
         </tr>`}
       </thead>
       <tbody>
@@ -1203,6 +1214,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td style="color:#c2410c;font-weight:600">${it.next_vendor || it.item_chain || '바른손'}</td>
               <td class="right bold" style="font-size:14px">${it.ream_qty || '-'}R</td>
               <td class="center">${it.cut_spec || ''}</td>
+              ${_showMemo ? `<td style="font-size:11px;color:#475569">${it.product_memo || ''}</td>` : ''}
             </tr>`).join('');
           }
           // 후공정: 공정별 섹션 + 담당자 헤더
@@ -1223,6 +1235,7 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
               <td class="right bold" style="font-size:14px">${(it.ordered_qty || 0).toLocaleString()}</td>
               <td>${it.spec || ''}</td>
               <td style="color:#7c2d12;font-weight:600">${it.next_vendor || '바른손'}</td>
+              ${_showMemo ? `<td style="font-size:11px;color:#475569">${it.product_memo || ''}</td>` : ''}
             </tr>`;
           if (procs.length <= 1) {
             return enrichedItems.map((it, idx) => postPdfRow(it, idx + 1)).join('');
@@ -1314,9 +1327,11 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
     aoa.push([]);
     // 품목 헤더 + 데이터 (이메일 본문 표와 동일 컬럼 구성)
     if (isRawMaterial) {
-      aoa.push(['#', '제품코드', '원재료코드', '원재료명', '원재료 규격', '다음 입고처', '발주수량(R)', '절']);
+      const header = ['#', '제품코드', '원재료코드', '원재료명', '원재료 규격', '다음 입고처', '발주수량(R)', '절'];
+      if (_showMemo) header.push('비고');
+      aoa.push(header);
       enrichedItems.forEach((it, i) => {
-        aoa.push([
+        const row = [
           i + 1,
           it.product_code || '',
           it.material_code || '',
@@ -1325,12 +1340,16 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           it.next_vendor || it.item_chain || '바른손',
           (it.ream_qty != null && it.ream_qty !== '' ? it.ream_qty : '-') + 'R',
           it.cut_spec || ''
-        ]);
+        ];
+        if (_showMemo) row.push(it.product_memo || '');
+        aoa.push(row);
       });
     } else {
-      aoa.push(['#', '제품코드', '공정', '원재료코드', '원재료명', '생산수량(낱개)', '규격', '입고처']);
+      const header = ['#', '제품코드', '공정', '원재료코드', '원재료명', '생산수량(낱개)', '규격', '입고처'];
+      if (_showMemo) header.push('비고');
+      aoa.push(header);
       enrichedItems.forEach((it, i) => {
-        aoa.push([
+        const row = [
           i + 1,
           it.product_code || '',
           it.process_type || '',
@@ -1339,7 +1358,9 @@ async function sendPOEmail(po, items, vendorEmail, vendorName, isPostProcess, em
           it.ordered_qty || 0,
           it.spec || '',
           it.next_vendor || '바른손'
-        ]);
+        ];
+        if (_showMemo) row.push(it.product_memo || '');
+        aoa.push(row);
       });
     }
     const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -7273,7 +7294,7 @@ async function handleRequest(req, res) {
           else if (company === 'dd') productFilterParts.push("(product_code LIKE 'DD%' OR origin = 'DD')");
           const productFilter = productFilterParts.join(' AND ');
           const products = await db.prepare(
-            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, spec, material_spec FROM products WHERE ${productFilter}`
+            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, spec, material_spec, memo FROM products WHERE ${productFilter}`
           ).all();
 
           const out = [];
@@ -7297,6 +7318,7 @@ async function handleRequest(req, res) {
               '_원자재코드': p.material_code || '',
               '_원재료용지명': p.material_name || '',
               '_원재료규격': p.material_spec || '',
+              '_비고': p.memo || '',
               '_절': p.cut_spec || '',
               '_조판': p.jopan || '',
               '_원지사': p.paper_maker || '',
@@ -7323,7 +7345,7 @@ async function handleRequest(req, res) {
           if (company === 'barunson') _emptyFilterParts.push("(product_code NOT LIKE 'DD%' AND origin != 'DD')");
           else if (company === 'dd') _emptyFilterParts.push("(product_code LIKE 'DD%' OR origin = 'DD')");
           const _emptyRows = await db.prepare(
-            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, spec, material_spec FROM products WHERE ${_emptyFilterParts.join(' AND ')}`
+            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, spec, material_spec, memo FROM products WHERE ${_emptyFilterParts.join(' AND ')}`
           ).all();
           const _emptyOut = _emptyRows.map(p => {
             const code = (p.product_code || '').replace(/[\s ​‌‍﻿]/g, '').trim();
@@ -7379,7 +7401,7 @@ async function handleRequest(req, res) {
         else if (company === 'dd') productFilterParts.push("(product_code LIKE 'DD%' OR origin = 'DD')");
         const productFilter = productFilterParts.join(' AND ');
         const products = await db.prepare(
-          `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, material_spec FROM products WHERE ${productFilter}`
+          `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, material_spec, memo FROM products WHERE ${productFilter}`
         ).all();
         const out = products.map(p => {
           const code = (p.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
@@ -7778,7 +7800,7 @@ async function handleRequest(req, res) {
           if (company === 'barunson') productFilterParts.push("(product_code NOT LIKE 'DD%' AND origin != 'DD')");
           else if (company === 'dd') productFilterParts.push("(product_code LIKE 'DD%' OR origin = 'DD')");
           const fbRows = await db.prepare(
-            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, material_spec FROM products WHERE ${productFilterParts.join(' AND ')}`
+            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, material_spec, memo FROM products WHERE ${productFilterParts.join(' AND ')}`
           ).all();
           const fbOut = fbRows.map(p => {
             const code = (p.product_code || '').replace(/[\s ​‌‍﻿]/g, '').trim();

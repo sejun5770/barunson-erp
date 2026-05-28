@@ -7831,6 +7831,7 @@ Promise.all([
       '원자재코드': p.material_code || existing['원자재코드'] || '',
       '원재료용지명': p.material_name || existing['원재료용지명'] || '',
       '원재료규격': p.material_spec || existing['원재료규격'] || '',
+      '비고': p.memo || existing['비고'] || '',
       '제지사': p.paper_maker || existing['제지사'] || '',
     };
   });
@@ -9805,6 +9806,7 @@ async function loadXerpInventory(forceRefresh) {
           '원자재코드': existing['원자재코드'] || p['_원자재코드'] || '',
           '원재료용지명': existing['원재료용지명'] || p['_원재료용지명'] || '',
           '원재료규격': existing['원재료규격'] || p['_원재료규격'] || '',
+          '비고': existing['비고'] || p['_비고'] || '',
           '제지사': existing['제지사'] || p['_원지사'] || '',
         };
       });
@@ -17497,13 +17499,18 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
     const totalOrdered=items.reduce((s,it)=>s+(it.ordered_qty||0),0);
     const totalReceived=items.reduce((s,it)=>s+(it.received_qty||0),0);
     const overallPct=totalOrdered>0?Math.round(totalReceived/totalOrdered*100):0;
+    // 비고 컬럼 노출 여부 — 이 카드의 아이템 중 하나라도 products.memo 가 있으면 노출
+    const _poShowMemo = items.some(it => {
+      const info = productInfo[it.product_code] || {};
+      return (info['비고'] || it.product_memo || '').trim();
+    });
 
     let itemsHtml;
     if(items.length){
       const isMat = po.po_type==='원재료';
       const headerCols = isMat
-        ? '<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>원재료 규격</th><th>절</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>'
-        : '<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>원재료 규격</th><th>절</th><th>공정</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>';
+        ? `<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>원재료 규격</th><th>절</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>${_poShowMemo ? '<th>비고</th>' : ''}`
+        : `<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>원재료 규격</th><th>절</th><th>공정</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>${_poShowMemo ? '<th>비고</th>' : ''}`;
       itemsHtml=`<table class="po-items-table" style="width:100%;font-size:12px;border-collapse:collapse">
         <thead><tr>${headerCols}</tr></thead>
         <tbody>${items.map(it=>{
@@ -17515,6 +17522,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
             const matCode=info['원자재코드']||'';
             const matName=info['원재료용지명']||it.spec||'';
             const matSpec=info['원재료규격']||it.material_spec||'';
+            const memoVal=info['비고']||it.product_memo||'';
             const jeol=info['절']||'';
             const reamQty=toR(it.ordered_qty, it.product_code);
             const itemOsVal=it.os_number||'';
@@ -17530,6 +17538,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
               <td id="osCell_${it.item_id}">${renderOSCellHtml(it.item_id, po.po_id, itemOsVal)}</td>
               <td>${recvHtml}</td>
               <td id="nvCell_${it.item_id}" data-item-id="${it.item_id}" data-po-id="${po.po_id}">${renderNextVendorCellHtml(it.item_id, po.po_id, it.next_vendor || '', 'poPostVendorDL_'+po.po_id)}</td>
+              ${_poShowMemo ? `<td style="font-size:11px;color:#475569" title="${esc(memoVal)}">${esc(memoVal)}</td>` : ''}
             </tr>`;
           } else {
             const postReamQty=toR(it.ordered_qty, it.product_code);
@@ -17538,6 +17547,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
             const postMatCode = info['원자재코드']||'';
             const postMatName = info['원재료용지명']||it.spec||'';
             const postMatSpec = info['원재료규격']||it.material_spec||'';
+            const postMemo = info['비고']||it.product_memo||'';
             const postJeol = info['절']||'';
             // 입고처 = 다음 후공정 단계의 업체 (마지막 단계면 자사창고 '바른손')
             // _steps 는 step_order + 봉투가공 마지막 정렬이 적용된 상태로 들어옴
@@ -17558,6 +17568,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
               <td id="osCell_${it.item_id}" title="원재료(부모) PO 의 OS번호 저장 시 자동 입력">${renderOSDisplayHtml(postOsVal)}</td>
               <td>${recvHtml}</td>
               <td id="nvCell_${it.item_id}" data-item-id="${it.item_id}" data-po-id="${po.po_id}">${renderNextVendorCellHtml(it.item_id, po.po_id, it.next_vendor || '', 'poPostVendorDL_'+po.po_id)}</td>
+              ${_poShowMemo ? `<td style="font-size:11px;color:#475569" title="${esc(postMemo)}">${esc(postMemo)}</td>` : ''}
             </tr>`;
           }
         }).join('')}</tbody></table>`;
