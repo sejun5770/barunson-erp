@@ -17494,8 +17494,8 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
     if(items.length){
       const isMat = po.po_type==='원재료';
       const headerCols = isMat
-        ? '<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>절</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>'
-        : '<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>절</th><th>공정</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>';
+        ? '<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>원재료 규격</th><th>절</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>'
+        : '<th>제품코드</th><th>거래처</th><th>원자재코드</th><th>원재료용지명</th><th>원재료 규격</th><th>절</th><th>공정</th><th>수량(R)</th><th>OS번호</th><th>입고현황</th><th>입고처</th>';
       itemsHtml=`<table class="po-items-table" style="width:100%;font-size:12px;border-collapse:collapse">
         <thead><tr>${headerCols}</tr></thead>
         <tbody>${items.map(it=>{
@@ -17506,6 +17506,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
           if(isMat){
             const matCode=info['원자재코드']||'';
             const matName=info['원재료용지명']||it.spec||'';
+            const matSpec=info['원재료규격']||it.material_spec||'';
             const jeol=info['절']||'';
             const reamQty=toR(it.ordered_qty, it.product_code);
             const itemOsVal=it.os_number||'';
@@ -17515,6 +17516,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
               <td id="vendorCell_${po.po_id}_${it.item_id}" data-item-id="${it.item_id}" data-po-id="${po.po_id}" data-datalist-id="poMatVendorDL_${po.po_id}" data-color="#0369a1">${renderVendorCellHtml(it.item_id, po.po_id, po.vendor_name||'', 'poMatVendorDL_'+po.po_id, '#0369a1')}</td>
               <td style="color:#0369a1">${esc(matCode)}</td>
               <td>${esc(matName)}</td>
+              <td style="font-size:11px;color:#475569">${esc(matSpec)}</td>
               <td>${esc(String(jeol))}</td>
               <td style="font-weight:700">${esc(reamQty)}</td>
               <td id="osCell_${it.item_id}">${renderOSCellHtml(it.item_id, po.po_id, itemOsVal)}</td>
@@ -17524,9 +17526,10 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
           } else {
             const postReamQty=toR(it.ordered_qty, it.product_code);
             const postOsVal=it.os_number||'';
-            // 후공정 라인 보강: 원재료처럼 원자재코드/원재료용지명/절 표시
+            // 후공정 라인 보강: 원재료처럼 원자재코드/원재료용지명/원재료 규격/절 표시
             const postMatCode = info['원자재코드']||'';
             const postMatName = info['원재료용지명']||it.spec||'';
+            const postMatSpec = info['원재료규격']||it.material_spec||'';
             const postJeol = info['절']||'';
             // 입고처 = 다음 후공정 단계의 업체 (마지막 단계면 자사창고 '바른손')
             // _steps 는 step_order + 봉투가공 마지막 정렬이 적용된 상태로 들어옴
@@ -17540,6 +17543,7 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
               <td id="vendorCell_${po.po_id}_${it.item_id}" data-item-id="${it.item_id}" data-po-id="${po.po_id}" data-datalist-id="poVendorDL_${po.po_id}" data-color="#7c3aed">${renderVendorCellHtml(it.item_id, po.po_id, po.vendor_name||'', 'poVendorDL_'+po.po_id, '#7c3aed')}</td>
               <td style="color:#0369a1">${esc(postMatCode)}</td>
               <td>${esc(postMatName)}</td>
+              <td style="font-size:11px;color:#475569">${esc(postMatSpec)}</td>
               <td>${esc(String(postJeol))}</td>
               <td id="procCell_${it.item_id}" data-spec-hint="${esc(it.spec||'')}">${renderProcessCellHtml(it.item_id, po.po_id, it.process_type||'', it.spec||'')}</td>
               <td style="font-weight:700">${esc(postReamQty)}</td>
