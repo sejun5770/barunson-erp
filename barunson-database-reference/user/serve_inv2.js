@@ -7231,7 +7231,7 @@ async function handleRequest(req, res) {
           else if (company === 'dd') productFilterParts.push("(product_code LIKE 'DD%' OR origin = 'DD')");
           const productFilter = productFilterParts.join(' AND ');
           const products = await db.prepare(
-            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, spec FROM products WHERE ${productFilter}`
+            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, spec, material_spec FROM products WHERE ${productFilter}`
           ).all();
 
           const out = [];
@@ -7254,6 +7254,7 @@ async function handleRequest(req, res) {
               '_xerpTotal3m': s.total_3m || 0,
               '_원자재코드': p.material_code || '',
               '_원재료용지명': p.material_name || '',
+              '_원재료규격': p.material_spec || '',
               '_절': p.cut_spec || '',
               '_조판': p.jopan || '',
               '_원지사': p.paper_maker || '',
@@ -7280,7 +7281,7 @@ async function handleRequest(req, res) {
           if (company === 'barunson') _emptyFilterParts.push("(product_code NOT LIKE 'DD%' AND origin != 'DD')");
           else if (company === 'dd') _emptyFilterParts.push("(product_code LIKE 'DD%' OR origin = 'DD')");
           const _emptyRows = await db.prepare(
-            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, spec FROM products WHERE ${_emptyFilterParts.join(' AND ')}`
+            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, spec, material_spec FROM products WHERE ${_emptyFilterParts.join(' AND ')}`
           ).all();
           const _emptyOut = _emptyRows.map(p => {
             const code = (p.product_code || '').replace(/[\s ​‌‍﻿]/g, '').trim();
@@ -7289,7 +7290,7 @@ async function handleRequest(req, res) {
               '제품코드': code, '품목명': p.product_name || '', '브랜드': p.brand || '',
               '생산지': p.origin || '', '현재고': 0, '가용재고': 0, '요청량': 0,
               '_xerpMonthly': 0, '_xerpDaily': 0, '_xerpTotal3m': 0,
-              '_원자재코드': p.material_code || '', '_원재료용지명': p.material_name || '',
+              '_원자재코드': p.material_code || '', '_원재료용지명': p.material_name || '', '_원재료규격': p.material_spec || '',
               '_절': p.cut_spec || '', '_조판': p.jopan || '', '_원지사': p.paper_maker || '',
               '_후공정업체': p.post_vendor || '', '_규격': p.spec || '', '_warehouses': {},
               'legal_entity': isDD ? 'dd' : 'barunson',
@@ -7336,7 +7337,7 @@ async function handleRequest(req, res) {
         else if (company === 'dd') productFilterParts.push("(product_code LIKE 'DD%' OR origin = 'DD')");
         const productFilter = productFilterParts.join(' AND ');
         const products = await db.prepare(
-          `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products WHERE ${productFilter}`
+          `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, material_spec FROM products WHERE ${productFilter}`
         ).all();
         const out = products.map(p => {
           const code = (p.product_code || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
@@ -7735,7 +7736,7 @@ async function handleRequest(req, res) {
           if (company === 'barunson') productFilterParts.push("(product_code NOT LIKE 'DD%' AND origin != 'DD')");
           else if (company === 'dd') productFilterParts.push("(product_code LIKE 'DD%' OR origin = 'DD')");
           const fbRows = await db.prepare(
-            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor FROM products WHERE ${productFilterParts.join(' AND ')}`
+            `SELECT product_code, product_name, brand, origin, material_code, material_name, cut_spec, jopan, paper_maker, post_vendor, material_spec FROM products WHERE ${productFilterParts.join(' AND ')}`
           ).all();
           const fbOut = fbRows.map(p => {
             const code = (p.product_code || '').replace(/[\s ​‌‍﻿]/g, '').trim();
@@ -7744,7 +7745,7 @@ async function handleRequest(req, res) {
               '제품코드': code, '품목명': p.product_name || '', '브랜드': p.brand || '',
               '생산지': p.origin || '', '현재고': 0, '가용재고': 0, '요청량': 0,
               '_xerpMonthly': 0, '_xerpDaily': 0, '_xerpTotal3m': 0,
-              '_원자재코드': p.material_code || '', '_원재료용지명': p.material_name || '',
+              '_원자재코드': p.material_code || '', '_원재료용지명': p.material_name || '', '_원재료규격': p.material_spec || '',
               '_절': p.cut_spec || '', '_조판': p.jopan || '', '_원지사': p.paper_maker || '',
               '_후공정업체': p.post_vendor || '',
               'legal_entity': isDD ? 'dd' : 'barunson',

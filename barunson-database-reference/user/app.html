@@ -7824,6 +7824,7 @@ Promise.all([
       '조판': p.jopan || existing['조판'] || '',
       '원자재코드': p.material_code || existing['원자재코드'] || '',
       '원재료용지명': p.material_name || existing['원재료용지명'] || '',
+      '원재료규격': p.material_spec || existing['원재료규격'] || '',
       '제지사': p.paper_maker || existing['제지사'] || '',
     };
   });
@@ -9797,6 +9798,7 @@ async function loadXerpInventory(forceRefresh) {
           '조판': existing['조판'] || p['_조판'] || '',
           '원자재코드': existing['원자재코드'] || p['_원자재코드'] || '',
           '원재료용지명': existing['원재료용지명'] || p['_원재료용지명'] || '',
+          '원재료규격': existing['원재료규격'] || p['_원재료규격'] || '',
           '제지사': existing['제지사'] || p['_원지사'] || '',
         };
       });
