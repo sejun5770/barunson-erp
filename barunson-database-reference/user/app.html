@@ -17446,22 +17446,21 @@ function renderPOSubCard(po, idx, steps, icon, setOpts) {
     const _setId    = setOpts && setOpts.setId;
     const typeClass=po.po_type==='원재료'?'sb-safe':po.po_type==='후공정'?'sb-danger':'sb-nosale';
 
-    // 액션 버튼
+    // 액션 버튼 — 발주확인 (메일 X) + 메일발송 (메일 O) 분리 정책
+    //   사용자가 입고처/내용 확인 후 명시적으로 메일발송 버튼 클릭하여 발송
     let actions='';
     if(po.status==='대기'){
-      if(po.po_type==='후공정'){
-        actions+=`<button class="btn btn-sm" style="background:#fefce8;color:#92400e;border:1px solid #fde68a" onclick="event.stopPropagation();changePOStatus(${idx},'발송')">✅ 발주체크</button> `;
-        actions+=`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();changePOStatus(${idx},'발송',true)">📧 메일보내기</button> `;
-      } else {
-        actions+=`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();changePOStatus(${idx},'발송')">📧 발주확인</button> `;
-      }
+      // 발주확인: 상태만 변경 (메일 미발송)
+      actions+=`<button class="btn btn-sm" style="background:#fefce8;color:#92400e;border:1px solid #fde68a" onclick="event.stopPropagation();changePOStatus(${idx},'발송')" title="상태만 '발송' 으로 변경 — 메일은 따로 발송">✅ 발주확인</button> `;
+      // 메일발송: 상태 변경 + 메일 즉시 발송
+      actions+=`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();changePOStatus(${idx},'발송',true)" title="업체에 발주서 메일 즉시 발송">📧 메일발송</button> `;
     } else if(po.status==='발송'){
+      // 발송 상태에서도 메일 발송 가능 — 발주확인만 한 PO 의 후속 메일 발송
+      actions+=`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();changePOStatus(${idx},'발송',true)" title="업체에 발주서 메일 발송">📧 메일발송</button> `;
+      // 이미 메일 발송된 PO 의 재발송 (제목/본문에 '재발송' 표시)
+      actions+=`<button class="btn btn-sm" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd" onclick="event.stopPropagation();resendPOEmail(${po.po_id},this)" title="이미 보낸 메일 재발송 (제목에 [재발송] 표시)">🔁 재발송</button> `;
       if(po.po_type==='후공정'){
-        actions+=`<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();changePOStatus(${idx},'발송',true)">📧 메일보내기</button> `;
-        actions+=`<span style="font-size:11px;color:#92400e;margin-right:8px">발주체크됨 · 원재료 출고 시 자동발송</span>`;
-      } else {
-        actions+=`<button class="btn btn-sm" style="background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd" onclick="event.stopPropagation();resendPOEmail(${po.po_id},this)">📧 재발송</button> `;
-        actions+=`<span style="font-size:11px;color:var(--text-muted);margin-right:8px">업체 확인 대기중</span>`;
+        actions+=`<span style="font-size:11px;color:#92400e;margin-right:8px">원재료 출고 시 자동 메일 발송도 가능</span>`;
       }
     } else if(po.status==='확인'){
       actions+=`<span style="font-size:11px;color:var(--text-muted);margin-right:8px">업체 발송 대기중</span>`;
@@ -18122,13 +18121,12 @@ async function inlineAddPostItem(poId) {
 function changePOStatus(idx,newStatus,forceEmail){
   const po=poList[idx];
   const isPost = po.po_type==='후공정';
+  // 확인 메시지 — 발주확인 (메일 X) vs 메일발송 (메일 O) 명확히 구분
   let msg=`${po.po_number}을(를) "${newStatus}" 상태로 변경하시겠습니까?`;
-  if(newStatus==='발송' && !isPost){
-    msg=`${po.po_number} (${po.vendor_name||''})에 발주확인 이메일을 보내시겠습니까?\n업체에게 발주서와 포털 링크가 포함된 이메일이 발송됩니다.`;
-  } else if(newStatus==='발송' && isPost && !forceEmail){
-    msg=`${po.po_number} (${po.vendor_name||''}) 발주 체크하시겠습니까?\n후공정은 원재료 출고 시 자동 발송됩니다.\n(수동 발송은 [📧 메일보내기] 버튼 사용)`;
-  } else if(forceEmail){
-    msg=`${po.po_number} (${po.vendor_name||''})에 이메일을 발송하시겠습니까?`;
+  if(newStatus==='발송' && forceEmail){
+    msg=`${po.po_number} (${po.vendor_name||''})에 발주서 이메일을 발송하시겠습니까?\n\n업체에게 즉시 발송됩니다 — 발주 내용에 오기가 없는지 한번 더 확인하셨나요?`;
+  } else if(newStatus==='발송' && !forceEmail){
+    msg=`${po.po_number} (${po.vendor_name||''}) 발주확인 처리하시겠습니까?\n\n• 상태가 "발송" 으로 변경됩니다\n• 이메일은 발송되지 않습니다 (별도 [📧 메일발송] 버튼 필요)`;
   }
   if(!confirm(msg))return;
 
@@ -18146,11 +18144,12 @@ function changePOStatus(idx,newStatus,forceEmail){
       if(newStatus==='발송'){
         const email = d.data ? d.data.email : (d.email || null);
         if(email && email.skipped){
-          alert('✅ 발주 체크 완료!\n후공정 이메일은 원재료 업체 출고 시 자동 발송됩니다.');
+          // 발주확인만 (메일 미발송)
+          alert('✅ 발주확인 완료!\n상태가 "발송" 으로 변경됐습니다.\n\n→ 메일은 별도 [📧 메일발송] 버튼으로 발송하세요.');
         } else if(email && email.ok){
           alert('✅ 이메일 발송 완료!\n수신: '+email.to+(email.method==='smtp'?' (SMTP)':' (Apps Script)'));
         } else if(email && !email.ok){
-          alert('⚠️ 상태는 변경되었으나 이메일 발송 실패!\n\n원인: '+(email.error||'알 수 없음')+'\n\n발주현황에서 [📧 재발송] 버튼으로 다시 시도하세요.');
+          alert('⚠️ 상태는 변경되었으나 이메일 발송 실패!\n\n원인: '+(email.error||'알 수 없음')+'\n\n발주현황에서 [🔁 재발송] 버튼으로 다시 시도하세요.');
         } else {
           alert('✅ 상태 변경 완료\n(업체 이메일 미등록 — 이메일 미발송)');
         }

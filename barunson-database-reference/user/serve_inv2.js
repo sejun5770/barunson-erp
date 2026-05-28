@@ -13900,19 +13900,24 @@ async function handleRequest(req, res) {
         console.log('Google Sheet 발송 동기화:', sheetResult);
       }
 
-      // 업체 이메일 발송 (후공정은 수동 발송 전까지 이메일 안 보냄 — 원재료 출고 시 자동 발송)
+      // 업체 이메일 발송 — forceEmail (body.force_email=true) 명시 시에만 발송
+      //   사용자 정책 (사용자 요청): 발주확인과 메일발송 버튼 분리
+      //     [✅ 발주확인]: status='발송' 으로만 변경 (메일 미발송)
+      //     [📧 메일발송]: status='발송' + 즉시 메일 발송 (force_email=true)
+      //   후공정도 동일 정책 — wizard 자동 발송 정책 (사용자가 발주현황에서 입고처 확인 후 수동 발송)
       if (po) {
         const vendor = await db.prepare('SELECT * FROM vendors WHERE name = ?').get(po.vendor_name);
         const isPost = vendor ? vendor.type === '후공정' : (po.po_type === '후공정');
-        const forceEmail = body.force_email === true; // 수동 메일보내기
-        if (vendor && vendor.email && (!isPost || forceEmail)) {
+        const forceEmail = body.force_email === true; // 수동 메일보내기 — 명시적 트리거 필요
+        if (vendor && vendor.email && forceEmail) {
           emailResult = await sendPOEmail(po, items, vendor.email, vendor.name, isPost, vendor.email_cc);
-          console.log(`발주확인 이메일 발송: ${po.po_number} → ${vendor.name} (${vendor.email})`, emailResult);
-        } else if (isPost && !forceEmail) {
-          console.log(`후공정 PO ${po.po_number}: 이메일 보류 (원재료 출고 시 자동 발송)`);
-          emailResult = { ok: true, skipped: true, reason: '후공정 — 원재료 출고 시 자동 발송' };
+          console.log(`발주 메일 발송 (수동): ${po.po_number} → ${vendor.name} (${vendor.email})`, emailResult);
+        } else if (!forceEmail) {
+          // 발주확인만 (메일 미발송) — 사용자가 발주현황에서 [📧 메일발송] 버튼으로 별도 발송
+          emailResult = { ok: true, skipped: true, reason: '발주확인만 (메일 미발송 — [📧 메일발송] 별도 클릭 필요)' };
+          console.log(`발주확인 (메일 미발송): ${po.po_number} — 사용자가 메일발송 버튼으로 별도 트리거`);
         } else {
-          console.warn(`발주확인: 업체 이메일 없음 (${po.vendor_name})`);
+          console.warn(`메일발송: 업체 이메일 없음 (${po.vendor_name})`);
         }
       }
 
