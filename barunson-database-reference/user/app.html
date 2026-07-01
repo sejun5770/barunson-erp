@@ -29576,58 +29576,94 @@ function closeInv2ReceiveModal() {
 // ═════════════════════════════════════════════════════════════════
 // 📊 재고 sync (Google Sheets) — 설정 모달 + 실행
 // ═════════════════════════════════════════════════════════════════
-const _INV_SYNC_APPS_SCRIPT_CODE = `// ERP 재고 → Google Sheets 자동 sync (barunson-erp 연동)
-// 시트의 '현재고' 헤더 열 자동 감지 + E열 품목코드 매칭 → 재고값 UPDATE
-
+const _INV_SYNC_APPS_SCRIPT_CODE = `// ═══════════════════════════════════════════════════════════════
+// [ERP 재고 sync] barunson-erp → 상품별 출고량 매출 시트 '현재고' 업데이트
+//
+// ★ 사용법: 이 함수를 기존 Code.gs (v21) 하단에 붙여넣기 → 웹앱 배포
+//   - 기존 v21 헬퍼 (getFgColumnLayout, findColumnByHeaderText, normalizeCode) 재사용
+//   - v21 상수 (FG_SHEET_NAME, FG_DATA_START_ROW, FG_HEADER_CANDIDATES) 그대로 사용
+//
+// ★ 시트 준비 (1회):
+//   - 상품별 출고량 매출 시트의 헤더 행(상태/품목코드/재고코드가 있는 행) 어딘가에
+//     '현재고' 셀을 추가 (예: 재고코드 옆 컬럼) — 재고값이 이 컬럼에 자동 입력됩니다
+//
+// ★ ERP → sheet POST body:
+//   { action: 'update_inventory', updated_at, rows: [{ product_code, current_stock }, ...] }
+// ═══════════════════════════════════════════════════════════════
 function doPost(e) {
   try {
-    const data = JSON.parse(e.postData.contents);
+    if (!e || !e.postData) return _erpResp({ ok: false, error: 'no postData' });
+    var data = JSON.parse(e.postData.contents);
     if (data.action !== 'update_inventory') {
-      return _resp({ ok: false, error: 'unknown action: ' + data.action });
-    }
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    // 시트명 지정 (필요 시 변경)
-    const sheet = ss.getSheetByName('상품별 출고량 매출') || ss.getActiveSheet();
-    const values = sheet.getDataRange().getValues();
-
-    // '현재고' 헤더 위치 찾기 (여러 행 스캔)
-    let headerRow = -1, stockCol = -1;
-    for (let r = 0; r < Math.min(values.length, 10); r++) {
-      for (let c = 0; c < values[r].length; c++) {
-        const cell = (values[r][c] || '').toString().trim();
-        if (cell === '현재고') { headerRow = r; stockCol = c; break; }
-      }
-      if (headerRow >= 0) break;
-    }
-    if (headerRow < 0) return _resp({ ok: false, error: "'현재고' 헤더 셀 찾을 수 없음" });
-
-    // E열 (index=4) 품목코드 기준 매칭
-    const codeCol = 4;
-    const stockMap = {};
-    for (const row of (data.rows || [])) {
-      const code = (row.product_code || '').toString().toUpperCase().trim();
-      if (code) stockMap[code] = row.current_stock;
+      return _erpResp({ ok: false, error: 'unknown action: ' + data.action });
     }
 
-    let updated = 0;
-    const now = new Date();
-    for (let r = headerRow + 1; r < values.length; r++) {
-      const code = (values[r][codeCol] || '').toString().toUpperCase().trim();
+    var bSS = SpreadsheetApp.getActiveSpreadsheet();
+    var fgSheet = bSS.getSheetByName(FG_SHEET_NAME);
+    if (!fgSheet) return _erpResp({ ok: false, error: '"' + FG_SHEET_NAME + '" 시트 없음' });
+
+    // v21 헬퍼 재사용 — 헤더 행 자동 탐색 (상태/품목코드/재고코드 매칭)
+    var layout = getFgColumnLayout(fgSheet);
+    if (!layout.ok) {
+      return _erpResp({ ok: false, error: '헤더 행 탐색 실패: ' + (layout.missing || []).join(', ') });
+    }
+
+    // 헤더 행에서 '현재고' 컬럼 찾기
+    var stockCol = findColumnByHeaderText(fgSheet, layout.headerRow, ['현재고']);
+    if (stockCol < 0) {
+      return _erpResp({ ok: false, error: layout.headerRow + '행에서 "현재고" 컬럼 셀을 찾을 수 없음. 시트에 헤더 추가 필요.' });
+    }
+
+    // product_code → current_stock 맵 (대문자 정규화)
+    var stockMap = {};
+    var rows = data.rows || [];
+    for (var i = 0; i < rows.length; i++) {
+      var code = normalizeCode(rows[i].product_code).toUpperCase();
+      if (code) stockMap[code] = rows[i].current_stock;
+    }
+
+    var lastRow = fgSheet.getLastRow();
+    if (lastRow < FG_DATA_START_ROW) {
+      return _erpResp({ ok: true, updated: 0, note: '데이터 행 없음' });
+    }
+
+    // 품목코드 컬럼 읽기 → stockMap 매칭 → 현재고 컬럼에 UPDATE
+    var codeValues = fgSheet.getRange(FG_DATA_START_ROW, layout.codeCol, lastRow - FG_DATA_START_ROW + 1, 1).getValues();
+    var existingStock = fgSheet.getRange(FG_DATA_START_ROW, stockCol, lastRow - FG_DATA_START_ROW + 1, 1).getValues();
+    var out = [];
+    var updated = 0, skipped = 0;
+    for (var i = 0; i < codeValues.length; i++) {
+      var code = normalizeCode(codeValues[i][0]).toUpperCase();
       if (code && stockMap.hasOwnProperty(code)) {
-        sheet.getRange(r + 1, stockCol + 1).setValue(stockMap[code]);
+        out.push([stockMap[code]]);
         updated++;
+      } else {
+        out.push([existingStock[i][0]]);  // 매칭 안 되면 기존값 그대로 유지
+        if (code) skipped++;
       }
     }
-    // 상단 어딘가에 갱신 시각 기록 (선택)
-    // sheet.getRange(1, 1).setNote('마지막 sync: ' + now.toLocaleString());
+    fgSheet.getRange(FG_DATA_START_ROW, stockCol, out.length, 1).setValues(out);
 
-    return _resp({ ok: true, updated, header_row: headerRow + 1, stock_col: stockCol + 1 });
+    Logger.log('[ERP 재고sync] ' + updated + '건 업데이트 (매칭 없음 ' + skipped + '건)');
+
+    return _erpResp({
+      ok: true,
+      updated: updated,
+      skipped: skipped,
+      header_row: layout.headerRow,
+      code_col: layout.codeCol,
+      stock_col: stockCol,
+      updated_at: data.updated_at
+    });
   } catch (err) {
-    return _resp({ ok: false, error: err.message + '\\\\n' + (err.stack || '').slice(0, 300) });
+    Logger.log('[ERP 재고sync] ERROR: ' + err.message);
+    return _erpResp({ ok: false, error: err.message + ' | stack: ' + (err.stack || '').slice(0, 200) });
   }
 }
-function _resp(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+
+function _erpResp(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }`;
 
 let _invSyncCurrentId = null;
