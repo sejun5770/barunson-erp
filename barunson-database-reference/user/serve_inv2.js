@@ -23944,12 +23944,68 @@ async function runDeadlineAlertCheck() {
 
 // ── 재고 sync — 외부 스프레드시트 (Google Sheets Apps Script webapp) 로 재고 전송 ──
 // Apps Script 가 시트에서 '현재고' 헤더 자동 감지 + E열 품목코드 매칭 → 재고값 업데이트.
+// Google Apps Script webapp 은 POST → 301/302 → GET (script.googleusercontent.com) 흐름.
+// 기존 syncToGoogleSheet 와 동일 패턴: 재귀 redirect follow (최대 5회) + POST→GET 전환.
+function _postToAppsScript(scriptUrl, payload) {
+  return new Promise((resolve) => {
+    let bodyBuf;
+    try { bodyBuf = Buffer.from(JSON.stringify(payload), 'utf8'); }
+    catch (e) { resolve({ ok: false, error: 'payload 직렬화 실패: ' + e.message }); return; }
+    let parsedUrl;
+    try { parsedUrl = new URL(scriptUrl); }
+    catch (e) { resolve({ ok: false, error: 'URL 형식 오류: ' + e.message }); return; }
+
+    function doReq(urlObj, redirectCount, method) {
+      if (redirectCount > 5) { resolve({ ok: false, error: 'redirect 5회 초과 — URL 확인 필요' }); return; }
+      const isPOST = method === 'POST';
+      const options = {
+        hostname: urlObj.hostname,
+        path: (urlObj.pathname || '') + (urlObj.search || ''),
+        port: urlObj.port || 443,
+        method,
+        headers: {}
+      };
+      if (isPOST) {
+        options.headers['Content-Type'] = 'application/json; charset=utf-8';
+        options.headers['Content-Length'] = bodyBuf.length;
+      }
+      const req = https.request(options, resp => {
+        if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+          // POST → 301/302 → GET (표준 HTTP redirect 동작, Google Apps Script 방식)
+          try {
+            const nextUrl = new URL(resp.headers.location, urlObj.href);
+            doReq(nextUrl, redirectCount + 1, 'GET');
+          } catch (e) {
+            resolve({ ok: false, error: 'redirect URL 파싱 실패: ' + e.message + ' (location: ' + resp.headers.location.slice(0,150) + ')' });
+          }
+          resp.resume();
+          return;
+        }
+        let data = '';
+        resp.on('data', c => data += c);
+        resp.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) {
+            // JSON 파싱 실패 — HTML 응답 (에러 페이지) 인 경우 등
+            const snippet = data.slice(0, 300).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+            resolve({ ok: false, error: `응답 파싱 실패 (HTTP ${resp.statusCode}): ${snippet}` });
+          }
+        });
+      });
+      req.on('error', e => resolve({ ok: false, error: '요청 실패: ' + e.message }));
+      req.setTimeout(60000, () => { req.destroy(new Error('요청 timeout 60s')); resolve({ ok: false, error: '요청 timeout 60s' }); });
+      if (isPOST) req.write(bodyBuf);
+      req.end();
+    }
+    doReq(parsedUrl, 0, 'POST');
+  });
+}
+
 async function runInventorySync() {
   console.log(`[재고sync] ${new Date().toLocaleString('ko-KR')} 실행 시작`);
   const configs = await db.prepare("SELECT * FROM inventory_sync_config WHERE enabled=1 AND apps_script_url IS NOT NULL AND apps_script_url <> ''").all();
   if (!configs.length) { console.log('[재고sync] 활성 설정 없음'); return; }
 
-  // 재고 데이터 로드 (전체 품목의 current_stock)
   let rows = [];
   try {
     rows = await db.prepare(`
@@ -23957,64 +24013,30 @@ async function runInventorySync() {
       FROM inventory_snapshot
       WHERE product_code IS NOT NULL AND product_code <> '' AND current_stock IS NOT NULL
     `).all();
-  } catch (e) {
-    console.error('[재고sync] inventory_snapshot 조회 실패:', e.message); return;
-  }
+  } catch (e) { console.error('[재고sync] inventory_snapshot 조회 실패:', e.message); return; }
+
   const payload = {
     action: 'update_inventory',
     updated_at: new Date().toISOString(),
     rows: rows.map(r => ({ product_code: (r.product_code||'').trim().toUpperCase(), current_stock: Number(r.current_stock) || 0 }))
   };
 
-  const https = require('https');
-  const url = require('url');
   for (const cfg of configs) {
     try {
-      const u = url.parse(cfg.apps_script_url);
-      const postData = JSON.stringify(payload);
-      const opts = {
-        hostname: u.hostname, path: u.path, port: u.port || 443, method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
-      };
-      const respBody = await new Promise((resolve, reject) => {
-        const req = https.request(opts, res => {
-          let body = '';
-          res.on('data', c => body += c);
-          res.on('end', () => resolve({ statusCode: res.statusCode, body, headers: res.headers }));
-        });
-        req.on('error', reject);
-        req.setTimeout(60000, () => { req.destroy(new Error('timeout 60s')); });
-        req.write(postData); req.end();
-      });
-      // Apps Script 는 redirect (302) 를 반환할 수 있음 — 최종 응답까지 follow
-      let final = respBody;
-      if (respBody.statusCode >= 300 && respBody.statusCode < 400 && respBody.headers?.location) {
-        const u2 = url.parse(respBody.headers.location);
-        final = await new Promise((resolve, reject) => {
-          const opts2 = { hostname: u2.hostname, path: u2.path, port: u2.port || 443, method: 'GET' };
-          const req2 = https.request(opts2, res => {
-            let body = ''; res.on('data', c => body += c); res.on('end', () => resolve({ statusCode: res.statusCode, body }));
-          });
-          req2.on('error', reject);
-          req2.setTimeout(60000, () => { req2.destroy(new Error('redirect timeout')); });
-          req2.end();
-        });
-      }
-      let parsed = {};
-      try { parsed = JSON.parse(final.body); } catch(_) {}
-      const okResp = parsed.ok === true;
-      const updatedCount = Number(parsed.updated) || 0;
-      const errMsg = parsed.error || (okResp ? '' : `HTTP ${final.statusCode}: ${final.body.slice(0,200)}`);
+      const result = await _postToAppsScript(cfg.apps_script_url, payload);
+      const okResp = result.ok === true;
+      const updatedCount = Number(result.updated) || 0;
+      const errMsg = okResp ? '' : (result.error || 'unknown');
       await db.prepare(`UPDATE inventory_sync_config SET
         last_sync_at=datetime('now','localtime'),
         last_sync_status=?, last_sync_count=?, last_sync_error=?
         WHERE id=?`).run(okResp ? 'success' : 'failed', updatedCount, errMsg.slice(0, 500), cfg.id);
-      console.log(`[재고sync] '${cfg.name}': ${okResp ? '성공' : '실패'} (${updatedCount}건 업데이트) ${errMsg}`);
+      console.log(`[재고sync] '${cfg.name}': ${okResp ? '성공' : '실패'} (${updatedCount}건) ${errMsg.slice(0,100)}`);
     } catch (e) {
       await db.prepare(`UPDATE inventory_sync_config SET
         last_sync_at=datetime('now','localtime'),
         last_sync_status='failed', last_sync_error=? WHERE id=?`).run(e.message.slice(0, 500), cfg.id);
-      console.error(`[재고sync] '${cfg.name}' 실패:`, e.message);
+      console.error(`[재고sync] '${cfg.name}' 예외:`, e.message);
     }
   }
 }
