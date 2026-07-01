@@ -1834,6 +1834,25 @@ try {
   console.error('[init] ★  GRANT SELECT,INSERT,UPDATE,DELETE ON inventory_snapshot TO <PG_USER>;');
 }
 
+// 재고 sync 설정 — 외부 스프레드시트 (Google Sheets Apps Script webapp) 로 매일 재고 전송
+try {
+  await db.exec(`CREATE TABLE IF NOT EXISTS inventory_sync_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT DEFAULT '기본',
+    apps_script_url TEXT NOT NULL DEFAULT '',
+    spreadsheet_id TEXT DEFAULT '',
+    sheet_name TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 1,
+    last_sync_at TEXT DEFAULT '',
+    last_sync_status TEXT DEFAULT '',
+    last_sync_count INTEGER DEFAULT 0,
+    last_sync_error TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  console.log('[init] inventory_sync_config 테이블 OK');
+} catch(e) { console.warn('[init] inventory_sync_config 생성 오류:', e.message); }
+
 try {
   await db.exec(`CREATE TABLE IF NOT EXISTS sync_log (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -9814,6 +9833,65 @@ async function handleRequest(req, res) {
     } catch(e) {
       fail(res, 500, '출고일 체크 실패: ' + e.message);
     }
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  재고 sync (Google Sheets 자동 전송) 설정 + 실행
+  // ════════════════════════════════════════════════════════════════════
+  // GET /api/inventory-sync/config — 활성 설정 목록 (첫 행만 사용해도 됨)
+  if (pathname === '/api/inventory-sync/config' && method === 'GET') {
+    try {
+      const rows = await db.prepare('SELECT * FROM inventory_sync_config ORDER BY id DESC').all();
+      ok(res, rows);
+    } catch(e) { fail(res, 500, '조회 실패: ' + e.message); }
+    return;
+  }
+
+  // PUT /api/inventory-sync/config — upsert (id 없으면 신규, 있으면 UPDATE)
+  if (pathname === '/api/inventory-sync/config' && method === 'PUT') {
+    const body = await readJSON(req);
+    const nm = String(body.name || '기본').trim();
+    const url_ = String(body.apps_script_url || '').trim();
+    const ssid = String(body.spreadsheet_id || '').trim();
+    const sname = String(body.sheet_name || '').trim();
+    const en = body.enabled === false || body.enabled === 0 ? 0 : 1;
+    if (!url_) { fail(res, 400, 'apps_script_url 필수'); return; }
+    try {
+      if (body.id) {
+        await db.prepare(`UPDATE inventory_sync_config SET
+          name=?, apps_script_url=?, spreadsheet_id=?, sheet_name=?, enabled=?,
+          updated_at=datetime('now','localtime') WHERE id=?`).run(nm, url_, ssid, sname, en, body.id);
+        ok(res, { id: body.id, updated: true });
+      } else {
+        const info = await db.prepare(`INSERT INTO inventory_sync_config
+          (name, apps_script_url, spreadsheet_id, sheet_name, enabled)
+          VALUES (?,?,?,?,?)`).run(nm, url_, ssid, sname, en);
+        ok(res, { id: info.lastInsertRowid, created: true });
+      }
+    } catch(e) { fail(res, 500, '저장 실패: ' + e.message); }
+    return;
+  }
+
+  // POST /api/inventory-sync/run — 수동 즉시 실행 (모든 활성 설정)
+  if (pathname === '/api/inventory-sync/run' && method === 'POST') {
+    try {
+      await runInventorySync();
+      const rows = await db.prepare(`SELECT id, name, last_sync_status, last_sync_count, last_sync_error, last_sync_at
+        FROM inventory_sync_config WHERE enabled=1`).all();
+      ok(res, { success: true, results: rows });
+    } catch(e) { fail(res, 500, '실행 실패: ' + e.message); }
+    return;
+  }
+
+  // DELETE /api/inventory-sync/config/:id
+  const _syncCfgDel = pathname.match(/^\/api\/inventory-sync\/config\/(\d+)$/);
+  if (_syncCfgDel && method === 'DELETE') {
+    const id = parseInt(_syncCfgDel[1]);
+    try {
+      await db.prepare('DELETE FROM inventory_sync_config WHERE id=?').run(id);
+      ok(res, { deleted: id });
+    } catch(e) { fail(res, 500, '삭제 실패: ' + e.message); }
     return;
   }
 
@@ -23864,6 +23942,83 @@ async function runDeadlineAlertCheck() {
   }
 }
 
+// ── 재고 sync — 외부 스프레드시트 (Google Sheets Apps Script webapp) 로 재고 전송 ──
+// Apps Script 가 시트에서 '현재고' 헤더 자동 감지 + E열 품목코드 매칭 → 재고값 업데이트.
+async function runInventorySync() {
+  console.log(`[재고sync] ${new Date().toLocaleString('ko-KR')} 실행 시작`);
+  const configs = await db.prepare("SELECT * FROM inventory_sync_config WHERE enabled=1 AND apps_script_url IS NOT NULL AND apps_script_url <> ''").all();
+  if (!configs.length) { console.log('[재고sync] 활성 설정 없음'); return; }
+
+  // 재고 데이터 로드 (전체 품목의 current_stock)
+  let rows = [];
+  try {
+    rows = await db.prepare(`
+      SELECT product_code, current_stock, synced_at
+      FROM inventory_snapshot
+      WHERE product_code IS NOT NULL AND product_code <> '' AND current_stock IS NOT NULL
+    `).all();
+  } catch (e) {
+    console.error('[재고sync] inventory_snapshot 조회 실패:', e.message); return;
+  }
+  const payload = {
+    action: 'update_inventory',
+    updated_at: new Date().toISOString(),
+    rows: rows.map(r => ({ product_code: (r.product_code||'').trim().toUpperCase(), current_stock: Number(r.current_stock) || 0 }))
+  };
+
+  const https = require('https');
+  const url = require('url');
+  for (const cfg of configs) {
+    try {
+      const u = url.parse(cfg.apps_script_url);
+      const postData = JSON.stringify(payload);
+      const opts = {
+        hostname: u.hostname, path: u.path, port: u.port || 443, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+      };
+      const respBody = await new Promise((resolve, reject) => {
+        const req = https.request(opts, res => {
+          let body = '';
+          res.on('data', c => body += c);
+          res.on('end', () => resolve({ statusCode: res.statusCode, body, headers: res.headers }));
+        });
+        req.on('error', reject);
+        req.setTimeout(60000, () => { req.destroy(new Error('timeout 60s')); });
+        req.write(postData); req.end();
+      });
+      // Apps Script 는 redirect (302) 를 반환할 수 있음 — 최종 응답까지 follow
+      let final = respBody;
+      if (respBody.statusCode >= 300 && respBody.statusCode < 400 && respBody.headers?.location) {
+        const u2 = url.parse(respBody.headers.location);
+        final = await new Promise((resolve, reject) => {
+          const opts2 = { hostname: u2.hostname, path: u2.path, port: u2.port || 443, method: 'GET' };
+          const req2 = https.request(opts2, res => {
+            let body = ''; res.on('data', c => body += c); res.on('end', () => resolve({ statusCode: res.statusCode, body }));
+          });
+          req2.on('error', reject);
+          req2.setTimeout(60000, () => { req2.destroy(new Error('redirect timeout')); });
+          req2.end();
+        });
+      }
+      let parsed = {};
+      try { parsed = JSON.parse(final.body); } catch(_) {}
+      const okResp = parsed.ok === true;
+      const updatedCount = Number(parsed.updated) || 0;
+      const errMsg = parsed.error || (okResp ? '' : `HTTP ${final.statusCode}: ${final.body.slice(0,200)}`);
+      await db.prepare(`UPDATE inventory_sync_config SET
+        last_sync_at=datetime('now','localtime'),
+        last_sync_status=?, last_sync_count=?, last_sync_error=?
+        WHERE id=?`).run(okResp ? 'success' : 'failed', updatedCount, errMsg.slice(0, 500), cfg.id);
+      console.log(`[재고sync] '${cfg.name}': ${okResp ? '성공' : '실패'} (${updatedCount}건 업데이트) ${errMsg}`);
+    } catch (e) {
+      await db.prepare(`UPDATE inventory_sync_config SET
+        last_sync_at=datetime('now','localtime'),
+        last_sync_status='failed', last_sync_error=? WHERE id=?`).run(e.message.slice(0, 500), cfg.id);
+      console.error(`[재고sync] '${cfg.name}' 실패:`, e.message);
+    }
+  }
+}
+
 // 자동발주 스케줄러: 매일 9시 실행
 async function _safeRunAutoOrder() {
   try {
@@ -23874,6 +24029,8 @@ async function _safeRunAutoOrder() {
   }
   try { await runShipmentEmailCheck(); } catch(e) { logger.error('[출고 이메일 체크 실패]', e.message); }
   try { await runDeadlineAlertCheck(); } catch(e) { logger.error('[납기 알림 체크 실패]', e.message); }
+  // 재고 sync — 자동발주와 함께 매일 09:00 실행
+  try { await runInventorySync(); } catch(e) { logger.error('[재고sync 실패]', e.message); }
   // 자동발주 실행 완료 후 Slack 요약 전송 (약 1분 여유)
   setTimeout(() => { runDailyPOSummary().catch(e => logger.error('[일일 발주 요약 실패]', e.message)); }, 60 * 1000);
 }

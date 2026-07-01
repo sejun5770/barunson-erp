@@ -2275,6 +2275,7 @@ function closeMegaMenu() { /* no-op */ }
           <div id="erpStatusDetail" style="font-size:11px;color:var(--text-muted);margin-top:1px">데이터를 불러오는 중입니다...</div>
         </div>
       </div>
+      <button class="btn btn-sm" onclick="openInvSyncModal()" style="font-size:11px;margin-right:6px;background:#f0fdf4;color:#166534;border:1px solid #86efac" title="Google Sheets 로 재고 자동 sync 설정">📊 시트 sync</button>
       <button class="btn btn-sm" onclick="syncAllDB()" style="font-size:11px" id="erpRefreshBtn" title="XERP 실시간 쿼리 (nginx 타임아웃 우회, 백그라운드)">새로고침</button>
     </div>
 
@@ -2485,6 +2486,65 @@ function closeMegaMenu() { /* no-op */ }
     </div>
     <div id="diagResult" style="font-size:12px;min-height:200px;color:#334155">
       <div style="text-align:center;padding:40px;color:#94a3b8">제품코드와 월을 입력 후 [진단 실행]</div>
+    </div>
+  </div>
+</div>
+
+<!-- 📊 재고 sync 설정 모달 (Google Sheets 자동 sync) -->
+<div id="invSyncModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1200;align-items:center;justify-content:center" onclick="if(event.target===this)closeInvSyncModal()">
+  <div style="background:#fff;border-radius:12px;padding:24px;max-width:720px;width:92%;max-height:88vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding-bottom:12px;border-bottom:2px solid #e5e7eb">
+      <div>
+        <div style="font-size:16px;font-weight:700;color:#166534">📊 재고 → Google Sheets 자동 sync</div>
+        <div style="font-size:11px;color:#6b7280;margin-top:2px">매일 오전 9시 자동 실행 · 현재고 값을 지정 시트로 전송</div>
+      </div>
+      <button onclick="closeInvSyncModal()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#64748b">×</button>
+    </div>
+
+    <div style="display:grid;gap:10px;margin-bottom:16px">
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#374151;display:block;margin-bottom:4px">설정 이름</label>
+        <input type="text" id="invSyncName" placeholder="예: 매출 대시보드" style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:5px;font-size:13px">
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#374151;display:block;margin-bottom:4px">Apps Script 웹앱 URL <span style="color:#dc2626">*</span></label>
+        <input type="text" id="invSyncUrl" placeholder="https://script.google.com/macros/s/.../exec" style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;font-family:monospace">
+        <div style="font-size:10px;color:#6b7280;margin-top:2px">시트에서 확장 프로그램 → Apps Script → 배포한 웹앱 URL</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#374151;display:block;margin-bottom:4px">스프레드시트 ID (선택, 참고용)</label>
+          <input type="text" id="invSyncSpreadsheetId" placeholder="1FfNjjdWjrLJz0..." style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;font-family:monospace">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:600;color:#374151;display:block;margin-bottom:4px">시트명 (탭, 선택)</label>
+          <input type="text" id="invSyncSheetName" placeholder="상품별 출고량 매출" style="width:100%;padding:6px 10px;border:1px solid #d1d5db;border-radius:5px;font-size:13px">
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#166534;font-weight:600;cursor:pointer">
+        <input type="checkbox" id="invSyncEnabled" checked style="width:16px;height:16px;cursor:pointer">
+        활성화 (체크 해제 시 자동 sync 중지)
+      </label>
+    </div>
+
+    <div id="invSyncLastResult" style="display:none;margin-bottom:12px;padding:10px 14px;border-radius:6px;font-size:12px"></div>
+
+    <div style="display:flex;gap:8px;margin-bottom:16px">
+      <button onclick="saveInvSyncConfig()" class="btn btn-primary btn-sm" style="padding:8px 16px">💾 저장</button>
+      <button onclick="runInvSyncNow()" class="btn btn-sm" style="padding:8px 16px;background:#f0fdf4;color:#166534;border:1px solid #86efac">▶ 지금 실행 (테스트)</button>
+      <button onclick="closeInvSyncModal()" class="btn btn-sm" style="padding:8px 16px">닫기</button>
+    </div>
+
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;font-size:11px;line-height:1.6">
+      <div style="font-weight:700;color:#0369a1;margin-bottom:8px">📖 Apps Script 설정 방법 (1회)</div>
+      <ol style="margin:0;padding-left:18px;color:#334155">
+        <li>구글 시트 열기 → <b>확장 프로그램 → Apps Script</b></li>
+        <li>기본 코드 삭제 후 아래 코드 복사 붙여넣기 <button onclick="copyAppsScriptCode()" style="margin-left:6px;padding:2px 8px;background:#0369a1;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px">📋 코드 복사</button></li>
+        <li>💾 저장 (Ctrl+S) → 스크립트 이름 지정 (예: '재고sync')</li>
+        <li><b>배포 → 새 배포</b> → 유형: <b>웹 앱</b> → 액세스 권한: <b>나 (자신)</b>, 실행 대상: <b>모든 사용자</b></li>
+        <li>배포 완료 → <b>웹 앱 URL</b> 복사 → 위 URL 필드에 붙여넣기 → 저장</li>
+      </ol>
+      <pre id="invSyncAppsScriptCode" style="margin-top:10px;padding:10px;background:#0f172a;color:#e2e8f0;border-radius:6px;font-size:10px;overflow:auto;max-height:220px;font-family:'Consolas',monospace"></pre>
     </div>
   </div>
 </div>
@@ -29511,6 +29571,181 @@ function openInv2ReceiveModal(poId) {
 function closeInv2ReceiveModal() {
   document.getElementById('inv2ReceiveModal').style.display = 'none';
   _inv2RecvPoId = null;
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 📊 재고 sync (Google Sheets) — 설정 모달 + 실행
+// ═════════════════════════════════════════════════════════════════
+const _INV_SYNC_APPS_SCRIPT_CODE = `// ERP 재고 → Google Sheets 자동 sync (barunson-erp 연동)
+// 시트의 '현재고' 헤더 열 자동 감지 + E열 품목코드 매칭 → 재고값 UPDATE
+
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    if (data.action !== 'update_inventory') {
+      return _resp({ ok: false, error: 'unknown action: ' + data.action });
+    }
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    // 시트명 지정 (필요 시 변경)
+    const sheet = ss.getSheetByName('상품별 출고량 매출') || ss.getActiveSheet();
+    const values = sheet.getDataRange().getValues();
+
+    // '현재고' 헤더 위치 찾기 (여러 행 스캔)
+    let headerRow = -1, stockCol = -1;
+    for (let r = 0; r < Math.min(values.length, 10); r++) {
+      for (let c = 0; c < values[r].length; c++) {
+        const cell = (values[r][c] || '').toString().trim();
+        if (cell === '현재고') { headerRow = r; stockCol = c; break; }
+      }
+      if (headerRow >= 0) break;
+    }
+    if (headerRow < 0) return _resp({ ok: false, error: "'현재고' 헤더 셀 찾을 수 없음" });
+
+    // E열 (index=4) 품목코드 기준 매칭
+    const codeCol = 4;
+    const stockMap = {};
+    for (const row of (data.rows || [])) {
+      const code = (row.product_code || '').toString().toUpperCase().trim();
+      if (code) stockMap[code] = row.current_stock;
+    }
+
+    let updated = 0;
+    const now = new Date();
+    for (let r = headerRow + 1; r < values.length; r++) {
+      const code = (values[r][codeCol] || '').toString().toUpperCase().trim();
+      if (code && stockMap.hasOwnProperty(code)) {
+        sheet.getRange(r + 1, stockCol + 1).setValue(stockMap[code]);
+        updated++;
+      }
+    }
+    // 상단 어딘가에 갱신 시각 기록 (선택)
+    // sheet.getRange(1, 1).setNote('마지막 sync: ' + now.toLocaleString());
+
+    return _resp({ ok: true, updated, header_row: headerRow + 1, stock_col: stockCol + 1 });
+  } catch (err) {
+    return _resp({ ok: false, error: err.message + '\\\\n' + (err.stack || '').slice(0, 300) });
+  }
+}
+function _resp(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}`;
+
+let _invSyncCurrentId = null;
+
+async function openInvSyncModal() {
+  document.getElementById('invSyncAppsScriptCode').textContent = _INV_SYNC_APPS_SCRIPT_CODE;
+  document.getElementById('invSyncModal').style.display = 'flex';
+  // 기존 설정 로드 (첫 행만 사용)
+  try {
+    const resp = await fetch('/api/inventory-sync/config', { credentials: 'include' });
+    const j = await resp.json();
+    const rows = (j.data && Array.isArray(j.data)) ? j.data : (Array.isArray(j) ? j : []);
+    if (rows.length) {
+      const cfg = rows[0];
+      _invSyncCurrentId = cfg.id;
+      document.getElementById('invSyncName').value = cfg.name || '';
+      document.getElementById('invSyncUrl').value = cfg.apps_script_url || '';
+      document.getElementById('invSyncSpreadsheetId').value = cfg.spreadsheet_id || '';
+      document.getElementById('invSyncSheetName').value = cfg.sheet_name || '';
+      document.getElementById('invSyncEnabled').checked = !!cfg.enabled;
+      // 마지막 sync 결과 표시
+      if (cfg.last_sync_at) {
+        const box = document.getElementById('invSyncLastResult');
+        const ok = cfg.last_sync_status === 'success';
+        box.style.display = 'block';
+        box.style.background = ok ? '#f0fdf4' : '#fef2f2';
+        box.style.border = ok ? '1px solid #86efac' : '1px solid #fecaca';
+        box.style.color = ok ? '#166534' : '#991b1b';
+        box.innerHTML = `<b>마지막 sync</b>: ${esc(cfg.last_sync_at)} — ${ok ? `✅ 성공 (${cfg.last_sync_count}건 업데이트)` : `❌ 실패: ${esc(cfg.last_sync_error||'')}`}`;
+      }
+    } else {
+      _invSyncCurrentId = null;
+      // 기본값 세팅 (사용자가 알려준 정보)
+      document.getElementById('invSyncName').value = '상품별 출고량 매출';
+      document.getElementById('invSyncSpreadsheetId').value = '1FfNjjdWjrLJz0bmYjjJYmlc3xW_Z7dgsML9LcWh53ZQ';
+      document.getElementById('invSyncSheetName').value = '상품별 출고량 매출';
+      document.getElementById('invSyncEnabled').checked = true;
+    }
+  } catch(e) { console.warn('sync config 로드 실패:', e); }
+}
+
+function closeInvSyncModal() {
+  document.getElementById('invSyncModal').style.display = 'none';
+}
+
+async function saveInvSyncConfig() {
+  const body = {
+    id: _invSyncCurrentId,
+    name: document.getElementById('invSyncName').value.trim() || '기본',
+    apps_script_url: document.getElementById('invSyncUrl').value.trim(),
+    spreadsheet_id: document.getElementById('invSyncSpreadsheetId').value.trim(),
+    sheet_name: document.getElementById('invSyncSheetName').value.trim(),
+    enabled: document.getElementById('invSyncEnabled').checked ? 1 : 0,
+  };
+  if (!body.apps_script_url) { alert('Apps Script 웹앱 URL 을 입력하세요.'); return; }
+  try {
+    const resp = await fetch('/api/inventory-sync/config', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), credentials: 'include',
+    });
+    const j = await resp.json();
+    if (j.ok !== false && !j.error) {
+      const newId = j.data?.id || j.id;
+      if (newId) _invSyncCurrentId = newId;
+      alert('✅ 설정 저장 완료\n\n매일 오전 9시에 자동 sync 실행됩니다.');
+    } else {
+      alert('저장 실패: ' + (j.error || ''));
+    }
+  } catch(e) { alert('오류: ' + e.message); }
+}
+
+async function runInvSyncNow() {
+  if (!confirm('지금 즉시 sync 를 실행하시겠습니까?\n(설정된 URL 로 재고 데이터를 전송합니다)')) return;
+  const box = document.getElementById('invSyncLastResult');
+  box.style.display = 'block';
+  box.style.background = '#fef3c7';
+  box.style.border = '1px solid #fde68a';
+  box.style.color = '#92400e';
+  box.textContent = '⏳ 실행 중...';
+  try {
+    const resp = await fetch('/api/inventory-sync/run', { method: 'POST', credentials: 'include' });
+    const j = await resp.json();
+    const results = j.data?.results || j.results || [];
+    if (results.length) {
+      const first = results[0];
+      const ok = first.last_sync_status === 'success';
+      box.style.background = ok ? '#f0fdf4' : '#fef2f2';
+      box.style.border = ok ? '1px solid #86efac' : '1px solid #fecaca';
+      box.style.color = ok ? '#166534' : '#991b1b';
+      box.innerHTML = ok
+        ? `✅ <b>Sync 성공</b> — ${first.last_sync_count}건 시트에 업데이트됨 (${esc(first.last_sync_at||'')})`
+        : `❌ <b>Sync 실패</b> — ${esc(first.last_sync_error||'')}`;
+    } else {
+      box.style.background = '#fef3c7';
+      box.innerHTML = '⚠ 활성 설정이 없어 실행되지 않았습니다. 저장 후 다시 시도하세요.';
+    }
+  } catch(e) {
+    box.style.background = '#fef2f2';
+    box.style.color = '#991b1b';
+    box.textContent = '❌ 오류: ' + e.message;
+  }
+}
+
+function copyAppsScriptCode() {
+  navigator.clipboard.writeText(_INV_SYNC_APPS_SCRIPT_CODE).then(() => {
+    alert('✅ Apps Script 코드가 클립보드에 복사되었습니다.\n\n구글 시트의 Apps Script 편집기에 붙여넣으세요.');
+  }).catch(() => {
+    // Fallback: 코드 영역 선택 안내
+    alert('클립보드 접근 불가 — 아래 코드 영역에서 수동으로 복사하세요.');
+    const pre = document.getElementById('invSyncAppsScriptCode');
+    if (pre) {
+      const range = document.createRange();
+      range.selectNodeContents(pre);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  });
 }
 
 async function submitInv2Receive() {
